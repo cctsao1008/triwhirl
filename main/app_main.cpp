@@ -4,12 +4,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <limits>
 
 #include "driver/i2c_master.h"
 #include "driver/uart.h"
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 
 #include "triwhirl/attitude_estimator.hpp"
@@ -43,12 +45,14 @@ constexpr float kDefaultCalibrationElectricalHz = 0.5F;
 constexpr float kDefaultCalibrationTurns = 4.0F;
 constexpr std::uint32_t kCalibrationAlignUs = 500000U;
 constexpr std::uint32_t kCalibrationSettleUs = 400000U;
+constexpr std::uint32_t kControlPeriodUs = 1000U;
 constexpr std::uint32_t kEncoderSamplePeriodUs = 1000U;
 constexpr std::uint32_t kEncoderHealthPeriodUs = 100000U;
 constexpr std::uint32_t kImuSamplePeriodUs = 1000U;
 constexpr std::uint32_t kDefaultGyroCalibrationSamples = 500U;
 constexpr std::uint32_t kTelemetryPeriodUs = 20000U;
 constexpr std::uint32_t kPwmFrequencyHz = 25000U;
+constexpr std::size_t kConsoleTxBufferBytes = 8192U;
 
 enum class MotorMode {
   kStopped,
@@ -88,6 +92,17 @@ struct ImuPlanarMap {
   int accel_sin_sign = 1;
   int accel_cos_sign = 1;
   int gyro_sign = 1;
+};
+
+struct ControlTimingStats {
+  std::uint64_t iterations = 0U;
+  std::uint64_t overruns = 0U;
+  std::uint64_t late_periods = 0U;
+  std::uint32_t last_exec_us = 0U;
+  std::uint32_t max_exec_us = 0U;
+  std::uint32_t min_period_us = std::numeric_limits<std::uint32_t>::max();
+  std::uint32_t max_period_us = 0U;
+  std::int64_t previous_start_us = 0;
 };
 
 As5600 encoder;
@@ -131,14 +146,32 @@ std::uint32_t last_encoder_health_us = 0U;
 std::uint32_t last_imu_sample_us = 0U;
 std::uint32_t last_telemetry_us = 0U;
 
+ControlTimingStats timing_stats{};
+StreamBufferHandle_t console_tx_stream = nullptr;
+std::uint32_t console_tx_dropped_bytes = 0U;
+
 char command_line[128]{};
 std::size_t command_length = 0U;
+
+void consoleWriteBytes(const char* data, const std::size_t length) {
+  if (data == nullptr || length == 0U) {
+    return;
+  }
+  if (console_tx_stream == nullptr) {
+    uart_write_bytes(UART_NUM_0, data, length);
+    return;
+  }
+  const std::size_t sent = xStreamBufferSend(console_tx_stream, data, length, 0);
+  if (sent < length) {
+    console_tx_dropped_bytes += static_cast<std::uint32_t>(length - sent);
+  }
+}
 
 void consoleWrite(const char* text) {
   if (text == nullptr) {
     return;
   }
-  uart_write_bytes(UART_NUM_0, text, std::strlen(text));
+  consoleWriteBytes(text, std::strlen(text));
 }
 
 void consolePrintf(const char* format, ...) {
@@ -153,7 +186,18 @@ void consolePrintf(const char* format, ...) {
   const std::size_t count = static_cast<std::size_t>(length) < sizeof(buffer)
                                 ? static_cast<std::size_t>(length)
                                 : sizeof(buffer) - 1U;
-  uart_write_bytes(UART_NUM_0, buffer, count);
+  consoleWriteBytes(buffer, count);
+}
+
+void consoleTxTask(void*) {
+  std::uint8_t buffer[256];
+  while (true) {
+    const std::size_t received = xStreamBufferReceive(
+        console_tx_stream, buffer, sizeof(buffer), portMAX_DELAY);
+    if (received > 0U) {
+      uart_write_bytes(UART_NUM_0, buffer, received);
+    }
+  }
 }
 
 const char* motorModeName(const MotorMode mode) {
@@ -497,6 +541,27 @@ void updateMotor(const std::uint32_t now_us) {
   }
 }
 
+void printTimingStatus() {
+  const std::uint32_t min_period =
+      timing_stats.iterations > 1U ? timing_stats.min_period_us : 0U;
+  consolePrintf(
+      "timing,target_us=%lu,iterations=%llu,last_exec_us=%lu,max_exec_us=%lu,min_period_us=%lu,max_period_us=%lu,overruns=%llu,late_periods=%llu,tx_drop_bytes=%lu\r\n",
+      static_cast<unsigned long>(kControlPeriodUs),
+      static_cast<unsigned long long>(timing_stats.iterations),
+      static_cast<unsigned long>(timing_stats.last_exec_us),
+      static_cast<unsigned long>(timing_stats.max_exec_us),
+      static_cast<unsigned long>(min_period),
+      static_cast<unsigned long>(timing_stats.max_period_us),
+      static_cast<unsigned long long>(timing_stats.overruns),
+      static_cast<unsigned long long>(timing_stats.late_periods),
+      static_cast<unsigned long>(console_tx_dropped_bytes));
+}
+
+void resetTimingStats() {
+  timing_stats = {};
+  console_tx_dropped_bytes = 0U;
+}
+
 void printHelp() {
   consoleWrite("commands:\r\n");
   consoleWrite("  motor calibrate [amplitude_v] [electrical_hz] [turns]\r\n");
@@ -509,6 +574,8 @@ void printHelp() {
   consoleWrite("  imu map <sin_axis> <cos_axis> <gyro_axis> <sin_sign> <cos_sign> <gyro_sign>\r\n");
   consoleWrite("  attitude status\r\n");
   consoleWrite("  attitude reset [angle_rad]\r\n");
+  consoleWrite("  timing status\r\n");
+  consoleWrite("  timing reset\r\n");
   consoleWrite("  field <electrical_hz> <amplitude_v>\r\n");
   consoleWrite("  stop\r\n");
   consoleWrite("  status\r\n");
@@ -760,6 +827,20 @@ void handleAttitudeCommand() {
   consoleWrite("ERR usage: attitude <status|reset [angle_rad]>\r\n");
 }
 
+void handleTimingCommand() {
+  char* action = std::strtok(nullptr, " \t");
+  if (action == nullptr || std::strcmp(action, "status") == 0) {
+    printTimingStatus();
+    return;
+  }
+  if (std::strcmp(action, "reset") == 0) {
+    resetTimingStats();
+    consoleWrite("OK timing reset\r\n");
+    return;
+  }
+  consoleWrite("ERR usage: timing <status|reset>\r\n");
+}
+
 void handleCommand(char* line) {
   char* command = std::strtok(line, " \t");
   if (command == nullptr) {
@@ -778,6 +859,11 @@ void handleCommand(char* line) {
 
   if (std::strcmp(command, "attitude") == 0) {
     handleAttitudeCommand();
+    return;
+  }
+
+  if (std::strcmp(command, "timing") == 0) {
+    handleTimingCommand();
     return;
   }
 
@@ -880,7 +966,7 @@ void pollConsole() {
 
     if (command_length + 1U < sizeof(command_line)) {
       command_line[command_length++] = c;
-      uart_write_bytes(UART_NUM_0, &c, 1U);
+      consoleWriteBytes(&c, 1U);
     } else {
       command_length = 0U;
       consoleWrite("\r\nERR command too long\r\n");
@@ -896,7 +982,7 @@ void emitTelemetry(const std::uint32_t now_us) {
   }
   last_telemetry_us = now_us;
   consolePrintf(
-      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%lu,%d,%.6f,%.6f,%.6f\r\n",
+      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%lu,%d,%.6f,%.6f,%.6f,%lu,%lu,%llu\r\n",
       static_cast<unsigned long>(now_us), motorModeName(motor_mode),
       vq_command_v, electrical_angle_rad, open_loop_hz,
       encoder_status_valid ? 1 : 0, encoder_sample_valid ? 1 : 0,
@@ -911,7 +997,55 @@ void emitTelemetry(const std::uint32_t now_us) {
       correctedGyro(0), correctedGyro(1), correctedGyro(2),
       static_cast<unsigned long>(imu_read_errors), attitude_state.valid ? 1 : 0,
       attitude_state.angle_rad, attitude_state.rate_rad_s,
-      attitude_state.accel_weight);
+      attitude_state.accel_weight,
+      static_cast<unsigned long>(timing_stats.last_exec_us),
+      static_cast<unsigned long>(timing_stats.max_exec_us),
+      static_cast<unsigned long long>(timing_stats.overruns));
+}
+
+void updateTimingStats(const std::int64_t start_us, const std::int64_t end_us) {
+  const std::uint32_t exec_us = end_us > start_us
+                                    ? static_cast<std::uint32_t>(end_us - start_us)
+                                    : 0U;
+  timing_stats.last_exec_us = exec_us;
+  if (exec_us > timing_stats.max_exec_us) {
+    timing_stats.max_exec_us = exec_us;
+  }
+  if (exec_us > kControlPeriodUs) {
+    ++timing_stats.overruns;
+  }
+
+  if (timing_stats.previous_start_us != 0 && start_us > timing_stats.previous_start_us) {
+    const std::uint32_t period_us =
+        static_cast<std::uint32_t>(start_us - timing_stats.previous_start_us);
+    if (period_us < timing_stats.min_period_us) {
+      timing_stats.min_period_us = period_us;
+    }
+    if (period_us > timing_stats.max_period_us) {
+      timing_stats.max_period_us = period_us;
+    }
+    if (period_us > kControlPeriodUs + 250U) {
+      ++timing_stats.late_periods;
+    }
+  }
+  timing_stats.previous_start_us = start_us;
+  ++timing_stats.iterations;
+}
+
+void controlTask(void*) {
+  TickType_t last_wake = xTaskGetTickCount();
+  while (true) {
+    const std::int64_t start_us = esp_timer_get_time();
+    const std::uint32_t loop_us = static_cast<std::uint32_t>(start_us);
+    updateEncoder(loop_us);
+    updateImu(loop_us);
+    updateMotor(loop_us);
+    pollConsole();
+    emitTelemetry(loop_us);
+    const std::int64_t end_us = esp_timer_get_time();
+    updateTimingStats(start_us, end_us);
+    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1));
+  }
 }
 
 bool initConsole() {
@@ -962,6 +1096,15 @@ extern "C" void app_main(void) {
     return;
   }
 
+  console_tx_stream = xStreamBufferCreate(kConsoleTxBufferBytes, 1U);
+  if (console_tx_stream == nullptr) {
+    return;
+  }
+  if (xTaskCreatePinnedToCore(consoleTxTask, "triwhirl_uart_tx", 4096, nullptr,
+                              2, nullptr, 0) != pdPASS) {
+    return;
+  }
+
   i2c_master_bus_handle_t encoder_bus = nullptr;
   if (!initEncoderBus(&encoder_bus) ||
       !encoder.init(encoder_bus, triwhirl::board::kAs5600I2cAddress)) {
@@ -998,20 +1141,18 @@ extern "C" void app_main(void) {
   last_imu_sample_us = now_us;
   last_telemetry_us = now_us;
 
-  consoleWrite("TriWhirl motor + IMU + attitude runtime ready\r\n");
+  consoleWrite("TriWhirl deterministic motor + IMU + attitude runtime ready\r\n");
   consoleWrite("telemetry is off by default; use 'telemetry on' when streaming is needed\r\n");
-  consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors,imu_ok,ax,ay,az,gx,gy,gz,imu_read_errors,attitude_ok,theta_rad,theta_rate_rad_s,accel_weight\r\n");
+  consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors,imu_ok,ax,ay,az,gx,gy,gz,imu_read_errors,attitude_ok,theta_rad,theta_rate_rad_s,accel_weight,loop_exec_us,loop_max_exec_us,loop_overruns\r\n");
   printStatus();
   printHelp();
   printPrompt();
 
-  while (true) {
-    const std::uint32_t loop_us = static_cast<std::uint32_t>(esp_timer_get_time());
-    updateEncoder(loop_us);
-    updateImu(loop_us);
-    updateMotor(loop_us);
-    pollConsole();
-    emitTelemetry(loop_us);
-    vTaskDelay(1);
+  if (xTaskCreatePinnedToCore(controlTask, "triwhirl_control", 8192, nullptr,
+                              configMAX_PRIORITIES - 2, nullptr, 1) != pdPASS) {
+    consoleWrite("FATAL control task creation failed\r\n");
+    return;
   }
+
+  vTaskDelete(nullptr);
 }
