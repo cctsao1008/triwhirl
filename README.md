@@ -1,72 +1,15 @@
 # TriWhirl
 
-Robust control research platform for an ESP32-based reaction-wheel Reuleaux triangle.
+Robust control of a reaction-wheel Reuleaux triangle on ESP32.
 
-## Repository layout
+TriWhirl contains the embedded control software and supporting engineering tools for the platform. Real-time control runs on the ESP32, while identification, modeling, simulation, and controller synthesis are kept on the development host.
 
-TriWhirl is a single-target ESP32 firmware project with PC-side engineering tools. The repository follows the conventional PlatformIO project layout instead of adding an extra MCU-specific directory level.
+## Documentation
 
-```text
-src/             ESP32 application and hardware/runtime integration
-include/         project headers
-lib/             reusable platform-independent C++ components
-test/            native and embedded tests
-tools/           PC-side logging, calibration, identification, modeling, synthesis, simulation
-docs/            architecture, hardware, control, and experiment documentation
-```
-
-See `docs/architecture.md` for placement and dependency rules.
-
-## Current focus: motor-first bring-up
-
-The first executable milestone is the reaction-wheel actuator path:
-
-```text
-ESP32 3-PWM -> EG2133 -> MOSFET bridge -> 2204 BLDC
-                                      ^
-                                      |
-                                AS5600 angle
-```
-
-The initial firmware deliberately avoids assuming the motor pole-pair count. Instead it can generate a low-voltage rotating **electrical** field while logging AS5600 mechanical angle/velocity. The measured electrical/mechanical frequency ratio can then be used to determine pole pairs before sensor-based FOC is enabled.
-
-This bring-up mode is not closed-loop FOC and is not the final controller.
-
-## Toolchain
-
-- PlatformIO Core
-- pinned pioarduino `platform-espressif32` release `55.03.311`
-- Arduino-ESP32 `3.3.11`
-- ESP-IDF libraries `5.5.5`
-- SimpleFOC `2.4.0`
-- ESP32 / ESP-WROOM-32 target
-
-The pioarduino platform is used because SimpleFOC 2.4.0's ESP32 backend requires ESP-IDF 5.x / Arduino-ESP32 3.x. Dependencies are pinned intentionally and the ESP32 cross-build is exercised in CI.
-
-## Build
-
-```bash
-pio run
-```
-
-## Motor bring-up console
-
-After flashing, open a 115200 baud serial monitor.
-
-```text
-help
-status
-field <electrical_hz> <amplitude_v>
-stop
-```
-
-Example low-energy command:
-
-```text
-field 2 0.5
-```
-
-`field` is disabled at boot. The initial software ceiling is 1.5 V field amplitude and exists only for controlled bring-up; it is not yet a measured hardware operating limit.
+- [Architecture](docs/architecture.md)
+- [Hardware](docs/hardware.md)
+- [Development](docs/development.md)
+- [Motor bring-up](docs/motor-bringup.md)
 
 ## License
 
