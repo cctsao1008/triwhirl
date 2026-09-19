@@ -1,6 +1,6 @@
 # Local parameter identification
 
-TriWhirl keeps acquisition and model fitting separate: the firmware owns motor/safety limits, the host acquisition tools record an explicit commanded experiment, and `local_fit.py` estimates a preliminary local model from the resulting telemetry.
+TriWhirl keeps acquisition and model fitting separate: the firmware owns motor/safety limits, the host acquisition tools record an explicit commanded experiment, and the fitting tools estimate local models from the resulting telemetry.
 
 ## Python dependencies
 
@@ -12,9 +12,25 @@ python -m pip install -r tools/parameter_id/requirements.txt
 
 This installs NumPy for fitting, pySerial for UART acquisition, and Bleak for untethered BLE acquisition.
 
+## Three upright vertices
+
+The Reuleaux body has three legitimate upright vertex equilibria separated by 120 body degrees. Identification must therefore treat contact mode as part of the plant state rather than assuming there is only one valid upright orientation.
+
+The current IMU-frame naming anchor is approximately:
+
+```text
+A ~=  +68 deg
+B ~=  -52 deg
+C ~= -172 deg   (equivalent to +188 deg)
+```
+
+These are classification centers, not a claim that the real mass distribution is perfectly symmetric. The real PCB, battery, motor, and wheel may make the three local plants differ. Active plant fits are therefore kept separate as A/B/C and can later form a nominal-plus-uncertainty or polytopic robust-control model.
+
+`vertex_geometry.py` centralizes the 120-degree geometry and circular-angle classification.
+
 ## Untethered BLE acquisition
 
-For body-motion identification the USB cable must not mechanically disturb the TriWhirl body. The existing native NimBLE firmware already exposes the same command/telemetry protocol used by UART, so `acquire_ble.py` records the experiment while the unit runs from its battery.
+For body-motion identification the USB cable must not mechanically disturb the TriWhirl body. The existing native NimBLE firmware already exposes the same command/telemetry protocol used by UART, so the BLE tools record experiments while the unit runs from its battery.
 
 The BLE service is the same one used by the WebUI:
 
@@ -35,9 +51,38 @@ python tools/parameter_id/acquire_ble.py `
   -o artifacts/body-free-01.csv
 ```
 
-The tool scans for `TriWhirl`, connects to its native GATT service, subscribes to telemetry, waits for valid attitude and wheel-rate state, records schema-v2 CSV, and always sends `motor stop` / `telemetry off` before disconnecting when the connection remains available.
+For active near-upright identification, `body_active_ble.py` accepts all three legal vertices. By default `--vertex auto` classifies the first held vertex as A/B/C and locks the remainder of that run to the same vertex, so trials from different contact equilibria are not accidentally mixed. The Vq excitation is established and confirmed by firmware telemetry while the body is still held; the user releases only after `INPUT READY`, removing BLE command latency from the post-release response.
 
-For a later nonzero-`Vq` BLE experiment, the tool automatically reapplies `artifacts/motor-config.json` after a battery boot. The same commissioned motor configuration used by UART is therefore reused without another calibration. Negative segment values should be passed with `=` in PowerShell, for example `--segment=-0.25:0.8`.
+Example using whichever legal vertex is held first:
+
+```powershell
+python tools/parameter_id/body_active_ble.py `
+  --trials 4 `
+  -o artifacts/body-active-A-or-B-or-C.csv
+```
+
+To request a specific vertex explicitly:
+
+```powershell
+python tools/parameter_id/body_active_ble.py `
+  --vertex B `
+  --trials 4 `
+  -o artifacts/body-active-B.csv
+```
+
+The corresponding fitter classifies old and new active logs by held reference angle, fits A/B/C separately, and never pools different vertices automatically:
+
+```powershell
+python tools/parameter_id/body_active_fit.py `
+  artifacts/body-active-B.csv `
+  -o artifacts/body-active-B-fit.json
+```
+
+A vertex is reported as a `candidate` only when it has enough usable samples, both positive and negative Vq coverage, and full-rank regression. Other fits are retained as `diagnostic_only` rather than discarded.
+
+The general BLE acquisition tool scans for `TriWhirl`, connects to its native GATT service, subscribes to telemetry, waits for valid attitude and wheel-rate state, records schema-v2 CSV, and always sends `motor stop` / `telemetry off` before disconnecting when the connection remains available.
+
+For nonzero-`Vq` BLE experiments, the tools automatically reapply `artifacts/motor-config.json` after a battery boot. The same commissioned motor configuration used by UART is therefore reused without another calibration. Negative segment values should be passed with `=` in PowerShell, for example `--segment=-0.25:0.8`.
 
 Use `--address <BLE-address-or-device-id>` only if name-based discovery is ambiguous; otherwise the default `TriWhirl` scan is sufficient.
 
@@ -72,7 +117,7 @@ A segment is `Vq_volts:duration_seconds`. The UART tool:
 
 The CSV adds a `phase` column but otherwise preserves the normal telemetry field names, so it can be consumed directly by `local_fit.py`.
 
-## Fit the local model
+## Preliminary flat-table actuator fit
 
 `local_fit.py` consumes telemetry schema v2 and fits a preliminary continuous-time local model using the measured firmware state and commanded `Vq`:
 
@@ -91,4 +136,4 @@ python tools/parameter_id/local_fit.py logs/local-id.csv --max-abs-theta 0.25 --
 
 The fitter estimates derivatives from held-input local linear slopes rather than adjacent-sample differences. It reports coefficient uncertainty, RMSE, R², matrix rank, raw and normalized conditioning, singular values, sample period, and `Vq` coefficient significance.
 
-A successful regression is not by itself a validated plant model; excitation quality, experiment posture, and physical consistency remain part of the model evidence.
+A successful regression is not by itself a validated plant model; excitation quality, experiment posture, contact vertex, and physical consistency remain part of the model evidence.
