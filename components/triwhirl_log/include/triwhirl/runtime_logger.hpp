@@ -8,6 +8,8 @@ namespace log {
 
 constexpr std::uint32_t kTwLogMagic = 0x474c5754U;  // "TWLG" little-endian
 constexpr std::uint16_t kTwLogVersion = 1U;
+constexpr std::uint16_t kTwLogHeaderBytes = 64U;
+constexpr std::uint16_t kTwLogRecordBytes = 32U;
 constexpr std::uint16_t kTwLogSamplePeriodUs = 1000U;
 constexpr std::size_t kTwLogFlashPayloadOffset = 4096U;
 
@@ -15,8 +17,8 @@ constexpr std::size_t kTwLogFlashPayloadOffset = 4096U;
 struct TwLogHeader {
   std::uint32_t magic = kTwLogMagic;
   std::uint16_t version = kTwLogVersion;
-  std::uint16_t header_size = sizeof(TwLogHeader);
-  std::uint16_t record_size = 32U;
+  std::uint16_t header_size = kTwLogHeaderBytes;
+  std::uint16_t record_size = kTwLogRecordBytes;
   std::uint16_t sample_period_us = kTwLogSamplePeriodUs;
   std::uint32_t record_count = 0U;
   std::uint32_t payload_bytes = 0U;
@@ -39,8 +41,10 @@ struct RuntimeLogRecord {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(TwLogHeader) == 64U, "TWLG header must remain 64 bytes");
-static_assert(sizeof(RuntimeLogRecord) == 32U, "TWLG record must remain 32 bytes");
+static_assert(sizeof(TwLogHeader) == kTwLogHeaderBytes,
+              "TWLG header must remain 64 bytes");
+static_assert(sizeof(RuntimeLogRecord) == kTwLogRecordBytes,
+              "TWLG record must remain 32 bytes");
 
 enum RecordFlags : std::uint16_t {
   kRecordEncoderValid = 1U << 0,
@@ -125,6 +129,7 @@ class RuntimeLogger {
   volatile bool flash_writes_allowed_ = true;
   volatile std::uint32_t prepared_bytes_ = 0U;
   volatile std::uint32_t max_records_ = 0U;
+  volatile std::uint32_t accepted_records_ = 0U;
   volatile std::uint32_t records_written_ = 0U;
   volatile std::uint32_t dropped_records_ = 0U;
   volatile std::uint32_t payload_crc32_ = 0U;
