@@ -31,8 +31,8 @@ enum class SwingIdStopReason : std::uint8_t {
 
 struct SwingIdConfig {
   std::uint32_t target_captures = 12U;
-  float pump_v_low = 0.40F;
-  float pump_v_high = 0.55F;
+  float pump_v_low = 0.533333F;
+  float pump_v_high = 0.733333F;
   float probe_v_negative = -0.25F;
   float probe_v_positive = 0.25F;
   float capture_deg = 8.0F;
@@ -101,7 +101,7 @@ class SwingIdRunner {
   std::uint32_t probe_start_us_ = 0U;
   std::uint32_t rearm_start_half_cycle_ = 0U;
   int pump_rate_sign_ = 1;
-  float current_pump_v_ = 0.55F;
+  float current_pump_v_ = 0.733333F;
   float probe_vq_v_ = 0.0F;
   SwingIdVertex probe_vertex_ = SwingIdVertex::kNone;
   float probe_center_deg_ = 0.0F;
