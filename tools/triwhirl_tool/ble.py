@@ -54,6 +54,40 @@ async def send_command(
         )
 
 
+class BleLineTransport:
+    """Line-oriented view of the firmware console protocol over BLE notifications."""
+
+    def __init__(self, client: "BleakClient") -> None:
+        self.client = client
+        self.lines: asyncio.Queue[str] = asyncio.Queue()
+        self.buffer = ""
+
+    def on_notify(self, _sender: Any, data: bytearray) -> None:
+        self.buffer += bytes(data).decode("utf-8", errors="replace")
+        while True:
+            newline = self.buffer.find("\n")
+            if newline < 0:
+                return
+            line = self.buffer[:newline].rstrip("\r")
+            self.buffer = self.buffer[newline + 1 :]
+            if line:
+                self.lines.put_nowait(line)
+
+    async def send(self, command: str) -> None:
+        await send_command(self.client, command)
+
+    async def read_line(self, timeout_s: float) -> str | None:
+        try:
+            return await asyncio.wait_for(self.lines.get(), timeout_s)
+        except asyncio.TimeoutError:
+            return None
+
+    def drain(self) -> None:
+        while not self.lines.empty():
+            self.lines.get_nowait()
+        self.buffer = ""
+
+
 def drain_queue(queue: "asyncio.Queue[bytes]") -> None:
     while not queue.empty():
         queue.get_nowait()
