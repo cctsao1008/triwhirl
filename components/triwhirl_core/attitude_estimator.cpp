@@ -1,0 +1,93 @@
+#include "triwhirl/attitude_estimator.hpp"
+
+#include <cmath>
+
+namespace triwhirl {
+namespace {
+
+constexpr float kTwoPi = 6.28318530717958647692F;
+
+float wrapAngle(float angle_rad) {
+  if (!std::isfinite(angle_rad)) {
+    return 0.0F;
+  }
+  angle_rad = std::fmod(angle_rad + 3.14159265358979323846F, kTwoPi);
+  if (angle_rad < 0.0F) {
+    angle_rad += kTwoPi;
+  }
+  return angle_rad - 3.14159265358979323846F;
+}
+
+float clamp01(const float value) {
+  return value < 0.0F ? 0.0F : (value > 1.0F ? 1.0F : value);
+}
+
+}  // namespace
+
+PlanarAttitudeEstimator::PlanarAttitudeEstimator(
+    const AttitudeEstimatorConfig& config)
+    : config_(config) {}
+
+void PlanarAttitudeEstimator::reset(const float angle_rad,
+                                    const float gyro_bias_rad_s) {
+  state_ = {};
+  state_.angle_rad = wrapAngle(angle_rad);
+  state_.gyro_bias_rad_s =
+      std::isfinite(gyro_bias_rad_s) ? gyro_bias_rad_s : 0.0F;
+}
+
+AttitudeEstimate PlanarAttitudeEstimator::update(
+    const float body_accel_x_mps2,
+    const float body_accel_z_mps2,
+    const float body_gyro_rad_s,
+    const float dt_s,
+    const bool allow_bias_update) {
+  if (!std::isfinite(body_accel_x_mps2) ||
+      !std::isfinite(body_accel_z_mps2) ||
+      !std::isfinite(body_gyro_rad_s) || !std::isfinite(dt_s) ||
+      !(dt_s > 0.0F) || dt_s > 0.1F) {
+    state_.valid = false;
+    return state_;
+  }
+
+  const float accel_norm = std::hypot(body_accel_x_mps2, body_accel_z_mps2);
+  float accel_weight = 0.0F;
+  float innovation = 0.0F;
+
+  if (accel_norm > 1.0e-5F) {
+    const float ax = body_accel_x_mps2 / accel_norm;
+    const float az = body_accel_z_mps2 / accel_norm;
+    const float gravity_x = std::sin(state_.angle_rad);
+    const float gravity_z = std::cos(state_.angle_rad);
+    innovation = gravity_x * az - gravity_z * ax;
+
+    if (accel_norm >= config_.accel_norm_min_mps2 &&
+        accel_norm <= config_.accel_norm_max_mps2) {
+      constexpr float kGravity = 9.80665F;
+      const float half_span =
+          0.5F * (config_.accel_norm_max_mps2 - config_.accel_norm_min_mps2);
+      if (half_span > 1.0e-5F) {
+        accel_weight =
+            clamp01(1.0F - std::fabs(accel_norm - kGravity) / half_span);
+      } else {
+        accel_weight = 1.0F;
+      }
+    }
+  }
+
+  if (allow_bias_update && accel_weight > 0.0F) {
+    state_.gyro_bias_rad_s -=
+        config_.ki * accel_weight * innovation * dt_s;
+  }
+
+  state_.rate_rad_s = body_gyro_rad_s - state_.gyro_bias_rad_s;
+  const float corrected_rate =
+      state_.rate_rad_s + config_.kp * accel_weight * innovation;
+  state_.angle_rad = wrapAngle(state_.angle_rad + corrected_rate * dt_s);
+  state_.gravity_innovation = innovation;
+  state_.accel_weight = accel_weight;
+  state_.valid = true;
+  return state_;
+}
+
+}  // namespace triwhirl
