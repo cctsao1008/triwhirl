@@ -116,13 +116,30 @@ def fit_equation(x: np.ndarray, y: np.ndarray) -> dict[str, object]:
     ss_tot = float(centered @ centered)
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else None
     rmse = math.sqrt(ss_res / len(y))
+
+    degrees_of_freedom = len(y) - int(rank)
+    standard_errors: np.ndarray | None = None
+    if degrees_of_freedom > 0:
+        residual_variance = ss_res / degrees_of_freedom
+        covariance = residual_variance * np.linalg.pinv(x.T @ x)
+        diagonal = np.maximum(np.diag(covariance), 0.0)
+        standard_errors = np.sqrt(diagonal)
+
+    condition_number = None
+    if len(singular) > 0 and singular[-1] > 0.0:
+        condition_number = float(singular[0] / singular[-1])
+
     return {
         "coefficients": {
             name: float(value) for name, value in zip(REGRESSOR_NAMES, coefficients)
         },
+        "coefficient_std_error": None if standard_errors is None else {
+            name: float(value) for name, value in zip(REGRESSOR_NAMES, standard_errors)
+        },
         "rmse": rmse,
         "r2": r2,
         "rank": int(rank),
+        "condition_number": condition_number,
         "singular_values": [float(value) for value in singular],
     }
 
