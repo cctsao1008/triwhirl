@@ -16,7 +16,11 @@ namespace log {
 namespace {
 
 constexpr std::size_t kRamBufferBytes = 32U * 1024U;
-constexpr std::size_t kFlashBatchBytes = 4096U;
+// Keep each runtime flash program to one common NOR page. The WROOM-32 data
+// sheet gives 0.8 ms typical / 5 ms max page-program time; larger batches would
+// multiply that cache-unavailable interval. Critical local windows still turn
+// flash writes off completely and use SRAM only.
+constexpr std::size_t kFlashBatchBytes = 256U;
 constexpr std::size_t kFlashSectorBytes = 4096U;
 constexpr std::uint32_t kHeaderFlagComplete = 1U << 0;
 constexpr std::uint32_t kCrc32Initial = 0xffffffffU;
