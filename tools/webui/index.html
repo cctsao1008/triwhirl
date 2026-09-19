@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TriWhirl</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>TriWhirl</h1>
+        <p>Web Bluetooth engineering console</p>
+      </div>
+      <div class="transport">
+        <span id="transportState" class="badge">disconnected</span>
+        <button id="connectButton">Connect</button>
+        <button id="disconnectButton" disabled>Disconnect</button>
+      </div>
+    </header>
+
+    <section class="grid telemetry-grid">
+      <article><label>Mode</label><strong id="mode">—</strong></article>
+      <article><label>Body angle</label><strong id="theta">—</strong><small>rad</small></article>
+      <article><label>Body rate</label><strong id="thetaRate">—</strong><small>rad/s</small></article>
+      <article><label>Wheel rate</label><strong id="wheelRate">—</strong><small>rad/s</small></article>
+      <article><label>Vq</label><strong id="vq">—</strong><small>V</small></article>
+      <article><label>Loop max</label><strong id="loopMax">—</strong><small>µs</small></article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">
+        <h2>Command</h2>
+      </div>
+      <form id="commandForm">
+        <input id="commandInput" autocomplete="off" spellcheck="false" placeholder="status" disabled>
+        <button id="sendButton" type="submit" disabled>Send</button>
+      </form>
+      <div class="quick-actions">
+        <button data-command="status" disabled>Status</button>
+        <button data-command="motor status" disabled>Motor</button>
+        <button data-command="imu status" disabled>IMU</button>
+        <button data-command="attitude status" disabled>Attitude</button>
+        <button data-command="timing status" disabled>Timing</button>
+        <button data-command="motor stop" disabled>Stop motor</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">
+        <h2>Telemetry log</h2>
+        <div>
+          <button id="recordButton" disabled>Start recording</button>
+          <button id="saveButton" disabled>Save CSV</button>
+          <button id="clearButton">Clear</button>
+        </div>
+      </div>
+      <pre id="console"></pre>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
