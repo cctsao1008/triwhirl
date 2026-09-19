@@ -25,8 +25,11 @@ class PlanarAttitudeEstimator {
 
   void reset(float angle_rad = 0.0F, float gyro_bias_rad_s = 0.0F);
 
-  AttitudeEstimate update(float body_accel_x_mps2,
-                          float body_accel_z_mps2,
+  // The two accelerometer inputs are the body-plane components that should
+  // correspond to sin(theta) and cos(theta). Axis selection/sign mapping is a
+  // board-integration concern, not hard-coded in the estimator.
+  AttitudeEstimate update(float accel_sin_axis_mps2,
+                          float accel_cos_axis_mps2,
                           float body_gyro_rad_s,
                           float dt_s,
                           bool allow_bias_update = true);
