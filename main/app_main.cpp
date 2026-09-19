@@ -80,6 +80,12 @@ void consolePrintf(const char* format, ...) {
   uart_write_bytes(UART_NUM_0, buffer, count);
 }
 
+void printPrompt() {
+  if (!telemetry_enabled) {
+    consoleWrite("> ");
+  }
+}
+
 float clampFinite(const float value, const float low, const float high) {
   if (!std::isfinite(value)) {
     return 0.0F;
@@ -238,20 +244,37 @@ void pollConsole() {
   const int received = uart_read_bytes(UART_NUM_0, input, sizeof(input), 0);
   for (int i = 0; i < received; ++i) {
     const char c = static_cast<char>(input[i]);
-    if (c == '\r') {
+
+    if (c == '\r' || c == '\n') {
+      if (command_length > 0U) {
+        consoleWrite("\r\n");
+        command_line[command_length] = '\0';
+        handleCommand(command_line);
+        command_length = 0U;
+        printPrompt();
+      }
       continue;
     }
-    if (c == '\n') {
-      command_line[command_length] = '\0';
-      handleCommand(command_line);
-      command_length = 0U;
+
+    if (c == '\b' || static_cast<unsigned char>(c) == 0x7FU) {
+      if (command_length > 0U) {
+        --command_length;
+        consoleWrite("\b \b");
+      }
       continue;
     }
+
+    if (c < 0x20 || static_cast<unsigned char>(c) > 0x7EU) {
+      continue;
+    }
+
     if (command_length + 1U < sizeof(command_line)) {
       command_line[command_length++] = c;
+      uart_write_bytes(UART_NUM_0, &c, 1U);
     } else {
       command_length = 0U;
-      consoleWrite("ERR command too long\r\n");
+      consoleWrite("\r\nERR command too long\r\n");
+      printPrompt();
     }
   }
 }
@@ -359,6 +382,7 @@ extern "C" void app_main(void) {
   consoleWrite("telemetry_fields,t_us,field_enabled,e_hz,amp_v,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors\r\n");
   printStatus();
   printHelp();
+  printPrompt();
 
   while (true) {
     const std::uint32_t loop_us = static_cast<std::uint32_t>(esp_timer_get_time());
