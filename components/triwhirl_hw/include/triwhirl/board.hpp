@@ -17,6 +17,16 @@ constexpr int kMpu6050SclGpio = 18;
 constexpr int kMpu6050SdaGpio = 19;
 constexpr std::uint8_t kMpu6050I2cAddress = 0x68U;
 
+// Additional schematic-defined board interfaces. These are named here so a
+// future driver does not have to rediscover the PCB mapping. They are not
+// enabled by the current control runtime unless explicitly used.
+constexpr int kBatteryAdcGpio = 34;
+constexpr int kRgbDataGpio = 4;
+constexpr int kKey1Gpio = 13;
+constexpr int kKey2Gpio = 15;
+constexpr int kKey3Gpio = 2;
+constexpr int kDownloadGpio = 0;
+
 constexpr float kMotorBusNominalV = 12.0F;
 constexpr float kBringupPhaseAmplitudeMaxV = 1.5F;
 
