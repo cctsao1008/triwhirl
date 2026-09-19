@@ -319,8 +319,9 @@ def main() -> int:
         },
         "candidate_wheel_input_gain_vq": wheel_fit["coefficients"]["vq_v"]["value"],
         "interpretation": (
-            "Candidate local A/B evidence only. Accept coefficients for controller synthesis "
-            "only after reviewing coefficient uncertainty, conditioning, and residual quality."
+            "Candidate local A/B evidence only for the selected upright contact. "
+            "Accept coefficients for controller synthesis only after reviewing coefficient "
+            "uncertainty, conditioning, and residual quality."
         ),
     }
 
