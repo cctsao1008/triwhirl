@@ -11,6 +11,7 @@ from typing import Sequence
 from ..ble import DEVICE_NAME
 from .log import (
     _close_line_transport,
+    _normalize_console_line,
     _open_line_transport,
     _parse_key_values,
     _request_log_status,
@@ -159,7 +160,7 @@ def _swing_config_command(args: argparse.Namespace) -> str:
 
 
 def _parse_state_line(line: str) -> tuple[str, str]:
-    normalized = line.strip()
+    normalized = _normalize_console_line(line)
     if normalized.startswith("event,swing_id,"):
         values = _parse_key_values(normalized, "event")
         # _parse_key_values starts after the first comma, so the literal
@@ -179,7 +180,7 @@ async def _wait_for_terminal(transport, max_duration: float) -> tuple[str, str]:
         remaining = max(0.05, min(0.5, deadline - time.monotonic()))
         line = await transport.read_line(remaining)
         if line:
-            normalized = line.strip()
+            normalized = _normalize_console_line(line)
             if normalized.startswith("event,swing_id,"):
                 print(normalized)
                 state, reason = _parse_state_line(normalized)
