@@ -3,19 +3,20 @@
 
 The host uses measured body phase to pump the reaction wheel, pre-arms a known
 signed Vq while the body is approaching one of the three upright vertices, and
-records only the local near-upright probe window for plant fitting.  No hand
+records only the local near-upright probe window for plant fitting. No hand
 release is required.
 
-This is identification tooling, not the final production swing-up controller:
-coarse pumping may tolerate BLE latency, while the local probe is established
-before the body enters the fit window so host latency is not part of the local
-input transition.
+This remains identification tooling rather than the final production swing-up
+controller. The coarse pump is allowed to run over BLE, but it compensates for
+host/transport phase delay with a short body-rate prediction. Local probe Vq is
+established before entering the fit window, so BLE latency is not treated as
+plant input timing.
 
 The primary CSV intentionally matches body_active_fit.py:
     schema_version,trial,vertex_id,vertex_center_deg,phase,theta_ref_rad,
     planned_vq_v,<telemetry...>
 
-A companion *-raw.csv keeps the complete swing trajectory and pump history.
+A companion *-raw.csv keeps the complete rocking trajectory and pump history.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import csv
 import json
 import math
 import time
+from collections import deque
 from pathlib import Path
 
 from bleak import BleakClient
@@ -49,13 +51,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--probes", type=int, default=12,
                         help="number of successful local probe windows to collect")
-    parser.add_argument("--pump-v", type=float, default=0.25,
+    parser.add_argument("--pump-v", type=float, default=0.50,
                         help="coarse rocking Vq magnitude [V]")
     parser.add_argument("--probe-v-positive", type=float, default=0.25,
                         help="positive local probe magnitude [V]")
     parser.add_argument("--probe-v-negative", type=float, default=0.50,
                         help="absolute negative local probe magnitude [V]")
-    parser.add_argument("--approach-deg", type=float, default=18.0,
+    parser.add_argument("--approach-deg", type=float, default=25.0,
                         help="pre-arm a local probe when approaching within this angle")
     parser.add_argument("--capture-deg", type=float, default=8.0,
                         help="start local capture inside this vertex error")
@@ -65,16 +67,20 @@ def parse_args() -> argparse.Namespace:
                         help="maximum active local probe duration [s]")
     parser.add_argument("--zero-tail", type=float, default=0.12,
                         help="maximum zero-vector tail retained after the probe [s]")
-    parser.add_argument("--rate-switch", type=float, default=0.08,
-                        help="body-rate deadband for coarse pump sign switching [rad/s]")
+    parser.add_argument("--rate-switch", type=float, default=0.03,
+                        help="minimum predicted |body rate| used for pump sign switching [rad/s]")
+    parser.add_argument("--pump-lead-ms", type=float, default=40.0,
+                        help="predict body rate this far ahead to compensate BLE/control phase delay")
+    parser.add_argument("--pump-accel-alpha", type=float, default=0.75,
+                        help="0..1 low-pass weight for body angular-acceleration estimate")
     parser.add_argument("--pump-polarity", type=int, choices=(-1, 1), default=-1,
-                        help="Vq sign relative to body-rate sign; default follows measured reaction-wheel sign")
-    parser.add_argument("--auto-flip-seconds", type=float, default=8.0,
-                        help="flip coarse pump polarity if no local probe is reached for this long; 0 disables")
-    parser.add_argument("--max-duration", type=float, default=35.0,
+                        help="Vq sign relative to predicted body-rate sign")
+    parser.add_argument("--auto-flip-seconds", type=float, default=0.0,
+                        help="optional pump-polarity flip interval when no probe is reached; 0 disables")
+    parser.add_argument("--max-duration", type=float, default=45.0,
                         help="hard experiment time bound [s]")
     parser.add_argument("--vertex-a-deg", type=float, default=68.0,
-                        help="IMU-frame A-vertex naming anchor; B/C are ±120 deg")
+                        help="IMU-frame A-vertex naming anchor; B/C are +/-120 deg")
     parser.add_argument("--imu-samples", type=int, default=500)
     parser.add_argument("--scan-timeout", type=float, default=10.0)
     parser.add_argument("--name", default=DEVICE_NAME)
@@ -117,6 +123,10 @@ async def run(args: argparse.Namespace) -> int:
         raise RuntimeError("durations must be positive (zero-tail may be zero)")
     if args.rate_switch < 0.0:
         raise RuntimeError("--rate-switch must be >= 0")
+    if not math.isfinite(args.pump_lead_ms) or args.pump_lead_ms < 0.0:
+        raise RuntimeError("--pump-lead-ms must be finite and >= 0")
+    if not 0.0 <= args.pump_accel_alpha <= 1.0:
+        raise RuntimeError("--pump-accel-alpha must be between 0 and 1")
 
     output = args.output
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -135,7 +145,6 @@ async def run(args: argparse.Namespace) -> int:
     attempted_probes = 0
     trials: list[dict[str, object]] = []
 
-    # Runtime controller state.
     controller_phase = "pump"
     pump_rate_sign = 1
     pump_polarity = args.pump_polarity
@@ -152,6 +161,14 @@ async def run(args: argparse.Namespace) -> int:
     zero_rows = 0
     max_abs_error_deg = 0.0
     last_progress = time.monotonic()
+
+    previous_rate: float | None = None
+    previous_t_us: int | None = None
+    accel_est = 0.0
+    predicted_rate = 0.0
+    lead_s = args.pump_lead_ms * 1.0e-3
+    recent_theta_deg: deque[tuple[int, float]] = deque(maxlen=256)
+    last_progress_print = 0.0
 
     async def set_vq(transport: BleLineTransport, value: float) -> None:
         nonlocal commanded_vq
@@ -191,7 +208,8 @@ async def run(args: argparse.Namespace) -> int:
                     + ", ".join(f"{key}={value:.1f} deg" for key, value in centers.items())
                 )
                 print(
-                    f"pump={args.pump_v:.3f} V polarity={pump_polarity:+d}; "
+                    f"pump={args.pump_v:.3f} V polarity={pump_polarity:+d} "
+                    f"lead={args.pump_lead_ms:.0f} ms; "
                     f"local probes=+{args.probe_v_positive:.3f}/-{args.probe_v_negative:.3f} V; "
                     f"target={args.probes} probes"
                 )
@@ -209,7 +227,9 @@ async def run(args: argparse.Namespace) -> int:
                     ))
                     raw_writer.writerow((
                         "schema_version", "controller_phase", "nearest_vertex",
-                        "vertex_error_deg", "pump_polarity", *TELEMETRY_FIELDS,
+                        "vertex_error_deg", "pump_polarity",
+                        "pump_accel_est_rad_s2", "pump_predicted_rate_rad_s",
+                        *TELEMETRY_FIELDS,
                     ))
                     await transport.send("telemetry on")
 
@@ -229,15 +249,41 @@ async def run(args: argparse.Namespace) -> int:
                         t_us = int(row["t_us"])
                         vertex_id, center_deg, error_deg = nearest_vertex(theta, centers)
 
+                        if previous_rate is not None and previous_t_us is not None:
+                            dt = (t_us - previous_t_us) * 1.0e-6
+                            if 0.001 <= dt <= 0.2:
+                                accel = (rate - previous_rate) / dt
+                                alpha = args.pump_accel_alpha
+                                accel_est = (1.0 - alpha) * accel_est + alpha * accel
+                        previous_rate = rate
+                        previous_t_us = t_us
+                        predicted_rate = rate + lead_s * accel_est
+
+                        theta_deg = math.degrees(theta)
+                        recent_theta_deg.append((t_us, theta_deg))
+                        while recent_theta_deg and (t_us - recent_theta_deg[0][0]) > 2_000_000:
+                            recent_theta_deg.popleft()
+
                         raw_writer.writerow((
                             SCHEMA_VERSION, controller_phase, vertex_id, error_deg,
-                            pump_polarity, *values,
+                            pump_polarity, accel_est, predicted_rate, *values,
                         ))
                         total_raw_rows += 1
 
+                        host_now = time.monotonic()
+                        if host_now - last_progress_print >= 3.0 and recent_theta_deg:
+                            angles = [item[1] for item in recent_theta_deg]
+                            span = max(angles) - min(angles)
+                            print(
+                                f"pump progress: span_2s={span:.1f} deg, nearest={vertex_id} "
+                                f"distance={abs(error_deg):.1f} deg, body_rate={rate:+.2f}, "
+                                f"wheel_rate={float(row['vel_rad_s']):+.2f} rad/s"
+                            )
+                            last_progress_print = host_now
+
                         if controller_phase == "pump":
-                            if abs(rate) >= args.rate_switch:
-                                pump_rate_sign = 1 if rate > 0.0 else -1
+                            if abs(predicted_rate) >= args.rate_switch:
+                                pump_rate_sign = 1 if predicted_rate > 0.0 else -1
                             desired = pump_polarity * pump_rate_sign * args.pump_v
                             await set_vq(transport, desired)
 
@@ -278,7 +324,6 @@ async def run(args: argparse.Namespace) -> int:
                                 )
                             continue
 
-                        # Re-evaluate error against the vertex selected at pre-arm time.
                         selected_error_deg = angle_diff_deg(
                             math.degrees(theta), current_center_deg
                         )
@@ -298,10 +343,7 @@ async def run(args: argparse.Namespace) -> int:
                                 confirm_count = 0
 
                             moving_toward = selected_error_deg * math.degrees(rate) < 0.0
-                            if (
-                                abs(selected_error_deg) > args.approach_deg
-                                and not moving_toward
-                            ):
+                            if abs(selected_error_deg) > args.approach_deg and not moving_toward:
                                 print(
                                     f"probe {current_trial}: missed vertex {current_vertex}; resume pumping"
                                 )
@@ -329,17 +371,13 @@ async def run(args: argparse.Namespace) -> int:
                             active_rows += 1
                             assert capture_t_us is not None
                             elapsed = (t_us - capture_t_us) * 1.0e-6
-                            if (
-                                elapsed >= args.probe_duration
-                                or abs(selected_error_deg) > args.capture_deg
-                            ):
+                            if elapsed >= args.probe_duration or abs(selected_error_deg) > args.capture_deg:
                                 await set_vq(transport, 0.0)
                                 stop_t_us = t_us
                                 controller_phase = "zero_tail"
                             continue
 
                         if controller_phase == "zero_tail":
-                            # Label the row by measured input, not by the command send time.
                             phase = "zero_vector" if abs(measured_vq) <= 0.01 else "active"
                             local_writer.writerow((
                                 SCHEMA_VERSION, current_trial, current_vertex,
@@ -351,10 +389,7 @@ async def run(args: argparse.Namespace) -> int:
                                 zero_rows += 1
                             assert stop_t_us is not None
                             tail_elapsed = (t_us - stop_t_us) * 1.0e-6
-                            if (
-                                abs(selected_error_deg) >= args.rearm_deg
-                                or tail_elapsed >= args.zero_tail
-                            ):
+                            if abs(selected_error_deg) >= args.rearm_deg or tail_elapsed >= args.zero_tail:
                                 successful_probes += 1
                                 last_progress = time.monotonic()
                                 trials.append({
@@ -398,7 +433,7 @@ async def run(args: argparse.Namespace) -> int:
                         pass
     finally:
         metadata = {
-            "format": "triwhirl-auto-swing-id-run-v1",
+            "format": "triwhirl-auto-swing-id-run-v2",
             "telemetry_schema_version": SCHEMA_VERSION,
             "transport": "ble",
             "device_name": args.name,
@@ -413,6 +448,8 @@ async def run(args: argparse.Namespace) -> int:
             "pump_v": args.pump_v,
             "pump_polarity_initial": args.pump_polarity,
             "pump_polarity_final": pump_polarity,
+            "pump_lead_ms": args.pump_lead_ms,
+            "pump_accel_alpha": args.pump_accel_alpha,
             "probe_v_positive": args.probe_v_positive,
             "probe_v_negative_abs": args.probe_v_negative,
             "approach_deg": args.approach_deg,
