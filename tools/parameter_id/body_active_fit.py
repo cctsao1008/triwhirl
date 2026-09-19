@@ -19,6 +19,11 @@ Wheel model:
 armed sample before release. This keeps angle, rate, and acceleration
 kinematically consistent. The measured firmware telemetry `vq_v`, not the
 planned host command, is the identification input.
+
+The selected upright contact is part of the plant definition. By default the
+fit rejects trials whose held reference is not near the chosen ~68 degree
+vertex established by passive local identification, preventing neighboring
+Reuleaux vertices/contact postures from being mixed into one linear model.
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("input", type=Path)
     parser.add_argument("--derivative-window", type=int, default=1)
     parser.add_argument("--max-angle-deg", type=float, default=8.0)
+    parser.add_argument("--target-theta-deg", type=float, default=68.0)
+    parser.add_argument("--target-tolerance-deg", type=float, default=12.0)
     parser.add_argument("-o", "--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -63,7 +70,6 @@ def local_slope(t: np.ndarray, y: np.ndarray, center: int, half: int) -> float:
 
 
 def normalized_condition_number(x: np.ndarray) -> float:
-    # Normalize physical regressors only; the intercept is intentionally omitted.
     if x.shape[1] <= 1:
         return float("inf")
     physical = x[:, :-1]
@@ -115,12 +121,37 @@ def main() -> int:
     args = parse_args()
     if args.derivative_window < 1:
         raise RuntimeError("--derivative-window must be >= 1")
+    if args.target_tolerance_deg <= 0.0 or args.target_tolerance_deg >= 60.0:
+        raise RuntimeError("--target-tolerance-deg must be > 0 and < 60")
 
     rows = read_rows(args.input)
     if not rows:
         raise RuntimeError("input CSV is empty")
 
     trial_ids = sorted({int(r["trial"]) for r in rows if r.get("trial")})
+    target_theta = math.radians(args.target_theta_deg)
+    target_tolerance = math.radians(args.target_tolerance_deg)
+    wrong_contact: list[tuple[int, float]] = []
+    for trial in trial_ids:
+        refs = [
+            float(r["theta_ref_rad"]) for r in rows
+            if int(r.get("trial", "0")) == trial and r.get("theta_ref_rad")
+        ]
+        if not refs:
+            continue
+        ref = float(np.median(refs))
+        if abs(angle_diff(ref, target_theta)) > target_tolerance:
+            wrong_contact.append((trial, math.degrees(ref)))
+    if wrong_contact:
+        details = ", ".join(
+            f"trial {trial}={ref_deg:.2f} deg" for trial, ref_deg in wrong_contact
+        )
+        raise RuntimeError(
+            "active dataset mixes/uses the wrong upright contact for this plant: "
+            f"{details}; expected selected vertex near {args.target_theta_deg:.1f} deg "
+            f"(±{args.target_tolerance_deg:.1f} deg)"
+        )
+
     max_angle = math.radians(args.max_angle_deg)
     regressors: list[list[float]] = []
     body_targets: list[float] = []
@@ -174,8 +205,6 @@ def main() -> int:
             if abs(error[i]) > max_angle:
                 rejected_angle += 1
                 continue
-            # Do not estimate an acceleration across a Vq step. The center's
-            # telemetry Vq is authoritative once the whole derivative window is held.
             if float(np.max(vq[lo:hi]) - np.min(vq[lo:hi])) > 1.0e-6:
                 rejected_transition += 1
                 continue
@@ -227,11 +256,15 @@ def main() -> int:
     vq_values = x[:, 3]
     theta_values = x[:, 0]
     payload = {
-        "format": "triwhirl-body-active-fit-v1",
+        "format": "triwhirl-body-active-fit-v2",
         "input": str(args.input),
         "model": {
             "body": "theta_ddot = a_theta*theta_error_gyro + a_rate*theta_rate + a_wheel*wheel_rate + b_vq*vq + bias",
             "wheel": "wheel_accel = c_theta*theta_error_gyro + c_rate*theta_rate + c_wheel*wheel_rate + d_vq*vq + bias",
+        },
+        "selected_contact": {
+            "target_theta_deg": args.target_theta_deg,
+            "target_tolerance_deg": args.target_tolerance_deg,
         },
         "sample_count": int(len(x)),
         "derivative_window_each_side": args.derivative_window,
