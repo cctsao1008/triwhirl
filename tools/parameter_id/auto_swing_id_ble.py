@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Autonomous untethered swing identification over BLE.
 
-The reaction wheel first pumps the Reuleaux body toward any of the three upright
-vertices.  Crucially, pumping is *not* interrupted in a wide approach band.
-Only after measured attitude actually enters the local capture window does the
-host command a short signed identification probe.  The primary CSV therefore
-contains local windows that were physically reached, while a companion raw CSV
-keeps the complete rocking trajectory.
+The reaction wheel continuously pumps the Reuleaux body toward the three legal
+upright vertices.  Local identification windows are captured while the *steady
+pump input itself* carries the body through +/-capture_deg.  No BLE command is
+sent at the vertex, because the v3 logs showed 80-125 ms host/GATT command
+latency while a fast crossing can leave the local region in 60-120 ms.
 
-This is host-side identification tooling, not the final ESP32 swing-up
-controller.  Measured firmware ``vq_v`` remains the regression input.
+To improve excitation without disturbing a vertex crossing, the pump magnitude
+alternates only when the predicted body-rate sign changes (near a rocking turn).
+Thus each local window sees a measured, approximately constant firmware Vq, but
+successive half-cycles use different magnitudes.  The primary CSV remains
+compatible with body_active_fit.py; the complete swing trajectory is also kept.
+
+This is identification tooling, not the final ESP32 swing-up controller.
 """
 
 from __future__ import annotations
@@ -40,49 +44,86 @@ from vertex_geometry import angle_diff_deg, vertex_centers_deg
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Autonomously rock TriWhirl and collect local A/B/C Vq identification windows."
+        description=(
+            "Autonomously rock TriWhirl and capture steady-input local A/B/C "
+            "crossings for plant identification."
+        )
     )
-    parser.add_argument("--probes", type=int, default=12,
-                        help="number of successful local probe windows to collect")
-    parser.add_argument("--pump-v", type=float, default=0.50,
-                        help="coarse rocking Vq magnitude [V]")
-    parser.add_argument("--probe-v-positive", type=float, default=0.25,
-                        help="positive local probe magnitude [V]")
-    parser.add_argument("--probe-v-negative", type=float, default=0.50,
-                        help="absolute negative local probe magnitude [V]")
-    parser.add_argument("--capture-deg", type=float, default=8.0,
-                        help="trigger a local probe only after entering this vertex-error window")
-    parser.add_argument("--probe-exit-deg", type=float, default=12.0,
-                        help="end the local probe after leaving this wider vertex-error window")
-    parser.add_argument("--rearm-deg", type=float, default=18.0,
-                        help="require leaving this vertex-error window before another probe")
-    parser.add_argument("--probe-duration", type=float, default=0.12,
-                        help="maximum local probe duration [s]")
-    parser.add_argument("--min-observed-probe-rows", type=int, default=2,
-                        help="minimum telemetry rows with measured probe Vq before counting success")
-    parser.add_argument("--rate-switch", type=float, default=0.03,
-                        help="predicted body-rate deadband for coarse pump sign switching [rad/s]")
-    parser.add_argument("--pump-polarity", type=int, choices=(-1, 1), default=-1,
-                        help="Vq sign relative to predicted body-rate sign")
-    parser.add_argument("--pump-lead-ms", type=float, default=40.0,
-                        help="lead used to predict body-rate sign for host/BLE pump latency")
-    parser.add_argument("--pump-accel-alpha", type=float, default=0.75,
-                        help="low-pass retention for body-acceleration estimate [0,1)")
-    parser.add_argument("--max-duration", type=float, default=45.0,
-                        help="hard experiment time bound [s]")
-    parser.add_argument("--vertex-a-deg", type=float, default=68.0,
-                        help="IMU-frame A-vertex naming anchor; B/C are +/-120 deg")
+    parser.add_argument(
+        "--probes", type=int, default=12,
+        help="number of accepted local vertex-crossing windows to collect",
+    )
+    parser.add_argument(
+        "--pump-v-low", type=float, default=0.40,
+        help="lower coarse-pump magnitude, alternated by half-cycle [V]",
+    )
+    parser.add_argument(
+        "--pump-v-high", type=float, default=0.55,
+        help="higher coarse-pump magnitude, alternated by half-cycle [V]",
+    )
+    parser.add_argument(
+        "--capture-deg", type=float, default=8.0,
+        help="start a local window after entering this vertex-error band",
+    )
+    parser.add_argument(
+        "--probe-exit-deg", type=float, default=12.0,
+        help="end a local window after leaving this wider band",
+    )
+    parser.add_argument(
+        "--rearm-deg", type=float, default=18.0,
+        help="require leaving this band before another local capture",
+    )
+    parser.add_argument(
+        "--probe-duration", type=float, default=0.16,
+        help="maximum duration of one local crossing window [s]",
+    )
+    parser.add_argument(
+        "--min-local-rows", type=int, default=3,
+        help="minimum active telemetry rows for an accepted crossing",
+    )
+    parser.add_argument(
+        "--max-local-vq-span", type=float, default=0.03,
+        help="maximum measured Vq peak-to-peak allowed inside an accepted crossing [V]",
+    )
+    parser.add_argument(
+        "--rate-switch", type=float, default=0.03,
+        help="predicted body-rate deadband for coarse pump sign switching [rad/s]",
+    )
+    parser.add_argument(
+        "--pump-polarity", type=int, choices=(-1, 1), default=-1,
+        help="Vq sign relative to predicted body-rate sign",
+    )
+    parser.add_argument(
+        "--pump-lead-ms", type=float, default=40.0,
+        help="lead used to predict body-rate sign for host/BLE pump latency",
+    )
+    parser.add_argument(
+        "--pump-accel-alpha", type=float, default=0.75,
+        help="low-pass retention for body-acceleration estimate [0,1)",
+    )
+    parser.add_argument(
+        "--max-duration", type=float, default=50.0,
+        help="hard experiment time bound [s]",
+    )
+    parser.add_argument(
+        "--vertex-a-deg", type=float, default=68.0,
+        help="IMU-frame A-vertex naming anchor; B/C are +/-120 deg",
+    )
     parser.add_argument("--imu-samples", type=int, default=500)
     parser.add_argument("--scan-timeout", type=float, default=10.0)
     parser.add_argument("--name", default=DEVICE_NAME)
     parser.add_argument("--address", default=None)
-    parser.add_argument("--motor-config", type=Path,
-                        default=Path("artifacts/motor-config.json"))
+    parser.add_argument(
+        "--motor-config", type=Path,
+        default=Path("artifacts/motor-config.json"),
+    )
     parser.add_argument("-o", "--output", type=Path, required=True)
     return parser.parse_args()
 
 
-def nearest_vertex(theta_rad: float, centers: dict[str, float]) -> tuple[str, float, float]:
+def nearest_vertex(
+    theta_rad: float, centers: dict[str, float]
+) -> tuple[str, float, float]:
     theta_deg = math.degrees(theta_rad)
     vertex_id = min(
         centers,
@@ -92,35 +133,27 @@ def nearest_vertex(theta_rad: float, centers: dict[str, float]) -> tuple[str, fl
     return vertex_id, center_deg, angle_diff_deg(theta_deg, center_deg)
 
 
-def probe_voltage(index: int, positive_v: float, negative_abs_v: float) -> float:
-    # Balanced 4-shot pattern.  Index is the *attempt* index so failed probes
-    # cannot pin all subsequent attempts to the first (+) sign.
-    sign = (1, -1, -1, 1)[index % 4]
-    return positive_v if sign > 0 else -negative_abs_v
-
-
 async def run(args: argparse.Namespace) -> int:
     if args.probes < 1:
         raise RuntimeError("--probes must be >= 1")
-    for name, value in (
-        ("pump-v", args.pump_v),
-        ("probe-v-positive", args.probe_v_positive),
-        ("probe-v-negative", args.probe_v_negative),
+    if not (
+        math.isfinite(args.pump_v_low)
+        and math.isfinite(args.pump_v_high)
+        and 0.0 < args.pump_v_low <= args.pump_v_high
     ):
-        if not math.isfinite(value) or value <= 0.0:
-            raise RuntimeError(f"--{name} must be finite and > 0")
+        raise RuntimeError("require 0 < pump-v-low <= pump-v-high")
     if not (0.0 < args.capture_deg < args.probe_exit_deg < args.rearm_deg < 60.0):
         raise RuntimeError(
             "require 0 < capture-deg < probe-exit-deg < rearm-deg < 60"
         )
     if args.probe_duration <= 0.0 or args.max_duration <= 0.0:
         raise RuntimeError("durations must be > 0")
-    if args.min_observed_probe_rows < 1:
-        raise RuntimeError("--min-observed-probe-rows must be >= 1")
-    if args.rate_switch < 0.0:
-        raise RuntimeError("--rate-switch must be >= 0")
-    if args.pump_lead_ms < 0.0:
-        raise RuntimeError("--pump-lead-ms must be >= 0")
+    if args.min_local_rows < 1:
+        raise RuntimeError("--min-local-rows must be >= 1")
+    if args.max_local_vq_span < 0.0:
+        raise RuntimeError("--max-local-vq-span must be >= 0")
+    if args.rate_switch < 0.0 or args.pump_lead_ms < 0.0:
+        raise RuntimeError("rate-switch and pump-lead-ms must be >= 0")
     if not (0.0 <= args.pump_accel_alpha < 1.0):
         raise RuntimeError("--pump-accel-alpha must be in [0,1)")
 
@@ -137,12 +170,14 @@ async def run(args: argparse.Namespace) -> int:
     motor_config = None
     total_raw_rows = 0
     local_rows = 0
-    successful_probes = 0
-    attempted_probes = 0
+    accepted_crossings = 0
+    attempted_crossings = 0
     trials: list[dict[str, object]] = []
 
     controller_phase = "pump"
     pump_rate_sign = 1
+    half_cycle_index = 0
+    current_pump_mag = args.pump_v_high
     commanded_vq: float | None = None
     pump_accel_est = 0.0
     previous_rate: float | None = None
@@ -154,10 +189,9 @@ async def run(args: argparse.Namespace) -> int:
     current_vertex = ""
     current_center_deg = 0.0
     current_ref_rad = 0.0
-    current_probe_v = 0.0
     capture_t_us: int | None = None
     active_rows = 0
-    observed_probe_rows = 0
+    local_vq_values: list[float] = []
     max_abs_error_deg = 0.0
 
     recent_angles: deque[tuple[int, float]] = deque()
@@ -186,6 +220,19 @@ async def run(args: argparse.Namespace) -> int:
         previous_t_us = t_us
         return rate + args.pump_lead_ms * 1.0e-3 * pump_accel_est
 
+    def update_half_cycle(predicted: float) -> None:
+        nonlocal pump_rate_sign, half_cycle_index, current_pump_mag
+        if abs(predicted) < args.rate_switch:
+            return
+        new_sign = 1 if predicted > 0.0 else -1
+        if new_sign == pump_rate_sign:
+            return
+        pump_rate_sign = new_sign
+        half_cycle_index += 1
+        current_pump_mag = (
+            args.pump_v_high if half_cycle_index % 2 == 0 else args.pump_v_low
+        )
+
     try:
         async with BleakClient(target) as client:
             if not client.is_connected:
@@ -210,17 +257,17 @@ async def run(args: argparse.Namespace) -> int:
 
                 print(
                     "autonomous swing ID vertices: "
-                    + ", ".join(f"{key}={value:.1f} deg" for key, value in centers.items())
+                    + ", ".join(
+                        f"{key}={value:.1f} deg" for key, value in centers.items()
+                    )
                 )
                 print(
-                    f"pump={args.pump_v:.3f} V polarity={args.pump_polarity:+d} "
-                    f"lead={args.pump_lead_ms:.0f} ms; "
-                    f"local probes=+{args.probe_v_positive:.3f}/-{args.probe_v_negative:.3f} V; "
-                    f"target={args.probes} probes"
+                    f"pump magnitudes alternate {args.pump_v_low:.3f}/{args.pump_v_high:.3f} V "
+                    f"at rocking turns; polarity={args.pump_polarity:+d}, "
+                    f"lead={args.pump_lead_ms:.0f} ms; target={args.probes} crossings"
                 )
                 print(
-                    "pump continues uninterrupted until the body actually enters "
-                    f"+/-{args.capture_deg:.1f} deg of a vertex"
+                    "no command is sent at a vertex; the steady measured pump Vq is the ID input"
                 )
 
                 with (
@@ -235,15 +282,15 @@ async def run(args: argparse.Namespace) -> int:
                     ))
                     raw_writer.writerow((
                         "schema_version", "controller_phase", "nearest_vertex",
-                        "vertex_error_deg", "pump_polarity",
-                        "pump_accel_est_rad_s2", "pump_predicted_rate_rad_s",
-                        *TELEMETRY_FIELDS,
+                        "vertex_error_deg", "pump_polarity", "pump_half_cycle",
+                        "pump_command_mag_v", "pump_accel_est_rad_s2",
+                        "pump_predicted_rate_rad_s", *TELEMETRY_FIELDS,
                     ))
                     await transport.send("telemetry on")
 
                     start_mono = time.monotonic()
                     while time.monotonic() - start_mono < args.max_duration:
-                        if successful_probes >= args.probes:
+                        if accepted_crossings >= args.probes:
                             completed = True
                             break
 
@@ -256,69 +303,62 @@ async def run(args: argparse.Namespace) -> int:
                         measured_vq = float(row["vq_v"])
                         t_us = int(row["t_us"])
                         predicted_rate = update_pump_prediction(rate, t_us)
-                        vertex_id, center_deg, error_deg = nearest_vertex(theta, centers)
+                        update_half_cycle(predicted_rate)
+                        desired_vq = (
+                            args.pump_polarity * pump_rate_sign * current_pump_mag
+                        )
+                        await set_vq(transport, desired_vq)
 
+                        vertex_id, center_deg, error_deg = nearest_vertex(theta, centers)
                         raw_writer.writerow((
                             SCHEMA_VERSION, controller_phase, vertex_id, error_deg,
-                            args.pump_polarity, pump_accel_est, predicted_rate, *values,
+                            args.pump_polarity, half_cycle_index, current_pump_mag,
+                            pump_accel_est, predicted_rate, *values,
                         ))
                         total_raw_rows += 1
 
                         recent_angles.append((t_us, math.degrees(theta)))
                         while recent_angles and (t_us - recent_angles[0][0]) > 2_000_000:
                             recent_angles.popleft()
-
                         now = time.monotonic()
                         if now - last_progress_print >= 3.0 and recent_angles:
                             angles = [item[1] for item in recent_angles]
                             span = max(angles) - min(angles)
                             print(
-                                f"pump progress: span_2s={span:.1f} deg, "
-                                f"nearest={vertex_id} distance={abs(error_deg):.1f} deg, "
-                                f"body_rate={rate:+.2f}, wheel_rate={float(row['vel_rad_s']):+.2f} rad/s"
+                                f"pump progress: span_2s={span:.1f} deg, nearest={vertex_id} "
+                                f"distance={abs(error_deg):.1f} deg, body_rate={rate:+.2f}, "
+                                f"wheel_rate={float(row['vel_rad_s']):+.2f} rad/s, "
+                                f"Vq={measured_vq:+.2f} V"
                             )
                             last_progress_print = now
 
+                        if abs(error_deg) >= args.rearm_deg:
+                            capture_armed = True
+
                         if controller_phase == "pump":
-                            if abs(predicted_rate) >= args.rate_switch:
-                                pump_rate_sign = 1 if predicted_rate > 0.0 else -1
-                            desired = args.pump_polarity * pump_rate_sign * args.pump_v
-                            await set_vq(transport, desired)
-
-                            if abs(error_deg) >= args.rearm_deg:
-                                capture_armed = True
-
                             if capture_armed and abs(error_deg) <= args.capture_deg:
-                                attempted_probes += 1
-                                current_trial = attempted_probes
+                                attempted_crossings += 1
+                                current_trial = attempted_crossings
                                 current_vertex = vertex_id
                                 current_center_deg = center_deg
                                 current_ref_rad = math.radians(center_deg)
-                                current_probe_v = probe_voltage(
-                                    current_trial - 1,
-                                    args.probe_v_positive,
-                                    args.probe_v_negative,
-                                )
                                 capture_t_us = t_us
                                 active_rows = 0
-                                observed_probe_rows = 0
+                                local_vq_values = []
                                 max_abs_error_deg = abs(error_deg)
                                 capture_armed = False
+                                controller_phase = "capture"
 
-                                # Preserve one pre-command sample as the kinematic anchor.
                                 local_writer.writerow((
                                     SCHEMA_VERSION, current_trial, current_vertex,
                                     current_center_deg, "armed", current_ref_rad,
-                                    current_probe_v, *values,
+                                    measured_vq, *values,
                                 ))
                                 local_rows += 1
-
-                                controller_phase = "active"
-                                await set_vq(transport, current_probe_v)
                                 print(
-                                    f"probe {current_trial} CAPTURE vertex {current_vertex}: "
-                                    f"error={error_deg:+.2f} deg rate={rate:+.3f} rad/s; "
-                                    f"command Vq={current_probe_v:+.3f} V"
+                                    f"crossing {current_trial} CAPTURE vertex {current_vertex}: "
+                                    f"error={error_deg:+.2f} deg rate={rate:+.3f} rad/s, "
+                                    f"steady Vq={measured_vq:+.3f} V"
                                 )
                             continue
 
@@ -329,16 +369,15 @@ async def run(args: argparse.Namespace) -> int:
                             max_abs_error_deg, abs(selected_error_deg)
                         )
 
-                        if controller_phase == "active":
+                        if controller_phase == "capture":
                             local_writer.writerow((
                                 SCHEMA_VERSION, current_trial, current_vertex,
                                 current_center_deg, "active", current_ref_rad,
-                                current_probe_v, *values,
+                                measured_vq, *values,
                             ))
                             local_rows += 1
                             active_rows += 1
-                            if abs(measured_vq - current_probe_v) <= 0.02:
-                                observed_probe_rows += 1
+                            local_vq_values.append(measured_vq)
 
                             assert capture_t_us is not None
                             elapsed = (t_us - capture_t_us) * 1.0e-6
@@ -346,31 +385,39 @@ async def run(args: argparse.Namespace) -> int:
                                 elapsed >= args.probe_duration
                                 or abs(selected_error_deg) >= args.probe_exit_deg
                             ):
+                                if local_vq_values:
+                                    vq_min = min(local_vq_values)
+                                    vq_max = max(local_vq_values)
+                                    vq_span = vq_max - vq_min
+                                    vq_mean = sum(local_vq_values) / len(local_vq_values)
+                                else:
+                                    vq_min = vq_max = vq_mean = 0.0
+                                    vq_span = math.inf
                                 accepted = (
-                                    observed_probe_rows >= args.min_observed_probe_rows
+                                    active_rows >= args.min_local_rows
+                                    and vq_span <= args.max_local_vq_span
                                 )
                                 trials.append({
                                     "trial": current_trial,
                                     "vertex_id": current_vertex,
                                     "vertex_center_deg": current_center_deg,
-                                    "planned_vq_v": current_probe_v,
                                     "active_rows": active_rows,
-                                    "observed_probe_rows": observed_probe_rows,
+                                    "measured_vq_mean_v": vq_mean,
+                                    "measured_vq_min_v": vq_min,
+                                    "measured_vq_max_v": vq_max,
+                                    "measured_vq_span_v": vq_span,
                                     "max_abs_vertex_error_deg": max_abs_error_deg,
                                     "accepted": accepted,
                                 })
                                 if accepted:
-                                    successful_probes += 1
+                                    accepted_crossings += 1
                                 print(
-                                    f"probe {current_trial} complete: vertex {current_vertex}, "
-                                    f"active_rows={active_rows}, measured_probe_rows={observed_probe_rows}, "
-                                    f"successful={successful_probes}/{args.probes}"
+                                    f"crossing {current_trial} complete: vertex {current_vertex}, "
+                                    f"rows={active_rows}, Vq_mean={vq_mean:+.3f} V, "
+                                    f"Vq_span={vq_span:.3f} V, "
+                                    f"accepted={accepted}, total={accepted_crossings}/{args.probes}"
                                 )
-
-                                # Resume energy pumping directly; do not issue motor stop
-                                # here because stopZeroVector() is electrical braking.
                                 controller_phase = "pump"
-                                commanded_vq = None
                             continue
 
                 await set_vq(transport, 0.0)
@@ -387,7 +434,7 @@ async def run(args: argparse.Namespace) -> int:
                         pass
     finally:
         metadata = {
-            "format": "triwhirl-auto-swing-id-run-v3",
+            "format": "triwhirl-auto-swing-id-run-v4",
             "telemetry_schema_version": SCHEMA_VERSION,
             "transport": "ble",
             "device_name": args.name,
@@ -399,22 +446,22 @@ async def run(args: argparse.Namespace) -> int:
                 "sensor_dir": motor_config.sensor_dir,
                 "offset_rad": motor_config.offset_rad,
             },
-            "pump_v": args.pump_v,
+            "pump_v_low": args.pump_v_low,
+            "pump_v_high": args.pump_v_high,
             "pump_polarity": args.pump_polarity,
             "pump_lead_ms": args.pump_lead_ms,
             "pump_accel_alpha": args.pump_accel_alpha,
-            "probe_v_positive": args.probe_v_positive,
-            "probe_v_negative_abs": args.probe_v_negative,
             "capture_deg": args.capture_deg,
             "probe_exit_deg": args.probe_exit_deg,
             "rearm_deg": args.rearm_deg,
-            "probe_duration_s": args.probe_duration,
-            "min_observed_probe_rows": args.min_observed_probe_rows,
+            "local_window_duration_s": args.probe_duration,
+            "min_local_rows": args.min_local_rows,
+            "max_local_vq_span_v": args.max_local_vq_span,
             "max_duration_s": args.max_duration,
             "vertex_a_deg": args.vertex_a_deg,
             "vertex_centers_deg": centers,
-            "successful_probes": successful_probes,
-            "attempted_probes": attempted_probes,
+            "accepted_crossings": accepted_crossings,
+            "attempted_crossings": attempted_crossings,
             "local_rows": local_rows,
             "raw_rows": total_raw_rows,
             "trials": trials,
@@ -430,8 +477,8 @@ async def run(args: argparse.Namespace) -> int:
     print(f"saved run metadata -> {metadata_output}")
     if not completed:
         print(
-            f"run ended after {successful_probes}/{args.probes} successful probes "
-            f"from {attempted_probes} actual vertex entries"
+            f"run ended after {accepted_crossings}/{args.probes} accepted crossings "
+            f"from {attempted_crossings} vertex entries"
         )
     return 0
 
