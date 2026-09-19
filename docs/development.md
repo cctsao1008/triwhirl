@@ -20,13 +20,31 @@ idf.py build
 
 ## Flash and monitor
 
-For the current CH340 connection on Windows, replace the port as needed:
+The current board exposes its CH340 download path through USB Type-C, but entering the ESP32 ROM download mode is manual on this hardware.
+
+For the verified board procedure:
+
+1. connect the board to the PC through USB Type-C and power the board;
+2. press and hold the board's **Download** button;
+3. press the **Reset** button to enter download mode;
+4. flash through the CH340 COM port;
+5. after flashing, release **Download** if it is still held and press **Reset** once to run the application.
+
+For the current Windows connection:
 
 ```bash
-idf.py -p COM28 flash monitor
+idf.py -p COM28 flash
 ```
 
-Exit the monitor with the ESP-IDF monitor escape sequence shown by `idf.py monitor`.
+Then start the monitor separately:
+
+```bash
+idf.py -p COM28 monitor
+```
+
+The port number may differ on another PC. The board may require the manual Reset press after flashing even if esptool reports a hard reset through RTS.
+
+Exit the ESP-IDF monitor with `Ctrl+]`.
 
 ## Repository structure
 
