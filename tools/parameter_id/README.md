@@ -1,6 +1,6 @@
 # Local parameter identification
 
-TriWhirl keeps acquisition and model fitting separate: the firmware owns motor/safety limits, `acquire.py` records an explicit commanded experiment, and `local_fit.py` estimates a preliminary local model from the resulting telemetry.
+TriWhirl keeps acquisition and model fitting separate: the firmware owns motor/safety limits, the host acquisition tools record an explicit commanded experiment, and `local_fit.py` estimates a preliminary local model from the resulting telemetry.
 
 ## Python dependencies
 
@@ -10,25 +10,54 @@ Install the host-side dependencies into the active Python environment once:
 python -m pip install -r tools/parameter_id/requirements.txt
 ```
 
-This installs NumPy for fitting and pySerial for UART acquisition.
+This installs NumPy for fitting, pySerial for UART acquisition, and Bleak for untethered BLE acquisition.
 
-## Acquire a run
+## Untethered BLE acquisition
 
-`acquire.py` drives only the `Vq` values explicitly supplied on the command line. It does not invent excitation amplitudes or hardware safety thresholds.
+For body-motion identification the USB cable must not mechanically disturb the TriWhirl body. The existing native NimBLE firmware already exposes the same command/telemetry protocol used by UART, so `acquire_ble.py` records the experiment while the unit runs from its battery.
+
+The BLE service is the same one used by the WebUI:
+
+```text
+Device  TriWhirl
+Service 54f10000-8f4d-4f3a-b691-54524957484c
+RX      54f10001-8f4d-4f3a-b691-54524957484c
+TX      54f10002-8f4d-4f3a-b691-54524957484c
+```
+
+A zero-actuation free-body capture does not require a motor electrical configuration:
+
+```powershell
+python tools/parameter_id/acquire_ble.py `
+  --segment=0:8 `
+  --pre-roll 0 `
+  --post-roll 0 `
+  -o artifacts/body-free-01.csv
+```
+
+The tool scans for `TriWhirl`, connects to its native GATT service, subscribes to telemetry, waits for valid attitude and wheel-rate state, records schema-v2 CSV, and always sends `motor stop` / `telemetry off` before disconnecting when the connection remains available.
+
+For a later nonzero-`Vq` BLE experiment, the tool automatically reapplies `artifacts/motor-config.json` after a battery boot. The same commissioned motor configuration used by UART is therefore reused without another calibration. Negative segment values should be passed with `=` in PowerShell, for example `--segment=-0.25:0.8`.
+
+Use `--address <BLE-address-or-device-id>` only if name-based discovery is ambiguous; otherwise the default `TriWhirl` scan is sufficient.
+
+## UART acquisition
+
+`acquire.py` is retained for tethered motor/actuator work where the USB cable does not affect the experiment. It drives only the `Vq` values explicitly supplied on the command line and does not invent excitation amplitudes or hardware safety thresholds.
 
 Example profile:
 
 ```powershell
 python tools/parameter_id/acquire.py COM28 `
-  --segment 0.25:0.8 `
-  --segment 0:0.4 `
-  --segment -0.25:0.8 `
-  --segment 0:0.4 `
+  --segment=0.25:0.8 `
+  --segment=0:0.4 `
+  --segment=-0.25:0.8 `
+  --segment=0:0.4 `
   --repeat 4 `
   -o logs/local-id.csv
 ```
 
-A segment is `Vq_volts:duration_seconds`. The tool:
+A segment is `Vq_volts:duration_seconds`. The UART tool:
 
 - opens the existing CH340 UART;
 - commands the motor stopped before acquisition;
@@ -42,18 +71,6 @@ A segment is `Vq_volts:duration_seconds`. The tool:
 - writes schema-v2 CSV plus a JSON sidecar containing the exact excitation profile, motor configuration, and run metadata.
 
 The CSV adds a `phase` column but otherwise preserves the normal telemetry field names, so it can be consumed directly by `local_fit.py`.
-
-The first run after commissioning can request calibration explicitly:
-
-```powershell
-python tools/parameter_id/acquire.py COM28 --auto-calibrate `
-  --segment 0.25:0.8 --segment 0:0.4 `
-  -o logs/local-id.csv
-```
-
-After that, the same local `artifacts/motor-config.json` is reapplied automatically after firmware resets. Use `--motor-config <path>` to select a different board/motor commissioning file, or delete the file when the actuator configuration must be re-established.
-
-The operator still chooses the actual `Vq` profile. Firmware remains authoritative for actuation limits and latched faults.
 
 ## Fit the local model
 
@@ -72,6 +89,6 @@ Example:
 python tools/parameter_id/local_fit.py logs/local-id.csv --max-abs-theta 0.25 --max-abs-vq 1.0 -o artifacts/local-fit.json
 ```
 
-The fitter requires NumPy and reports coefficients, coefficient standard errors, RMSE, R², matrix rank, condition number, singular values, sample period, and the filters applied.
+The fitter estimates derivatives from held-input local linear slopes rather than adjacent-sample differences. It reports coefficient uncertainty, RMSE, R², matrix rank, raw and normalized conditioning, singular values, sample period, and `Vq` coefficient significance.
 
-The result is not treated as a validated plant merely because the regression runs. A controller-quality model still requires controlled near-upright experiment logs with sufficient excitation, repeated operating conditions, and residual review.
+A successful regression is not by itself a validated plant model; excitation quality, experiment posture, and physical consistency remain part of the model evidence.
