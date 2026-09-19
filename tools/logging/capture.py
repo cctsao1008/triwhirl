@@ -11,7 +11,7 @@ from pathlib import Path
 
 import serial
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TELEMETRY_FIELDS = (
     "t_us",
     "mode",
@@ -44,6 +44,7 @@ TELEMETRY_FIELDS = (
     "loop_exec_us",
     "loop_max_exec_us",
     "loop_overruns",
+    "fault_mask",
 )
 
 EXPECTED_HEADER = "telemetry_fields," + ",".join(TELEMETRY_FIELDS)
@@ -131,7 +132,7 @@ def main() -> int:
 
                 if line.startswith("telemetry_fields,"):
                     print(
-                        "warning: firmware telemetry header does not match schema v1",
+                        f"warning: firmware telemetry header does not match schema v{SCHEMA_VERSION}",
                         file=sys.stderr,
                     )
                     if not args.quiet:
