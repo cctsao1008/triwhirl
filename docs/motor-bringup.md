@@ -11,7 +11,7 @@ The host-testable three-phase field generator must satisfy:
 1. all phase commands stay inside `[0, voltage_limit]`;
 2. the three phase commands remain balanced around the same center voltage;
 3. excessive requested amplitude is clamped;
-4. invalid floating-point input fails passive.
+4. invalid floating-point input collapses to the board's zero line-to-line command rather than producing an uncontrolled phase command.
 
 Wheel kinematics are also exercised on the host. The tests cover forward/reverse AS5600 wrap, `micros()` timer wrap, zero-delta-time rejection, direction-ambiguous half-turn samples, and first-order velocity filtering.
 
@@ -20,6 +20,8 @@ Wheel kinematics are also exercised on the host. The tests cover forward/reverse
 The PCB ties each `Moto_INx` net to both EG2133 `HINx` and active-low `LINx#`. A driven low selects the low-side MOSFET and a driven high selects the high-side MOSFET. There is no separate phase-enable signal on this board.
 
 `stop` and the boot state command all three PWM duties to zero. This is the **low-side zero vector**: all three motor phases are tied to the low rail. The commanded line-to-line motor voltage is zero, but the bridge is not high impedance. A hand-spun reaction wheel may therefore show dynamic-braking drag. This behavior is expected from the board topology and should not be mistaken for an encoder or bearing fault.
+
+The same distinction applies to software fallback paths that emit `{0,0,0}`: they remove commanded line-to-line drive, but they do not electrically disconnect the motor.
 
 ## Stage M1: AS5600 sanity
 
