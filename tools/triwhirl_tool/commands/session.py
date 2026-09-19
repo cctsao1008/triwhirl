@@ -1,20 +1,29 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import math
 import time
 from pathlib import Path
 from typing import Sequence
 
-from .log import decode_main, download_main, prepare_main, start_main, stop_main
+from .log import (
+    _close_line_transport,
+    _open_line_transport,
+    _request_log_status,
+    _wait_console,
+    decode_main,
+    download_main,
+)
 from ..ble import DEVICE_NAME
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a complete firmware-owned TWLG recording lifecycle: prepare, "
-            "start, wait, stop/finalize, download, and optionally decode."
+            "Run a complete firmware-owned TWLG recording lifecycle. The BLE "
+            "control connection stays open from prepare through stop so the "
+            "requested recording interval is not extended by reconnect latency."
         )
     )
     parser.add_argument(
@@ -38,7 +47,7 @@ def _parser() -> argparse.ArgumentParser:
         "--reserve-seconds",
         type=float,
         default=2.0,
-        help="extra prepared capacity for host stop-command latency [s]",
+        help="extra prepared capacity beyond the requested recording interval [s]",
     )
     parser.add_argument("--prepare-timeout", type=float, default=90.0)
     parser.add_argument("--control-timeout", type=float, default=5.0)
@@ -59,6 +68,100 @@ def _ble_args(args: argparse.Namespace) -> list[str]:
     return result
 
 
+async def _wait_ready(
+    transport,
+    *,
+    timeout_s: float,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    last_state = ""
+    while time.monotonic() < deadline:
+        _line, status = await _request_log_status(transport, 3.0)
+        state = status.get("state", "unknown")
+        if state != last_state:
+            print(
+                f"log state={state} prepared_bytes={status.get('prepared_bytes', '?')} "
+                f"partition_bytes={status.get('partition_bytes', '?')}"
+            )
+            last_state = state
+        if state == "ready":
+            return
+        if state in {"error", "unavailable"}:
+            raise RuntimeError(f"logger entered state={state}")
+        await asyncio.sleep(0.25)
+    raise RuntimeError(f"timed out after {timeout_s:.1f}s waiting for logger state=ready")
+
+
+async def _wait_complete(
+    transport,
+    *,
+    timeout_s: float,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        _line, status = await _request_log_status(transport, 3.0)
+        state = status.get("state", "unknown")
+        buffered = status.get("buffered_bytes", "?")
+        if state == "complete":
+            print(
+                f"log state=complete records={status.get('records_written', '?')} "
+                f"logical_bytes={status.get('logical_bytes', '?')} "
+                f"dropped={status.get('dropped_records', '?')}"
+            )
+            return
+        if state == "error":
+            raise RuntimeError("logger entered state=error while stopping")
+        print(f"log state={state} buffered_bytes={buffered}")
+        await asyncio.sleep(0.1)
+    raise RuntimeError("timed out waiting for logger state=complete")
+
+
+async def _record_run(
+    args: argparse.Namespace,
+    prepared_seconds: float,
+) -> bool:
+    client, transport = await _open_line_transport(args)
+    started = False
+    interrupted = False
+    try:
+        await transport.send(f"log prepare {prepared_seconds:.9g}")
+        prepare_line = await _wait_console(
+            transport,
+            prefixes=("OK log prepare",),
+            timeout_s=args.control_timeout,
+        )
+        print(prepare_line)
+        await _wait_ready(transport, timeout_s=args.prepare_timeout)
+
+        await transport.send("log start")
+        start_line = await _wait_console(
+            transport,
+            prefixes=("OK log start",),
+            timeout_s=args.control_timeout,
+        )
+        print(start_line)
+        started = True
+
+        try:
+            await asyncio.sleep(args.seconds)
+        except asyncio.CancelledError:
+            interrupted = True
+            print("recording interrupted; finalizing the captured TWLG before exit")
+
+        if started:
+            await transport.send("log stop")
+            stop_line = await _wait_console(
+                transport,
+                prefixes=("OK log stopping",),
+                timeout_s=args.control_timeout,
+            )
+            print(stop_line)
+            await _wait_complete(transport, timeout_s=args.finalize_timeout)
+        return interrupted
+    finally:
+        await _close_line_transport(client, transport)
+
+
 def session_main(argv: Sequence[str]) -> int:
     args = _parser().parse_args(list(argv))
     if not math.isfinite(args.seconds) or args.seconds <= 0.0:
@@ -76,36 +179,14 @@ def session_main(argv: Sequence[str]) -> int:
         f"record={args.seconds:.3f}s, output={args.output}"
     )
 
-    rc = prepare_main(
-        [
-            f"{prepared_seconds:.9g}",
-            *ble,
-            "--wait-timeout",
-            f"{args.prepare_timeout:.9g}",
-        ]
-    )
-    if rc != 0:
-        return rc
-
-    rc = start_main([*ble, "--timeout", f"{args.control_timeout:.9g}"])
-    if rc != 0:
-        return rc
-
-    interrupted = False
     try:
-        deadline = time.monotonic() + args.seconds
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                break
-            time.sleep(min(0.25, remaining))
+        interrupted = asyncio.run(_record_run(args, prepared_seconds))
     except KeyboardInterrupt:
-        interrupted = True
-        print("recording interrupted; finalizing the captured TWLG before exit")
-
-    rc = stop_main([*ble, "--timeout", f"{args.finalize_timeout:.9g}"])
-    if rc != 0:
-        return rc
+        print("error: recording interrupted before firmware finalization completed")
+        return 130
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 1
 
     rc = download_main(
         [
