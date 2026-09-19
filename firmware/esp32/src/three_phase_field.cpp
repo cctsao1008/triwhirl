@@ -1,12 +1,15 @@
 #include "triwhirl/three_phase_field.hpp"
 
-#include <algorithm>
 #include <cmath>
 
 namespace triwhirl {
 namespace {
 constexpr float kSqrt3Over2 = 0.8660254037844386F;
+
+float clampValue(const float value, const float low, const float high) {
+  return value < low ? low : (value > high ? high : value);
 }
+}  // namespace
 
 PhaseVoltages makeRotatingField(const float electrical_angle_rad,
                                 const float amplitude_v,
@@ -17,7 +20,7 @@ PhaseVoltages makeRotatingField(const float electrical_angle_rad,
   }
 
   const float max_amplitude = 0.5F * voltage_limit_v;
-  const float amplitude = std::clamp(amplitude_v, 0.0F, max_amplitude);
+  const float amplitude = clampValue(amplitude_v, 0.0F, max_amplitude);
   const float center = 0.5F * voltage_limit_v;
 
   const float alpha = -amplitude * std::sin(electrical_angle_rad);
@@ -28,9 +31,9 @@ PhaseVoltages makeRotatingField(const float electrical_angle_rad,
   const float c = (-0.5F * alpha - kSqrt3Over2 * beta) + center;
 
   return {
-      std::clamp(a, 0.0F, voltage_limit_v),
-      std::clamp(b, 0.0F, voltage_limit_v),
-      std::clamp(c, 0.0F, voltage_limit_v),
+      clampValue(a, 0.0F, voltage_limit_v),
+      clampValue(b, 0.0F, voltage_limit_v),
+      clampValue(c, 0.0F, voltage_limit_v),
   };
 }
 
