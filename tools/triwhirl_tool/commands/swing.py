@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..ble import DEVICE_NAME
+from ..swing_log import write_fit_csv
 from .log import (
     _close_line_transport,
     _normalize_console_line,
@@ -30,7 +31,13 @@ def _parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("-o", "--output", type=Path, required=True)
-    parser.add_argument("--csv", type=Path, default=None)
+    parser.add_argument("--csv", type=Path, default=None, help="optional full decoded TWLG CSV")
+    parser.add_argument(
+        "--fit-csv",
+        type=Path,
+        default=None,
+        help="fit-ready probe-window CSV; default: <output-stem>-active.csv",
+    )
     parser.add_argument("--motor-config", type=Path, default=Path("artifacts/motor-config.json"))
     parser.add_argument("--captures", type=int, default=12)
     parser.add_argument("--pump-v-low", type=float, default=0.40)
@@ -163,8 +170,6 @@ def _parse_state_line(line: str) -> tuple[str, str]:
     normalized = _normalize_console_line(line)
     if normalized.startswith("event,swing_id,"):
         values = _parse_key_values(normalized, "event")
-        # _parse_key_values starts after the first comma, so the literal
-        # swing_id field is ignored and key=value items are retained.
         return values.get("state", ""), values.get("reason", "")
     if normalized.startswith("swing,"):
         values = _parse_key_values(normalized, "swing")
@@ -296,8 +301,6 @@ async def _run(args: argparse.Namespace) -> tuple[str, str]:
                 timeout_s=3.0,
             )
         )
-        # Firmware also emits a status line after config. It describes the idle
-        # pre-run state and is not an experiment event.
         await asyncio.sleep(0.05)
         transport.drain()
 
@@ -347,6 +350,17 @@ def swing_main(argv: Sequence[str]) -> int:
         rc = decode_main([str(args.output), "-o", str(args.csv)])
         if rc != 0:
             return rc
+
+    fit_csv = args.fit_csv
+    if fit_csv is None:
+        fit_csv = args.output.with_name(args.output.stem + "-active.csv")
+    try:
+        write_fit_csv(args.output, fit_csv, vertex_a_deg=args.vertex_a_deg)
+    except RuntimeError as exc:
+        if state == "complete":
+            print(f"error: completed swing run has no usable probe windows: {exc}")
+            return 1
+        print(f"warning: no fit-ready probe CSV generated: {exc}")
 
     inspect_main([str(args.output)])
     if state == "complete":
