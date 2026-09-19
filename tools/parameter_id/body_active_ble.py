@@ -50,7 +50,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trials", type=int, default=4)
     parser.add_argument(
         "--vq", type=float, default=0.25,
-        help="absolute Vq excitation [V]; default reuses the proven +/-0.25 V level",
+        help="default absolute Vq excitation [V] used for both signs",
+    )
+    parser.add_argument(
+        "--vq-positive", type=float, default=None,
+        help="optional positive Vq magnitude [V], overriding --vq for + trials",
+    )
+    parser.add_argument(
+        "--vq-negative", type=float, default=None,
+        help="optional negative Vq magnitude [V], overriding --vq for - trials",
     )
     parser.add_argument(
         "--pulse-duration", type=float, default=0.12,
@@ -95,8 +103,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def planned_sign(trial: int) -> int:
-    # Balanced + - - + in each block of four to reduce correlation with slow drift.
     return (1, -1, -1, 1)[(trial - 1) % 4]
+
+
+def excitation_for_trial(args: argparse.Namespace, trial: int) -> float:
+    sign = planned_sign(trial)
+    pos = args.vq if args.vq_positive is None else args.vq_positive
+    neg = args.vq if args.vq_negative is None else args.vq_negative
+    return pos if sign > 0 else -neg
 
 
 async def acquire_held_vertex(
@@ -106,7 +120,6 @@ async def acquire_held_vertex(
     stable_span_rad: float,
     locked_vertex: str | None,
 ) -> tuple[str, float, float, list[tuple[list[str], dict[str, str]]]]:
-    """Return (vertex_id, nominal_center_deg, theta_ref_rad, baseline)."""
     centers = vertex_centers_deg(args.vertex_a_deg)
     requested = None if args.vertex == "auto" else args.vertex
     expected = locked_vertex or requested
@@ -159,7 +172,6 @@ async def arm_input_before_release(
     total_rows: list[int],
     timeout_s: float = 4.0,
 ) -> tuple[list[str], dict[str, str]]:
-    """Command Vq while held and wait until telemetry proves it is established."""
     await transport.send(f"motor vq {planned_vq:.9g}")
     deadline = time.monotonic() + timeout_s
     confirmed = 0
@@ -201,8 +213,13 @@ async def arm_input_before_release(
 async def run(args: argparse.Namespace) -> int:
     if args.trials < 2:
         raise RuntimeError("--trials must be >= 2 so both Vq signs are represented")
-    if not math.isfinite(args.vq) or args.vq <= 0.0:
-        raise RuntimeError("--vq must be finite and > 0")
+    amplitudes = [args.vq]
+    if args.vq_positive is not None:
+        amplitudes.append(args.vq_positive)
+    if args.vq_negative is not None:
+        amplitudes.append(args.vq_negative)
+    if any((not math.isfinite(v) or v <= 0.0) for v in amplitudes):
+        raise RuntimeError("Vq magnitudes must be finite and > 0")
     if args.pulse_duration <= 0.0 or args.max_local_duration <= args.pulse_duration:
         raise RuntimeError("require 0 < --pulse-duration < --max-local-duration")
     if args.max_angle_deg <= args.trigger_angle_deg:
@@ -226,11 +243,14 @@ async def run(args: argparse.Namespace) -> int:
     trigger_angle_rad = math.radians(args.trigger_angle_deg)
     max_angle_rad = math.radians(args.max_angle_deg)
     centers = vertex_centers_deg(args.vertex_a_deg)
+    positive_vq = args.vq if args.vq_positive is None else args.vq_positive
+    negative_vq = args.vq if args.vq_negative is None else args.vq_negative
 
     print(
         "upright vertices in current IMU frame: "
         + ", ".join(f"{vertex_id}={center:.1f} deg" for vertex_id, center in centers.items())
     )
+    print(f"excitation: +{positive_vq:.3f} V / -{negative_vq:.3f} V")
     if args.vertex == "auto":
         print("vertex mode: auto; the first legal held vertex will lock this run")
     else:
@@ -265,8 +285,7 @@ async def run(args: argparse.Namespace) -> int:
                     await transport.send("telemetry on")
 
                     for trial in range(1, args.trials + 1):
-                        sign = planned_sign(trial)
-                        planned_vq = sign * args.vq
+                        planned_vq = excitation_for_trial(args, trial)
 
                         vertex_id, vertex_center_deg, theta_ref, baseline = (
                             await acquire_held_vertex(
@@ -402,7 +421,7 @@ async def run(args: argparse.Namespace) -> int:
                         pass
     finally:
         metadata = {
-            "format": "triwhirl-body-active-run-v3",
+            "format": "triwhirl-body-active-run-v4",
             "telemetry_schema_version": SCHEMA_VERSION,
             "transport": "ble",
             "device_name": args.name,
@@ -415,6 +434,8 @@ async def run(args: argparse.Namespace) -> int:
                 "offset_rad": motor_config.offset_rad,
             },
             "vq_abs_v": args.vq,
+            "vq_positive_v": positive_vq,
+            "vq_negative_v": negative_vq,
             "pulse_duration_after_release_s": args.pulse_duration,
             "max_local_duration_s": args.max_local_duration,
             "max_angle_deg": args.max_angle_deg,
