@@ -20,6 +20,7 @@
 #include "triwhirl/drivers/as5600.hpp"
 #include "triwhirl/drivers/mpu6050.hpp"
 #include "triwhirl/motor/three_pwm_bridge.hpp"
+#include "triwhirl/safety.hpp"
 #include "triwhirl/voltage_mode_foc.hpp"
 #include "triwhirl/wheel_kinematics.hpp"
 
@@ -29,6 +30,8 @@ using triwhirl::AttitudeEstimate;
 using triwhirl::MotorElectricalConfig;
 using triwhirl::PhaseVoltages;
 using triwhirl::PlanarAttitudeEstimator;
+using triwhirl::SafetyFault;
+using triwhirl::SafetyLatch;
 using triwhirl::WheelKinematics;
 using triwhirl::WheelKinematicsState;
 using triwhirl::drivers::As5600;
@@ -47,6 +50,7 @@ constexpr float kDefaultCalibrationTurns = 4.0F;
 constexpr std::uint32_t kCalibrationAlignUs = 500000U;
 constexpr std::uint32_t kCalibrationSettleUs = 400000U;
 constexpr std::uint32_t kControlPeriodUs = 1000U;
+constexpr std::uint32_t kHardControlPeriodUs = 2U * kControlPeriodUs;
 constexpr std::uint32_t kEncoderSamplePeriodUs = 1000U;
 constexpr std::uint32_t kEncoderHealthPeriodUs = 100000U;
 constexpr std::uint32_t kImuSamplePeriodUs = 1000U;
@@ -116,6 +120,7 @@ Mpu6050 imu;
 WheelKinematics wheel_kinematics(kWheelVelocityFilterTauS);
 PlanarAttitudeEstimator attitude_estimator;
 ThreePwmBridge bridge;
+SafetyLatch safety_latch;
 
 As5600Status encoder_status{};
 WheelKinematicsState wheel_state{};
@@ -418,11 +423,124 @@ void stopMotor() {
   bridge.stopZeroVector();
 }
 
-void applyDq(const float electrical_angle, const float vd_v, const float vq_v) {
+bool motorActive() {
+  return motor_mode != MotorMode::kStopped;
+}
+
+bool hasFault(const SafetyFault fault) {
+  return (safety_latch.mask() & triwhirl::safetyFaultMask(fault)) != 0U;
+}
+
+void tripFault(const SafetyFault fault) {
+  const std::uint32_t before = safety_latch.mask();
+  safety_latch.trip(fault);
+  stopMotor();
+  if ((before & triwhirl::safetyFaultMask(fault)) == 0U) {
+    consolePrintf("FAULT,code=%s,mask=0x%08lx\r\n",
+                  triwhirl::safetyFaultName(fault),
+                  static_cast<unsigned long>(safety_latch.mask()));
+  }
+}
+
+bool motorNumericsHealthy() {
+  if (!std::isfinite(wheel_state.angle_rad) ||
+      !std::isfinite(wheel_state.unwrapped_angle_rad) ||
+      !std::isfinite(open_loop_hz) ||
+      !std::isfinite(open_loop_amplitude_v) ||
+      !std::isfinite(open_loop_angle_rad) ||
+      !std::isfinite(vq_command_v) ||
+      !std::isfinite(electrical_angle_rad)) {
+    return false;
+  }
+  if (wheel_state.velocity_valid &&
+      (!std::isfinite(wheel_state.velocity_rad_s) ||
+       !std::isfinite(wheel_state.instantaneous_velocity_rad_s))) {
+    return false;
+  }
+  if (attitude_state.valid &&
+      (!std::isfinite(attitude_state.angle_rad) ||
+       !std::isfinite(attitude_state.rate_rad_s))) {
+    return false;
+  }
+  return true;
+}
+
+bool motorStartAllowed() {
+  if (safety_latch.faulted()) {
+    consolePrintf("ERR safety fault latched first=%s mask=0x%08lx; use 'fault status'\r\n",
+                  triwhirl::safetyFaultName(safety_latch.firstFault()),
+                  static_cast<unsigned long>(safety_latch.mask()));
+    return false;
+  }
+  if (!encoder_sample_valid) {
+    consoleWrite("ERR encoder read unavailable\r\n");
+    return false;
+  }
+  if (!motorNumericsHealthy()) {
+    consoleWrite("ERR invalid runtime numeric state\r\n");
+    return false;
+  }
+  return true;
+}
+
+bool faultClearReady() {
+  if (motorActive() || !motorNumericsHealthy()) {
+    return false;
+  }
+  if (hasFault(SafetyFault::kEncoderUnavailable) && !encoder_sample_valid) {
+    return false;
+  }
+  if (hasFault(SafetyFault::kImuUnavailable) && !imu_sample_valid) {
+    return false;
+  }
+  return true;
+}
+
+void evaluateSafety(const std::int64_t start_us) {
+  if (!motorActive() || safety_latch.faulted()) {
+    return;
+  }
+
+  if (!encoder_sample_valid) {
+    tripFault(SafetyFault::kEncoderUnavailable);
+    return;
+  }
+
+  if (!motorNumericsHealthy()) {
+    tripFault(SafetyFault::kInvalidNumeric);
+    return;
+  }
+
+  if (motor_mode == MotorMode::kFoc && !motor_config_valid) {
+    tripFault(SafetyFault::kCalibration);
+    return;
+  }
+
+  if (timing_stats.previous_start_us != 0 &&
+      start_us > timing_stats.previous_start_us) {
+    const std::uint64_t period_us = static_cast<std::uint64_t>(
+        start_us - timing_stats.previous_start_us);
+    if (period_us > kHardControlPeriodUs) {
+      tripFault(SafetyFault::kControlTiming);
+    }
+  }
+}
+
+bool applyDq(const float electrical_angle, const float vd_v, const float vq_v) {
+  if (!std::isfinite(electrical_angle) || !std::isfinite(vd_v) ||
+      !std::isfinite(vq_v)) {
+    tripFault(SafetyFault::kInvalidNumeric);
+    return false;
+  }
+
   const PhaseVoltages phase = triwhirl::makeDqVoltage(
       electrical_angle, vd_v, vq_v, triwhirl::board::kMotorBusNominalV,
       kMotorVectorLimitV);
-  bridge.setPhaseVoltages(phase.a, phase.b, phase.c);
+  if (!bridge.setPhaseVoltages(phase.a, phase.b, phase.c)) {
+    tripFault(SafetyFault::kActuator);
+    return false;
+  }
+  return true;
 }
 
 void finishCalibration() {
@@ -432,7 +550,7 @@ void finishCalibration() {
   const float mechanical_travel = std::fabs(delta_mechanical);
 
   if (!(mechanical_travel > 0.05F) || !std::isfinite(mechanical_travel)) {
-    stopMotor();
+    tripFault(SafetyFault::kCalibration);
     consoleWrite("ERR motor calibration: no usable mechanical motion\r\n");
     return;
   }
@@ -441,7 +559,7 @@ void finishCalibration() {
   const int pole_pairs = static_cast<int>(std::lround(pole_pairs_estimate));
   if (pole_pairs < 1 || pole_pairs > 64 ||
       std::fabs(pole_pairs_estimate - static_cast<float>(pole_pairs)) > 0.45F) {
-    stopMotor();
+    tripFault(SafetyFault::kCalibration);
     consolePrintf("ERR motor calibration: pole-pair estimate %.3f is invalid\r\n",
                   pole_pairs_estimate);
     return;
@@ -460,6 +578,12 @@ void finishCalibration() {
   motor_config.electrical_offset_rad = offset;
   motor_config_valid = triwhirl::validMotorElectricalConfig(motor_config);
 
+  if (!motor_config_valid) {
+    tripFault(SafetyFault::kCalibration);
+    consoleWrite("ERR motor calibration: generated configuration is invalid\r\n");
+    return;
+  }
+
   stopMotor();
   consolePrintf(
       "OK motor calibrated pole_pairs=%d sensor_dir=%d offset_rad=%.6f estimate=%.3f\r\n",
@@ -474,14 +598,16 @@ void updateCalibration(const std::uint32_t now_us) {
   }
 
   if (!encoder_sample_valid) {
-    stopMotor();
+    tripFault(SafetyFault::kEncoderUnavailable);
     consoleWrite("ERR motor calibration: encoder read unavailable\r\n");
     return;
   }
 
   if (calibration.stage == CalibrationStage::kAlign) {
     calibration.commanded_electrical_rad = 0.0F;
-    applyDq(0.0F, calibration.amplitude_v, 0.0F);
+    if (!applyDq(0.0F, calibration.amplitude_v, 0.0F)) {
+      return;
+    }
     if ((now_us - calibration.stage_start_us) >= kCalibrationAlignUs) {
       calibration.start_mechanical_rad = wheel_state.unwrapped_angle_rad;
       calibration.stage = CalibrationStage::kSweep;
@@ -501,14 +627,18 @@ void updateCalibration(const std::uint32_t now_us) {
       calibration.stage = CalibrationStage::kSettle;
       calibration.stage_start_us = now_us;
     }
-    applyDq(calibration.commanded_electrical_rad,
-            calibration.amplitude_v, 0.0F);
+    if (!applyDq(calibration.commanded_electrical_rad,
+                 calibration.amplitude_v, 0.0F)) {
+      return;
+    }
     return;
   }
 
   if (calibration.stage == CalibrationStage::kSettle) {
-    applyDq(calibration.commanded_electrical_rad,
-            calibration.amplitude_v, 0.0F);
+    if (!applyDq(calibration.commanded_electrical_rad,
+                 calibration.amplitude_v, 0.0F)) {
+      return;
+    }
     if ((now_us - calibration.stage_start_us) >= kCalibrationSettleUs) {
       finishCalibration();
     }
@@ -538,9 +668,14 @@ void updateMotor(const std::uint32_t now_us) {
   }
 
   if (motor_mode == MotorMode::kFoc) {
-    if (!motor_config_valid || !encoder_sample_valid) {
-      stopMotor();
-      consoleWrite("ERR FOC stopped: motor configuration or encoder unavailable\r\n");
+    if (!motor_config_valid) {
+      tripFault(SafetyFault::kCalibration);
+      consoleWrite("ERR FOC stopped: motor configuration unavailable\r\n");
+      return;
+    }
+    if (!encoder_sample_valid) {
+      tripFault(SafetyFault::kEncoderUnavailable);
+      consoleWrite("ERR FOC stopped: encoder unavailable\r\n");
       return;
     }
     electrical_angle_rad = triwhirl::electricalAngleFromMechanical(
@@ -558,12 +693,20 @@ void printBleStatus() {
       static_cast<unsigned long>(triwhirl::ble::txDroppedBytes()));
 }
 
+void printFaultStatus() {
+  consolePrintf("fault,latched=%d,mask=0x%08lx,first=%s\r\n",
+                safety_latch.faulted() ? 1 : 0,
+                static_cast<unsigned long>(safety_latch.mask()),
+                triwhirl::safetyFaultName(safety_latch.firstFault()));
+}
+
 void printTimingStatus() {
   const std::uint32_t min_period =
       timing_stats.iterations > 1U ? timing_stats.min_period_us : 0U;
   consolePrintf(
-      "timing,target_us=%lu,iterations=%llu,last_exec_us=%lu,max_exec_us=%lu,min_period_us=%lu,max_period_us=%lu,overruns=%llu,late_periods=%llu,uart_tx_drop_bytes=%lu,ble_rx_drop_bytes=%lu,ble_tx_drop_bytes=%lu\r\n",
+      "timing,target_us=%lu,hard_period_us=%lu,iterations=%llu,last_exec_us=%lu,max_exec_us=%lu,min_period_us=%lu,max_period_us=%lu,overruns=%llu,late_periods=%llu,uart_tx_drop_bytes=%lu,ble_rx_drop_bytes=%lu,ble_tx_drop_bytes=%lu\r\n",
       static_cast<unsigned long>(kControlPeriodUs),
+      static_cast<unsigned long>(kHardControlPeriodUs),
       static_cast<unsigned long long>(timing_stats.iterations),
       static_cast<unsigned long>(timing_stats.last_exec_us),
       static_cast<unsigned long>(timing_stats.max_exec_us),
@@ -595,6 +738,8 @@ void printHelp() {
   consoleWrite("  attitude reset [angle_rad]\r\n");
   consoleWrite("  timing status\r\n");
   consoleWrite("  timing reset\r\n");
+  consoleWrite("  fault status\r\n");
+  consoleWrite("  fault clear\r\n");
   consoleWrite("  ble status\r\n");
   consoleWrite("  field <electrical_hz> <amplitude_v>\r\n");
   consoleWrite("  stop\r\n");
@@ -606,7 +751,7 @@ void printHelp() {
 void printStatus() {
   refreshEncoderHealth();
   consolePrintf(
-      "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu,imu_ok=%d,attitude_ok=%d,theta_rad=%.6f,theta_rate_rad_s=%.6f,ble_connected=%d,ble_subscribed=%d\r\n",
+      "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu,imu_ok=%d,attitude_ok=%d,theta_rad=%.6f,theta_rate_rad_s=%.6f,ble_connected=%d,ble_subscribed=%d,fault_mask=0x%08lx,fault_first=%s\r\n",
       motorModeName(motor_mode), telemetry_enabled ? 1 : 0, vq_command_v,
       open_loop_hz, open_loop_amplitude_v, motor_config_valid ? 1 : 0,
       motor_config.pole_pairs, motor_config.sensor_direction,
@@ -623,7 +768,9 @@ void printStatus() {
       static_cast<unsigned long>(encoder_read_errors), imu_sample_valid ? 1 : 0,
       attitude_state.valid ? 1 : 0, attitude_state.angle_rad,
       attitude_state.rate_rad_s, triwhirl::ble::connected() ? 1 : 0,
-      triwhirl::ble::subscribed() ? 1 : 0);
+      triwhirl::ble::subscribed() ? 1 : 0,
+      static_cast<unsigned long>(safety_latch.mask()),
+      triwhirl::safetyFaultName(safety_latch.firstFault()));
 }
 
 void printImuStatus() {
@@ -731,20 +878,19 @@ void handleMotorCommand() {
       consoleWrite("ERR usage: motor vq <volts>\r\n");
       return;
     }
-    if (!motor_config_valid) {
-      consoleWrite("ERR motor is not calibrated/configured\r\n");
-      return;
-    }
-    if (!encoder_sample_valid) {
-      consoleWrite("ERR encoder read unavailable\r\n");
-      return;
-    }
     const float requested_vq =
         clampFinite(std::strtof(vq_token, nullptr), -kMotorVectorLimitV,
                     kMotorVectorLimitV);
     if (std::fabs(requested_vq) < 1.0e-4F) {
       stopMotor();
       consoleWrite("OK motor stop\r\n");
+      return;
+    }
+    if (!motorStartAllowed()) {
+      return;
+    }
+    if (!motor_config_valid) {
+      consoleWrite("ERR motor is not calibrated/configured\r\n");
       return;
     }
     vq_command_v = requested_vq;
@@ -757,6 +903,9 @@ void handleMotorCommand() {
     char* amplitude_token = std::strtok(nullptr, " \t");
     char* hz_token = std::strtok(nullptr, " \t");
     char* turns_token = std::strtok(nullptr, " \t");
+    if (!motorStartAllowed()) {
+      return;
+    }
     stopMotor();
     startCalibration(amplitude_token, hz_token, turns_token);
     return;
@@ -862,6 +1011,29 @@ void handleTimingCommand() {
   consoleWrite("ERR usage: timing <status|reset>\r\n");
 }
 
+void handleFaultCommand() {
+  char* action = std::strtok(nullptr, " \t");
+  if (action == nullptr || std::strcmp(action, "status") == 0) {
+    printFaultStatus();
+    return;
+  }
+  if (std::strcmp(action, "clear") == 0) {
+    stopMotor();
+    if (!safety_latch.faulted()) {
+      consoleWrite("OK fault already clear\r\n");
+      return;
+    }
+    if (!faultClearReady()) {
+      consoleWrite("ERR fault clear rejected; fault cause is still present\r\n");
+      return;
+    }
+    safety_latch.clear();
+    consoleWrite("OK fault clear\r\n");
+    return;
+  }
+  consoleWrite("ERR usage: fault <status|clear>\r\n");
+}
+
 void handleBleCommand() {
   char* action = std::strtok(nullptr, " \t");
   if (action == nullptr || std::strcmp(action, "status") == 0) {
@@ -894,6 +1066,11 @@ void handleCommand(char* line) {
 
   if (std::strcmp(command, "timing") == 0) {
     handleTimingCommand();
+    return;
+  }
+
+  if (std::strcmp(command, "fault") == 0) {
+    handleFaultCommand();
     return;
   }
 
@@ -955,6 +1132,9 @@ void handleCommand(char* line) {
     if (requested_amplitude <= 0.0F || requested_hz == 0.0F) {
       stopMotor();
       consoleWrite("OK field stopped\r\n");
+      return;
+    }
+    if (!motorStartAllowed()) {
       return;
     }
     stopMotor();
@@ -1035,7 +1215,7 @@ void emitTelemetry(const std::uint32_t now_us) {
   }
   last_telemetry_us = now_us;
   consolePrintf(
-      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%lu,%d,%.6f,%.6f,%.6f,%lu,%lu,%llu\r\n",
+      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%lu,%d,%.6f,%.6f,%.6f,%lu,%lu,%llu,%lu\r\n",
       static_cast<unsigned long>(now_us), motorModeName(motor_mode),
       vq_command_v, electrical_angle_rad, open_loop_hz,
       encoder_status_valid ? 1 : 0, encoder_sample_valid ? 1 : 0,
@@ -1053,7 +1233,8 @@ void emitTelemetry(const std::uint32_t now_us) {
       attitude_state.accel_weight,
       static_cast<unsigned long>(timing_stats.last_exec_us),
       static_cast<unsigned long>(timing_stats.max_exec_us),
-      static_cast<unsigned long long>(timing_stats.overruns));
+      static_cast<unsigned long long>(timing_stats.overruns),
+      static_cast<unsigned long>(safety_latch.mask()));
 }
 
 void updateTimingStats(const std::int64_t start_us, const std::int64_t end_us) {
@@ -1092,6 +1273,7 @@ void controlTask(void*) {
     const std::uint32_t loop_us = static_cast<std::uint32_t>(start_us);
     updateEncoder(loop_us);
     updateImu(loop_us);
+    evaluateSafety(start_us);
     updateMotor(loop_us);
     pollConsole();
     emitTelemetry(loop_us);
@@ -1146,15 +1328,18 @@ bool initImuBus(i2c_master_bus_handle_t* bus) {
 
 extern "C" void app_main(void) {
   if (!initConsole()) {
+    safety_latch.trip(SafetyFault::kStartup);
     return;
   }
 
   console_tx_stream = xStreamBufferCreate(kConsoleTxBufferBytes, 1U);
   if (console_tx_stream == nullptr) {
+    safety_latch.trip(SafetyFault::kStartup);
     return;
   }
   if (xTaskCreatePinnedToCore(consoleTxTask, "triwhirl_uart_tx", 4096, nullptr,
                               2, nullptr, 0) != pdPASS) {
+    safety_latch.trip(SafetyFault::kStartup);
     return;
   }
 
@@ -1165,7 +1350,8 @@ extern "C" void app_main(void) {
   i2c_master_bus_handle_t encoder_bus = nullptr;
   if (!initEncoderBus(&encoder_bus) ||
       !encoder.init(encoder_bus, triwhirl::board::kAs5600I2cAddress)) {
-    consoleWrite("FATAL AS5600 I2C init failed\r\n");
+    safety_latch.trip(SafetyFault::kStartup);
+    consoleWrite("FATAL fault=startup AS5600 I2C init failed\r\n");
     return;
   }
 
@@ -1180,7 +1366,8 @@ extern "C" void app_main(void) {
                    triwhirl::board::kMotorIn2Gpio,
                    triwhirl::board::kMotorIn3Gpio, kPwmFrequencyHz,
                    triwhirl::board::kMotorBusNominalV)) {
-    consoleWrite("FATAL MCPWM bridge init failed\r\n");
+    safety_latch.trip(SafetyFault::kActuator);
+    consoleWrite("FATAL fault=actuator MCPWM bridge init failed\r\n");
     return;
   }
 
@@ -1200,15 +1387,18 @@ extern "C" void app_main(void) {
 
   consoleWrite("TriWhirl deterministic motor + IMU + attitude runtime ready\r\n");
   consoleWrite("UART + Web Bluetooth share the same command/telemetry protocol\r\n");
+  consoleWrite("motor actuation is inhibited while a safety fault is latched\r\n");
   consoleWrite("telemetry is off by default; use 'telemetry on' when streaming is needed\r\n");
-  consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors,imu_ok,ax,ay,az,gx,gy,gz,imu_read_errors,attitude_ok,theta_rad,theta_rate_rad_s,accel_weight,loop_exec_us,loop_max_exec_us,loop_overruns\r\n");
+  consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors,imu_ok,ax,ay,az,gx,gy,gz,imu_read_errors,attitude_ok,theta_rad,theta_rate_rad_s,accel_weight,loop_exec_us,loop_max_exec_us,loop_overruns,fault_mask\r\n");
   printStatus();
   printHelp();
   printPrompt();
 
   if (xTaskCreatePinnedToCore(controlTask, "triwhirl_control", 8192, nullptr,
                               configMAX_PRIORITIES - 2, nullptr, 1) != pdPASS) {
-    consoleWrite("FATAL control task creation failed\r\n");
+    safety_latch.trip(SafetyFault::kStartup);
+    stopMotor();
+    consoleWrite("FATAL fault=startup control task creation failed\r\n");
     return;
   }
 
