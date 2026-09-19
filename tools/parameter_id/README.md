@@ -1,22 +1,54 @@
 # Local parameter identification
 
-TriWhirl keeps acquisition and model fitting separate. Firmware owns motor/safety limits and is now the timing authority for control/identification. BLE remains useful for setup, diagnostics, and post-run transfer, but host BLE arrival time is not used as a realtime measurement clock.
+TriWhirl separates realtime experiment execution from host-side acquisition, decoding, fitting, and analysis.
 
-## Python dependencies
-
-Install the host-side dependencies into the active Python environment once:
+The canonical host entry point is now the TriWhirl Toolbox:
 
 ```powershell
-python -m pip install -r tools/parameter_id/requirements.txt
+python tools/twtool.py --help
 ```
 
-This installs NumPy for fitting, pySerial for UART acquisition, and Bleak for untethered BLE communication.
+The older scripts in this directory remain as compatibility backends/wrappers while their reusable logic is moved into `tools/triwhirl_tool/`.
+
+## Realtime boundary
+
+BLE is not a realtime control or measurement authority. The ESP32 control loop runs at 1 kHz and the firmware TWLG logger snapshots the state in that same timing domain. Timing-critical excitation, vertex detection, and capture decisions must ultimately execute on the ESP32 rather than on the Windows/Python/BLE round trip.
+
+The current binary logging path is:
+
+```text
+ESP32 1 kHz control/state
+        |
+        +-- 32-byte synchronized TWLG record
+                |
+             SRAM buffer
+                |
+        non-critical flash writer
+                |
+          dedicated TWLG partition
+                |
+        experiment completes
+                |
+          BLE bulk download
+                |
+              host
+```
+
+Use the toolbox for post-run transfer and inspection:
+
+```powershell
+python tools/twtool.py log download -o artifacts/run-01.twlog
+python tools/twtool.py log inspect artifacts/run-01.twlog
+python tools/twtool.py log decode artifacts/run-01.twlog -o artifacts/run-01.csv
+```
+
+`log download` validates the completed binary transfer before saving it. `log inspect` validates the TWLG header/CRC and reports sample rate, duration, body-angle range, body/wheel rates, Vq range, dropped records, and fault coverage. `log decode` converts the validated 32-byte records to CSV.
 
 ## Three upright vertices
 
-The Reuleaux body has three legitimate upright vertex equilibria separated by 120 body degrees. Identification must therefore treat contact mode as part of the plant state rather than assuming there is only one valid upright orientation.
+The Reuleaux body has three legitimate upright vertex equilibria separated by 120 body degrees. Identification therefore treats contact mode as part of the plant state rather than assuming one valid upright orientation.
 
-The current IMU-frame naming anchor is approximately:
+Current IMU-frame naming anchors are approximately:
 
 ```text
 A ~=  +68 deg
@@ -24,129 +56,64 @@ B ~=  -52 deg
 C ~= -172 deg   (equivalent to +188 deg)
 ```
 
-These are classification centers, not a claim that the real mass distribution is perfectly symmetric. The real PCB, battery, motor, and wheel may make the three local plants differ. Active plant fits are therefore kept separate as A/B/C and can later form a nominal-plus-uncertainty or polytopic robust-control model.
+These are classification centers, not a claim of exact dynamic symmetry. PCB, battery, motor, and wheel mass distribution can make the three local plants differ. Active fits are kept separate as A/B/C and can later form a nominal-plus-uncertainty or polytopic robust-control model.
 
-`vertex_geometry.py` centralizes the 120-degree geometry and circular-angle classification.
+The shared geometry implementation now lives in `tools/triwhirl_tool/geometry.py`; `vertex_geometry.py` is a compatibility wrapper for older scripts.
 
-## Realtime TWLG path
+## Toolbox command map
 
-Host-side BLE control exposed 60--120 ms command delay around the upright crossing, while the measured passive upright e-folding time is only about 56 ms. The realtime identification path therefore no longer sends timing-critical motor decisions or samples through the PC.
-
-The firmware records a fixed 32-byte state/actuation snapshot from the 1 kHz control cycle into SRAM. A low-priority writer transfers page-sized batches to a dedicated raw flash partition outside critical local windows. Near a vertex, flash programming can be paused completely while records continue accumulating in SRAM. After the run the frozen binary log is downloaded over BLE.
-
-The detailed binary contract is in `docs/logging/twlog-v1.md`.
-
-Firmware shell workflow:
-
-```text
-log status
-log prepare [seconds]
-log start
-log critical on|off
-log stop
-log dump
-```
-
-`log prepare` pre-erases the bounded flash region before recording. `log start` begins 1 kHz SRAM capture. `log critical on` marks a realtime-sensitive window and pauses flash programming; this command is infrastructure for commissioning and will be driven internally by the native autonomous swing state machine rather than by a PC during the final experiment. `log stop` drains SRAM and writes the versioned header/CRC.
-
-Post-run download and decode:
+Identification acquisition:
 
 ```powershell
-python tools/parameter_id/download_log_ble.py `
-  -o artifacts/run-01.twlog
-
-python tools/parameter_id/decode_twlog.py `
-  artifacts/run-01.twlog `
-  -o artifacts/run-01.csv
+python tools/twtool.py id actuator-uart ...
+python tools/twtool.py id actuator-ble ...
+python tools/twtool.py id body-free ...
+python tools/twtool.py id body-local ...
+python tools/twtool.py id body-active ...
+python tools/twtool.py id swing ...
 ```
 
-The `.twlog` file is versioned binary data with exact firmware timestamps. The decoder verifies magic, structure sizes, total payload length, and CRC before generating CSV.
-
-## Untethered BLE diagnostic acquisition
-
-The native NimBLE service remains available for low-rate diagnostics and historical acquisition tools:
-
-```text
-Device  TriWhirl
-Service 54f10000-8f4d-4f3a-b691-54524957484c
-RX      54f10001-8f4d-4f3a-b691-54524957484c
-TX      54f10002-8f4d-4f3a-b691-54524957484c
-```
-
-`acquire_ble.py`, `body_free_ble.py`, `body_local_ble.py`, and `body_active_ble.py` are retained because their existing datasets remain useful evidence. They must not be treated as the final realtime timing path for rapid near-upright control.
-
-For nonzero-`Vq` BLE work, the tools automatically reapply `artifacts/motor-config.json` after a battery boot. The commissioned configuration is therefore reused without another calibration. Negative segment values should be passed with `=` in PowerShell, for example `--segment=-0.25:0.8`.
-
-Use `--address <BLE-address-or-device-id>` only if name-based discovery is ambiguous; otherwise the default `TriWhirl` scan is sufficient.
-
-## Autonomous swing identification history
-
-`auto_swing_id_ble.py` proved that the reaction wheel can pump the untethered body from a resting rocking motion through the neighborhood of the upright vertices without a hand release. It also established why the control decision must move on-device: when the host attempted to change `Vq` at a vertex, the requested input often appeared in firmware telemetry only after the useful local window had passed.
-
-The host script is therefore retained as diagnostic/research history rather than the final experiment engine. The next autonomous path is the native 1 kHz firmware state machine:
-
-```text
-pump -> approach -> critical local window -> probe/capture -> recover -> repeat
-```
-
-Vertex detection, pump/probe `Vq` decisions, critical-window markers, and TWLG records all execute on the ESP32. BLE only configures/starts the run, reports coarse status, and downloads the completed log.
-
-Historical host-side artifacts still have value:
-
-- `*-raw.csv` preserves global rocking trajectories;
-- local CSVs preserve prior A/B/C windows;
-- JSON sidecars preserve host experiment parameters/provenance.
-
-This identification infrastructure does not by itself close the final swing-up-controller work. The production hybrid controller still requires the global rocking/contact model, explicit wheel-speed limits, capture supervision, and recovery behavior.
-
-## UART acquisition
-
-`acquire.py` is retained for tethered motor/actuator work where the USB cable does not affect the experiment. It drives only the `Vq` values explicitly supplied on the command line and does not invent excitation amplitudes or hardware safety thresholds.
-
-Example profile:
+Model fitting:
 
 ```powershell
-python tools/parameter_id/acquire.py COM28 `
-  --segment=0.25:0.8 `
-  --segment=0:0.4 `
-  --segment=-0.25:0.8 `
-  --segment=0:0.4 `
-  --repeat 4 `
-  -o logs/local-id.csv
+python tools/twtool.py fit actuator artifacts/local-id.csv -o artifacts/local-fit.json
+python tools/twtool.py fit body-local artifacts/body-local.csv -o artifacts/body-local-fit.json
+python tools/twtool.py fit body-active artifacts/body-active.csv -o artifacts/body-active-fit.json
 ```
 
-A segment is `Vq_volts:duration_seconds`. The UART tool:
+The identification/fitting commands currently route to the established scripts while migration continues. This preserves existing command-line options and dataset compatibility.
 
-- opens the existing CH340 UART;
-- commands the motor stopped before acquisition;
-- checks that a motor electrical configuration exists;
-- automatically reloads the last commissioned electrical configuration from `artifacts/motor-config.json` when firmware has restarted without one;
-- optionally runs the existing firmware calibration with `--auto-calibrate` when no reusable configuration exists, then saves pole pairs, sensor direction, and electrical offset for later runs;
-- waits for valid attitude and wheel-rate telemetry;
-- enables telemetry and executes the requested `Vq` profile;
-- aborts on any firmware `FAULT` or nonzero `fault_mask`;
-- always sends `motor stop` and disables telemetry on exit;
-- writes schema-v2 CSV plus a JSON sidecar containing the exact excitation profile, motor configuration, and run metadata.
+## Legacy BLE acquisitions
 
-The CSV adds a `phase` column but otherwise preserves the normal telemetry field names, so it can be consumed directly by `local_fit.py`.
+The existing BLE acquisition scripts remain useful for historical datasets and low-rate/manual experiments, but their host timing must not be interpreted as deterministic realtime timing.
 
-## Preliminary flat-table actuator fit
+- `acquire_ble.py`: generic untethered Vq profile acquisition.
+- `body_free_ble.py`: zero-actuation free-body response.
+- `body_local_ble.py`: passive local-upright release acquisition.
+- `body_active_ble.py`: pre-armed local active release acquisition.
+- `auto_swing_id_ble.py`: host-driven autonomous rocking experiment used during development of the swing concept.
 
-`local_fit.py` consumes telemetry schema v2 and fits a preliminary continuous-time local model using the measured firmware state and commanded `Vq`:
+The host-driven swing tool demonstrated that the reaction wheel can pump the body through the A/B/C upright regions, but BLE command latency is too large relative to the roughly tens-of-milliseconds local unstable dynamics for it to be the final identification timing path. Do not treat host command arrival time as plant input time.
+
+## Telemetry / fit conventions
+
+Legacy CSV telemetry schema v2 contains the firmware state fields used by the fitters. The measured firmware `vq_v` is the authoritative input, not host send time.
+
+The preliminary actuator/local model uses:
 
 ```text
 theta_ddot = a1*theta + a2*theta_rate + a3*wheel_rate + b1*Vq + c1
 wheel_accel = a4*theta + a5*theta_rate + a6*wheel_rate + b2*Vq + c2
 ```
 
-Only rows with `fault_mask=0`, `attitude_ok=1`, and `vel_valid=1` are used. Optional angle and voltage bounds can further restrict the fit to a chosen local operating region.
+Active upright fits classify trials by A/B/C vertex and never pool different vertices automatically. A fit is only a synthesis candidate when its sample coverage, signed excitation, rank, local-angle coverage, and Vq coefficient significance requirements are met; otherwise it remains diagnostic evidence.
 
-Example:
+## Dependencies
+
+Install host dependencies once in the active Python environment:
 
 ```powershell
-python tools/parameter_id/local_fit.py logs/local-id.csv --max-abs-theta 0.25 --max-abs-vq 1.0 -o artifacts/local-fit.json
+python -m pip install -r tools/parameter_id/requirements.txt
 ```
 
-The fitter estimates derivatives from held-input local linear slopes rather than adjacent-sample differences. It reports coefficient uncertainty, RMSE, R², matrix rank, raw and normalized conditioning, singular values, sample period, and `Vq` coefficient significance.
-
-A successful regression is not by itself a validated plant model; excitation quality, experiment posture, contact vertex, and physical consistency remain part of the model evidence.
+This currently provides NumPy, pySerial, and Bleak for the legacy acquisition/fitting backends and toolbox BLE transfer.
