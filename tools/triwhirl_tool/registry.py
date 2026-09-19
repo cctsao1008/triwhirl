@@ -138,8 +138,8 @@ COMMANDS: tuple[ToolCommand, ...] = (
     ToolCommand(
         group="id",
         name="swing",
-        script="parameter_id/auto_swing_id_ble.py",
-        description="Run autonomous reaction-wheel swing identification acquisition.",
+        handler="commands.swing:swing_main",
+        description="Supervise firmware-owned reaction-wheel swing identification and download TWLG.",
     ),
     ToolCommand(
         group="fit",
