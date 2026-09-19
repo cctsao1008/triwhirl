@@ -4,16 +4,11 @@
 
 Establish the actuator coordinate system and the usable `Vq` path before attitude estimation or balance control work begins.
 
-## Stage M0: software-only verification
+## Stage M0: native firmware baseline
 
-The host-testable three-phase field generator must satisfy:
+The firmware must build with the pinned ESP-IDF toolchain and keep the rotating-field command bounded by the configured voltage limits. Invalid numeric input collapses to the board's zero line-to-line command rather than producing an uncontrolled phase command.
 
-1. all phase commands stay inside `[0, voltage_limit]`;
-2. the three phase commands remain balanced around the same center voltage;
-3. excessive requested amplitude is clamped;
-4. invalid floating-point input collapses to the board's zero line-to-line command rather than producing an uncontrolled phase command.
-
-Wheel kinematics are also exercised on the host. The tests cover forward/reverse AS5600 wrap, `micros()` timer wrap, zero-delta-time rejection, direction-ambiguous half-turn samples, and first-order velocity filtering.
+No separate host-test suite is maintained for the basic ESP-IDF peripheral stack or the small deterministic helper functions used during bring-up. Hardware-facing behavior is verified on the actual board.
 
 ## Bridge stopped-field behavior
 
@@ -25,7 +20,7 @@ The same distinction applies to software fallback paths that emit `{0,0,0}`: the
 
 ## Stage M1: AS5600 sanity
 
-The firmware reads the AS5600 directly over the board's dedicated I2C bus. Mechanical position uses the sensor's 12-bit `RAW ANGLE` output (`0x0C`/`0x0D`); magnet health uses `STATUS` (`0x0B`).
+The firmware reads the AS5600 directly over the board's dedicated I2C bus using native ESP-IDF I2C. Mechanical position uses the sensor's 12-bit `RAW ANGLE` output (`0x0C`/`0x0D`); magnet health uses `STATUS` (`0x0B`).
 
 The initial bring-up sampler requests angle data at 1 kHz. Wheel speed is derived from timestamped modular count differences and an initial 10 ms first-order low-pass filter. These are bring-up settings, not final control-loop parameters; real hardware logs determine whether they should change.
 
@@ -80,14 +75,15 @@ pole_pairs ~= electrical_frequency / mechanical_revolutions_per_second
 
 Repeat at several low frequencies and both directions. Accept the value only if the ratio clusters tightly around an integer.
 
-## Stage M4: sensor-based SimpleFOC
+## Stage M4: sensor-based voltage-mode FOC
 
 Only after M1-M3 establish encoder direction, phase behavior, and pole pairs:
 
-1. construct `BLDCMotor` with the measured pole-pair count;
-2. link the AS5600 through the project sensor path;
-3. run controlled electrical-zero/alignment;
-4. use voltage torque mode;
-5. characterize positive/negative `Vq`, wheel acceleration, steady speed, dead zone, and bus sag.
+1. use the measured pole-pair count;
+2. verify phase order and AS5600 direction;
+3. calibrate and validate electrical zero;
+4. compute the commanded voltage vector in project code;
+5. generate SVPWM / three-phase duty commands through native ESP-IDF MCPWM;
+6. characterize positive/negative `Vq`, wheel acceleration, steady speed, dead zone, and bus sag.
 
 The final higher-level control input remains commanded `Vq`; there is no phase-current loop on this hardware.
