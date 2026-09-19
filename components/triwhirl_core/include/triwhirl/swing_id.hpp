@@ -33,6 +33,8 @@ struct SwingIdConfig {
   std::uint32_t target_captures = 12U;
   float pump_v_low = 0.40F;
   float pump_v_high = 0.55F;
+  float probe_v_negative = -0.25F;
+  float probe_v_positive = 0.25F;
   float capture_deg = 8.0F;
   float probe_exit_deg = 12.0F;
   float rearm_deg = 18.0F;
@@ -83,11 +85,13 @@ class SwingIdRunner {
   static float wrapDeg(float angle_deg);
   static float angleDiffDeg(float angle_deg, float reference_deg);
   static float radiansToDegrees(float angle_rad);
+  static int vertexIndex(SwingIdVertex vertex);
 
   void classifyVertex(float theta_rad, SwingIdVertex* vertex,
                       float* center_deg, float* error_deg) const;
   void updatePumpHalfCycle(float theta_rate_rad_s);
   float pumpCommand() const;
+  float scheduledProbeCommand(SwingIdVertex vertex) const;
   void setState(SwingIdState state, bool transition = true);
   SwingIdOutput stop(SwingIdState state, SwingIdStopReason reason);
 
@@ -100,6 +104,7 @@ class SwingIdRunner {
   float probe_vq_v_ = 0.0F;
   SwingIdVertex probe_vertex_ = SwingIdVertex::kNone;
   float probe_center_deg_ = 0.0F;
+  std::uint32_t vertex_capture_counts_[3]{};
 };
 
 const char* swingIdStateName(SwingIdState state);
