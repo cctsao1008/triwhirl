@@ -79,7 +79,31 @@ COMMANDS: tuple[ToolCommand, ...] = (
         group="log",
         name="inspect",
         handler="commands.log:inspect_main",
-        description="Inspect TWLG metadata and signal ranges without converting it.",
+        description="Inspect TWLG metadata, timing quality, validity, and signal ranges.",
+    ),
+    ToolCommand(
+        group="diag",
+        name="timing",
+        handler="commands.diag:timing_main",
+        description="Read firmware realtime timing counters over BLE.",
+    ),
+    ToolCommand(
+        group="diag",
+        name="timing-reset",
+        handler="commands.diag:timing_reset_main",
+        description="Reset firmware realtime timing counters over BLE.",
+    ),
+    ToolCommand(
+        group="diag",
+        name="timing-test",
+        handler="commands.diag:timing_test_main",
+        description="Reset, measure, and report realtime timing over one BLE connection.",
+    ),
+    ToolCommand(
+        group="diag",
+        name="imu",
+        handler="commands.diag:imu_main",
+        description="Read IMU and attitude-estimator health over BLE.",
     ),
     ToolCommand(
         group="id",
