@@ -1,10 +1,13 @@
 # TriWhirl host tools
 
-This directory is reserved for programs that run on the development host rather than on the ESP32.
+This directory contains programs that run on the development host rather than on the ESP32.
 
-Expected responsibilities include:
+Current tool:
 
-- telemetry capture and log conversion;
+- `logging/capture.py` captures the runtime UART telemetry stream into schema-versioned CSV logs.
+
+Expected responsibilities also include:
+
 - calibration and experiment automation;
 - local plant identification;
 - model construction and linearization;
