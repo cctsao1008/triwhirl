@@ -68,6 +68,43 @@ jobs:
           PY
           python -m tools.triwhirl_tool log decode /tmp/twtool-smoke.twlog -o /tmp/twtool-smoke.csv
           test -s /tmp/twtool-smoke.csv
+      - name: Smoke-test native swing TWLG extraction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import csv
+          import struct
+          import zlib
+          from tools.triwhirl_tool.swing_log import write_fit_csv
+
+          header = struct.Struct("<IHHHHIIIII8I")
+          record = struct.Struct("<IfffffIHH")
+          normal = 0x400F
+          probe_a = 0x660F
+          payload = b"".join((
+              record.pack(1000, 1.10, 0.5, 2.0, -0.55, 1.0, 0, normal, 100),
+              record.pack(2000, 1.12, 0.6, 2.1, -0.55, 1.0, 0, probe_a, 101),
+              record.pack(3000, 1.14, 0.7, 2.2, -0.55, 1.0, 0, probe_a, 102),
+              record.pack(4000, 1.16, 0.8, 2.3, -0.55, 1.0, 0, probe_a, 103),
+              record.pack(5000, 1.20, 0.9, 2.4, -0.40, 1.0, 0, normal, 104),
+          ))
+          crc = zlib.crc32(payload) & 0xFFFFFFFF
+          magic = struct.unpack("<I", b"TWLG")[0]
+          blob = header.pack(
+              magic, 1, 64, 32, 1000, 5, len(payload), 0, crc, 1,
+              4096, 8192, 0, 0, 0, 0, 0, 0,
+          ) + payload
+          source = Path("/tmp/swing-smoke.twlog")
+          output = Path("/tmp/swing-smoke-active.csv")
+          source.write_bytes(blob)
+          assert write_fit_csv(source, output, vertex_a_deg=68.0) == 1
+          rows = list(csv.DictReader(output.open(encoding="utf-8")))
+          assert len(rows) == 4
+          assert rows[0]["phase"] == "armed"
+          assert all(row["vertex_id"] == "A" for row in rows)
+          assert [row["phase"] for row in rows[1:]] == ["active", "active", "active"]
+          assert all(abs(float(row["planned_vq_v"]) + 0.55) < 1e-6 for row in rows)
+          PY
       - name: Build with native ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:
