@@ -14,6 +14,11 @@ jobs:
           python tools/twtool.py --help
           python tools/twtool.py --list
           python -m tools.triwhirl_tool --list
+          python tools/twtool.py help log status
+          python tools/twtool.py help log prepare
+          python tools/twtool.py help log start
+          python tools/twtool.py help log critical
+          python tools/twtool.py help log stop
           python tools/twtool.py help log inspect
           python -m tools.triwhirl_tool help log decode
           python -m compileall -q tools/triwhirl_tool
