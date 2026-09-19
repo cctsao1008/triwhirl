@@ -14,6 +14,35 @@ jobs:
           python tools/twtool.py --help
           python tools/twtool.py --list
           python -m tools.triwhirl_tool --list
+          python tools/twtool.py help log inspect
+          python -m tools.triwhirl_tool help log decode
+          python -m compileall -q tools/triwhirl_tool
+      - name: Smoke-test native TWLG tools
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import struct
+          import zlib
+
+          header = struct.Struct("<IHHHHIIIII8I")
+          record = struct.Struct("<IfffffIHH")
+          payload = b"".join(
+              (
+                  record.pack(1000, 0.1, 0.2, -0.3, 0.4, 1.0, 0, 1, 123),
+                  record.pack(2000, 0.2, 0.3, -0.4, -0.5, 0.9, 0, 2, 124),
+              )
+          )
+          crc = zlib.crc32(payload) & 0xFFFFFFFF
+          magic = struct.unpack("<I", b"TWLG")[0]
+          blob = header.pack(
+              magic, 1, 64, 32, 1000, 2, len(payload), 0, crc, 1,
+              4096, 8192, 0, 0, 0, 0, 0, 0,
+          ) + payload
+          Path("/tmp/twtool-smoke.twlog").write_bytes(blob)
+          PY
+          python tools/twtool.py log inspect /tmp/twtool-smoke.twlog --json
+          python -m tools.triwhirl_tool log decode /tmp/twtool-smoke.twlog -o /tmp/twtool-smoke.csv
+          test -s /tmp/twtool-smoke.csv
       - name: Build with native ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:
