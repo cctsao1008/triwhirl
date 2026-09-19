@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and run host math tests
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror \
+          g++ -std=c++11 -Wall -Wextra -Werror \
             -Ifirmware/esp32/include \
             firmware/esp32/src/three_phase_field.cpp \
             test/test_three_phase_field.cpp \
