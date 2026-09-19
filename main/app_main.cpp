@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 
 #include "triwhirl/attitude_estimator.hpp"
+#include "triwhirl/ble_transport.hpp"
 #include "triwhirl/board.hpp"
 #include "triwhirl/drivers/as5600.hpp"
 #include "triwhirl/drivers/mpu6050.hpp"
@@ -53,6 +54,11 @@ constexpr std::uint32_t kDefaultGyroCalibrationSamples = 500U;
 constexpr std::uint32_t kTelemetryPeriodUs = 20000U;
 constexpr std::uint32_t kPwmFrequencyHz = 25000U;
 constexpr std::size_t kConsoleTxBufferBytes = 8192U;
+
+struct CommandInputState {
+  char line[128]{};
+  std::size_t length = 0U;
+};
 
 enum class MotorMode {
   kStopped,
@@ -149,22 +155,24 @@ std::uint32_t last_telemetry_us = 0U;
 ControlTimingStats timing_stats{};
 StreamBufferHandle_t console_tx_stream = nullptr;
 std::uint32_t console_tx_dropped_bytes = 0U;
-
-char command_line[128]{};
-std::size_t command_length = 0U;
+CommandInputState uart_command_input{};
+CommandInputState ble_command_input{};
 
 void consoleWriteBytes(const char* data, const std::size_t length) {
   if (data == nullptr || length == 0U) {
     return;
   }
+
   if (console_tx_stream == nullptr) {
     uart_write_bytes(UART_NUM_0, data, length);
-    return;
+  } else {
+    const std::size_t sent = xStreamBufferSend(console_tx_stream, data, length, 0);
+    if (sent < length) {
+      console_tx_dropped_bytes += static_cast<std::uint32_t>(length - sent);
+    }
   }
-  const std::size_t sent = xStreamBufferSend(console_tx_stream, data, length, 0);
-  if (sent < length) {
-    console_tx_dropped_bytes += static_cast<std::uint32_t>(length - sent);
-  }
+
+  triwhirl::ble::write(reinterpret_cast<const std::uint8_t*>(data), length);
 }
 
 void consoleWrite(const char* text) {
@@ -541,11 +549,20 @@ void updateMotor(const std::uint32_t now_us) {
   }
 }
 
+void printBleStatus() {
+  consolePrintf(
+      "ble,connected=%d,subscribed=%d,rx_drop_bytes=%lu,tx_drop_bytes=%lu\r\n",
+      triwhirl::ble::connected() ? 1 : 0,
+      triwhirl::ble::subscribed() ? 1 : 0,
+      static_cast<unsigned long>(triwhirl::ble::rxDroppedBytes()),
+      static_cast<unsigned long>(triwhirl::ble::txDroppedBytes()));
+}
+
 void printTimingStatus() {
   const std::uint32_t min_period =
       timing_stats.iterations > 1U ? timing_stats.min_period_us : 0U;
   consolePrintf(
-      "timing,target_us=%lu,iterations=%llu,last_exec_us=%lu,max_exec_us=%lu,min_period_us=%lu,max_period_us=%lu,overruns=%llu,late_periods=%llu,tx_drop_bytes=%lu\r\n",
+      "timing,target_us=%lu,iterations=%llu,last_exec_us=%lu,max_exec_us=%lu,min_period_us=%lu,max_period_us=%lu,overruns=%llu,late_periods=%llu,uart_tx_drop_bytes=%lu,ble_rx_drop_bytes=%lu,ble_tx_drop_bytes=%lu\r\n",
       static_cast<unsigned long>(kControlPeriodUs),
       static_cast<unsigned long long>(timing_stats.iterations),
       static_cast<unsigned long>(timing_stats.last_exec_us),
@@ -554,7 +571,9 @@ void printTimingStatus() {
       static_cast<unsigned long>(timing_stats.max_period_us),
       static_cast<unsigned long long>(timing_stats.overruns),
       static_cast<unsigned long long>(timing_stats.late_periods),
-      static_cast<unsigned long>(console_tx_dropped_bytes));
+      static_cast<unsigned long>(console_tx_dropped_bytes),
+      static_cast<unsigned long>(triwhirl::ble::rxDroppedBytes()),
+      static_cast<unsigned long>(triwhirl::ble::txDroppedBytes()));
 }
 
 void resetTimingStats() {
@@ -576,6 +595,7 @@ void printHelp() {
   consoleWrite("  attitude reset [angle_rad]\r\n");
   consoleWrite("  timing status\r\n");
   consoleWrite("  timing reset\r\n");
+  consoleWrite("  ble status\r\n");
   consoleWrite("  field <electrical_hz> <amplitude_v>\r\n");
   consoleWrite("  stop\r\n");
   consoleWrite("  status\r\n");
@@ -586,7 +606,7 @@ void printHelp() {
 void printStatus() {
   refreshEncoderHealth();
   consolePrintf(
-      "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu,imu_ok=%d,attitude_ok=%d,theta_rad=%.6f,theta_rate_rad_s=%.6f\r\n",
+      "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu,imu_ok=%d,attitude_ok=%d,theta_rad=%.6f,theta_rate_rad_s=%.6f,ble_connected=%d,ble_subscribed=%d\r\n",
       motorModeName(motor_mode), telemetry_enabled ? 1 : 0, vq_command_v,
       open_loop_hz, open_loop_amplitude_v, motor_config_valid ? 1 : 0,
       motor_config.pole_pairs, motor_config.sensor_direction,
@@ -602,7 +622,8 @@ void printStatus() {
       wheel_state.velocity_valid ? 1 : 0,
       static_cast<unsigned long>(encoder_read_errors), imu_sample_valid ? 1 : 0,
       attitude_state.valid ? 1 : 0, attitude_state.angle_rad,
-      attitude_state.rate_rad_s);
+      attitude_state.rate_rad_s, triwhirl::ble::connected() ? 1 : 0,
+      triwhirl::ble::subscribed() ? 1 : 0);
 }
 
 void printImuStatus() {
@@ -841,6 +862,15 @@ void handleTimingCommand() {
   consoleWrite("ERR usage: timing <status|reset>\r\n");
 }
 
+void handleBleCommand() {
+  char* action = std::strtok(nullptr, " \t");
+  if (action == nullptr || std::strcmp(action, "status") == 0) {
+    printBleStatus();
+    return;
+  }
+  consoleWrite("ERR usage: ble status\r\n");
+}
+
 void handleCommand(char* line) {
   char* command = std::strtok(line, " \t");
   if (command == nullptr) {
@@ -864,6 +894,11 @@ void handleCommand(char* line) {
 
   if (std::strcmp(command, "timing") == 0) {
     handleTimingCommand();
+    return;
+  }
+
+  if (std::strcmp(command, "ble") == 0) {
+    handleBleCommand();
     return;
   }
 
@@ -935,26 +970,30 @@ void handleCommand(char* line) {
   consoleWrite("ERR unknown command\r\n");
 }
 
-void pollConsole() {
-  std::uint8_t input[32];
-  const int received = uart_read_bytes(UART_NUM_0, input, sizeof(input), 0);
-  for (int i = 0; i < received; ++i) {
+void consumeConsoleBytes(const std::uint8_t* input,
+                         const std::size_t received,
+                         CommandInputState& state) {
+  if (input == nullptr) {
+    return;
+  }
+
+  for (std::size_t i = 0; i < received; ++i) {
     const char c = static_cast<char>(input[i]);
 
     if (c == '\r' || c == '\n') {
-      if (command_length > 0U) {
+      if (state.length > 0U) {
         consoleWrite("\r\n");
-        command_line[command_length] = '\0';
-        handleCommand(command_line);
-        command_length = 0U;
+        state.line[state.length] = '\0';
+        handleCommand(state.line);
+        state.length = 0U;
         printPrompt();
       }
       continue;
     }
 
     if (c == '\b' || static_cast<unsigned char>(c) == 0x7FU) {
-      if (command_length > 0U) {
-        --command_length;
+      if (state.length > 0U) {
+        --state.length;
         consoleWrite("\b \b");
       }
       continue;
@@ -964,14 +1003,28 @@ void pollConsole() {
       continue;
     }
 
-    if (command_length + 1U < sizeof(command_line)) {
-      command_line[command_length++] = c;
+    if (state.length + 1U < sizeof(state.line)) {
+      state.line[state.length++] = c;
       consoleWriteBytes(&c, 1U);
     } else {
-      command_length = 0U;
+      state.length = 0U;
       consoleWrite("\r\nERR command too long\r\n");
       printPrompt();
     }
+  }
+}
+
+void pollConsole() {
+  std::uint8_t input[64];
+  const int uart_received = uart_read_bytes(UART_NUM_0, input, sizeof(input), 0);
+  if (uart_received > 0) {
+    consumeConsoleBytes(input, static_cast<std::size_t>(uart_received),
+                        uart_command_input);
+  }
+
+  const std::size_t ble_received = triwhirl::ble::read(input, sizeof(input));
+  if (ble_received > 0U) {
+    consumeConsoleBytes(input, ble_received, ble_command_input);
   }
 }
 
@@ -1105,6 +1158,10 @@ extern "C" void app_main(void) {
     return;
   }
 
+  if (!triwhirl::ble::init()) {
+    consoleWrite("WARN BLE init failed; Web Bluetooth unavailable\r\n");
+  }
+
   i2c_master_bus_handle_t encoder_bus = nullptr;
   if (!initEncoderBus(&encoder_bus) ||
       !encoder.init(encoder_bus, triwhirl::board::kAs5600I2cAddress)) {
@@ -1142,6 +1199,7 @@ extern "C" void app_main(void) {
   last_telemetry_us = now_us;
 
   consoleWrite("TriWhirl deterministic motor + IMU + attitude runtime ready\r\n");
+  consoleWrite("UART + Web Bluetooth share the same command/telemetry protocol\r\n");
   consoleWrite("telemetry is off by default; use 'telemetry on' when streaming is needed\r\n");
   consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors,imu_ok,ax,ay,az,gx,gy,gz,imu_read_errors,attitude_ok,theta_rad,theta_rate_rad_s,accel_weight,loop_exec_us,loop_max_exec_us,loop_overruns\r\n");
   printStatus();
