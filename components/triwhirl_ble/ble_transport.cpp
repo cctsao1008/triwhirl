@@ -238,6 +238,7 @@ void txTask(void*) {
 
     const std::uint16_t conn = connection_handle;
     if (conn == BLE_HS_CONN_HANDLE_NONE || !tx_subscribed) {
+      tx_dropped_bytes += static_cast<std::uint32_t>(received);
       continue;
     }
 
@@ -246,10 +247,20 @@ void txTask(void*) {
     std::size_t offset = 0U;
     while (offset < received) {
       const std::size_t count = std::min(chunk, received - offset);
-      if (!notifyChunk(buffer + offset, count)) {
-        break;
+      while (!notifyChunk(buffer + offset, count)) {
+        if (connection_handle == BLE_HS_CONN_HANDLE_NONE || !tx_subscribed) {
+          tx_dropped_bytes += static_cast<std::uint32_t>(received - offset);
+          offset = received;
+          break;
+        }
+        // NimBLE can temporarily reject a notification while controller buffers
+        // are full. Preserve ordering and retry instead of dropping binary dump
+        // bytes. Backpressure propagates through tx_stream to writeBlocking().
+        vTaskDelay(pdMS_TO_TICKS(1));
       }
-      offset += count;
+      if (offset < received) {
+        offset += count;
+      }
     }
   }
 }
@@ -334,6 +345,39 @@ std::size_t write(const std::uint8_t* data, const std::size_t length) {
   return queued;
 }
 
+std::size_t writeBlocking(const std::uint8_t* data,
+                          const std::size_t length,
+                          const std::uint32_t timeout_ms) {
+  if (data == nullptr || length == 0U || tx_stream == nullptr ||
+      connection_handle == BLE_HS_CONN_HANDLE_NONE || !tx_subscribed) {
+    return 0U;
+  }
+
+  const TickType_t start = xTaskGetTickCount();
+  const TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+  std::size_t total = 0U;
+  while (total < length) {
+    if (connection_handle == BLE_HS_CONN_HANDLE_NONE || !tx_subscribed) {
+      break;
+    }
+    const TickType_t elapsed = xTaskGetTickCount() - start;
+    if (elapsed >= timeout) {
+      break;
+    }
+    const TickType_t remaining = timeout - elapsed;
+    const std::size_t sent = xStreamBufferSend(
+        tx_stream, data + total, length - total, remaining);
+    if (sent == 0U) {
+      break;
+    }
+    total += sent;
+  }
+  if (total < length) {
+    tx_dropped_bytes += static_cast<std::uint32_t>(length - total);
+  }
+  return total;
+}
+
 bool connected() {
   return connection_handle != BLE_HS_CONN_HANDLE_NONE;
 }
@@ -361,6 +405,9 @@ namespace ble {
 bool init() { return false; }
 std::size_t read(std::uint8_t*, std::size_t) { return 0U; }
 std::size_t write(const std::uint8_t*, std::size_t) { return 0U; }
+std::size_t writeBlocking(const std::uint8_t*, std::size_t, std::uint32_t) {
+  return 0U;
+}
 bool connected() { return false; }
 bool subscribed() { return false; }
 std::uint32_t rxDroppedBytes() { return 0U; }
