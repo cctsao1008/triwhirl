@@ -9,82 +9,95 @@ from typing import Iterable
 class ToolCommand:
     group: str
     name: str
-    script: str
     description: str
+    script: str | None = None
+    handler: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.script is None) == (self.handler is None):
+            raise ValueError(
+                f"command {self.group} {self.name} must define exactly one backend"
+            )
 
 
 COMMANDS: tuple[ToolCommand, ...] = (
     ToolCommand(
-        "log",
-        "capture-uart",
-        "logging/capture.py",
-        "Capture live UART telemetry to schema-versioned CSV.",
+        group="log",
+        name="capture-uart",
+        script="logging/capture.py",
+        description="Capture live UART telemetry to schema-versioned CSV.",
     ),
     ToolCommand(
-        "log",
-        "download",
-        "parameter_id/download_log_ble.py",
-        "Download a completed TWLG binary log over BLE.",
+        group="log",
+        name="download",
+        handler="triwhirl_tool.commands.log:download_main",
+        description="Download and validate a completed TWLG binary log over BLE.",
     ),
     ToolCommand(
-        "log",
-        "decode",
-        "parameter_id/decode_twlog.py",
-        "Validate and decode a TWLG binary log to CSV.",
+        group="log",
+        name="decode",
+        handler="triwhirl_tool.commands.log:decode_main",
+        description="Validate and decode a TWLG binary log to CSV.",
     ),
     ToolCommand(
-        "id",
-        "actuator-uart",
-        "parameter_id/acquire.py",
-        "Run tethered UART actuator identification acquisition.",
+        group="log",
+        name="inspect",
+        handler="triwhirl_tool.commands.log:inspect_main",
+        description="Inspect TWLG metadata and signal ranges without converting it.",
     ),
     ToolCommand(
-        "id",
-        "actuator-ble",
-        "parameter_id/acquire_ble.py",
-        "Run untethered BLE actuator identification acquisition.",
+        group="id",
+        name="actuator-uart",
+        script="parameter_id/acquire.py",
+        description="Run tethered UART actuator identification acquisition.",
     ),
     ToolCommand(
-        "id",
-        "body-free",
-        "parameter_id/body_free_ble.py",
-        "Acquire untethered free-body motion over BLE.",
+        group="id",
+        name="actuator-ble",
+        script="parameter_id/acquire_ble.py",
+        description="Run untethered BLE actuator identification acquisition.",
     ),
     ToolCommand(
-        "id",
-        "body-local",
-        "parameter_id/body_local_ble.py",
-        "Acquire passive local upright release data over BLE.",
+        group="id",
+        name="body-free",
+        script="parameter_id/body_free_ble.py",
+        description="Acquire untethered free-body motion over BLE.",
     ),
     ToolCommand(
-        "id",
-        "body-active",
-        "parameter_id/body_active_ble.py",
-        "Acquire active local upright identification data over BLE.",
+        group="id",
+        name="body-local",
+        script="parameter_id/body_local_ble.py",
+        description="Acquire passive local upright release data over BLE.",
     ),
     ToolCommand(
-        "id",
-        "swing",
-        "parameter_id/auto_swing_id_ble.py",
-        "Run autonomous reaction-wheel swing identification acquisition.",
+        group="id",
+        name="body-active",
+        script="parameter_id/body_active_ble.py",
+        description="Acquire active local upright identification data over BLE.",
     ),
     ToolCommand(
-        "fit",
-        "actuator",
-        "parameter_id/local_fit.py",
-        "Fit the preliminary actuator/local continuous-time model.",
+        group="id",
+        name="swing",
+        script="parameter_id/auto_swing_id_ble.py",
+        description="Run autonomous reaction-wheel swing identification acquisition.",
     ),
     ToolCommand(
-        "fit",
-        "body-local",
-        "parameter_id/body_local_fit.py",
-        "Fit the passive local upright body model.",
+        group="fit",
+        name="actuator",
+        script="parameter_id/local_fit.py",
+        description="Fit the preliminary actuator/local continuous-time model.",
     ),
     ToolCommand(
-        "fit",
-        "body-active",
-        "parameter_id/body_active_fit.py",
-        "Fit active A/B/C upright vertex models.",
+        group="fit",
+        name="body-local",
+        script="parameter_id/body_local_fit.py",
+        description="Fit the passive local upright body model.",
+    ),
+    ToolCommand(
+        group="fit",
+        name="body-active",
+        script="parameter_id/body_active_fit.py",
+        description="Fit active A/B/C upright vertex models.",
     ),
 )
 
@@ -105,6 +118,8 @@ def find_command(group: str, name: str) -> ToolCommand | None:
 
 
 def resolve_script(tools_root: Path, command: ToolCommand) -> Path:
+    if command.script is None:
+        raise ValueError(f"command {command.group} {command.name} is not script-backed")
     return tools_root / command.script
 
 
