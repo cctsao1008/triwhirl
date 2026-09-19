@@ -1,34 +1,47 @@
 # TWLG v1 realtime runtime log
 
 TWLG removes BLE from the timing-critical control and identification path.
-The ESP32 samples state and actuation in the same 1 kHz control cycle, copies a
-fixed binary record into SRAM, and writes buffered batches to a dedicated flash
-partition only when flash writes are allowed. BLE is used after the experiment
-to download the frozen binary log.
+The ESP32 samples state and actuation in the same nominal 1 kHz control cycle,
+copies a fixed binary record into SRAM, and writes buffered batches to a
+dedicated flash partition only when flash writes are allowed. BLE is used for
+supervisory control and, after the experiment, to download the frozen binary
+log.
 
 ## Timing architecture
 
 ```text
-1 kHz control task
+nominal 1 kHz control task
   sensor update
   state estimator
   control / Vq decision
   32-byte SRAM record copy
           |
           v
-    32 KiB RAM buffer
+  32 KiB FreeRTOS stream/ring buffer
           |
-          | flash writes allowed outside critical local windows
+          | 256-byte flash batches outside critical local windows
           v
    dedicated twlog partition
 
 experiment complete -> BLE binary dump -> PC decoder
 ```
 
+The 32 KiB stream buffer is the producer/consumer decoupling layer. A dedicated
+ping-pong buffer is not required for the current logger because records are
+small, fixed-size, and asynchronous flash draining benefits from the elasticity
+of a ring buffer. A double buffer may still be useful later for DMA-style sensor
+acquisition or a fixed block-processing pipeline, but it is not part of TWLG v1.
+
 A near-upright controller must call `setFlashWritesAllowed(false)` before its
 critical local window and re-enable writes afterwards. Records continue entering
 SRAM while flash programming is paused. Sector erase is performed by `log
 prepare` before recording, never by the 1 kHz control task.
+
+`sample_period_us=1000` in the header is the nominal control period, not a claim
+that every adjacent record is exactly 1000 us apart. Each record carries the
+firmware `t_us` timestamp. Host inspection therefore reports both nominal timing
+and the measured timestamp-delta distribution; identification and fitting should
+use actual timestamps when timing jitter matters.
 
 ## Flash layout
 
@@ -59,15 +72,19 @@ All fields are little-endian. Header size is 64 bytes.
 | version | u16 | `1` |
 | header_size | u16 | `64` |
 | record_size | u16 | `32` |
-| sample_period_us | u16 | `1000` |
+| sample_period_us | u16 | nominal period, currently `1000` |
 | record_count | u32 | committed records |
 | payload_bytes | u32 | `record_count * 32` |
-| dropped_records | u32 | records rejected because RAM/capacity was exhausted |
+| dropped_records | u32 | records rejected because prepared capacity or SRAM was exhausted |
 | payload_crc32 | u32 | standard CRC-32 of record payload |
 | flags | u32 | bit 0 = finalized/complete |
 | reserved[0] | u32 | physical flash payload offset (`4096`) |
 | reserved[1] | u32 | flash bytes erased/prepared for this run |
 | reserved[2..7] | u32 | reserved |
+
+A nonzero `dropped_records` count invalidates the run as a complete
+identification capture and should be investigated rather than hidden by a larger
+host-side reserve.
 
 ## 32-byte runtime record
 
@@ -105,7 +122,11 @@ Record flag assignments:
 The vertex/probe/pump flags are reserved for the firmware-side autonomous swing
 state machine; the base logger already preserves their bit assignments.
 
-## Shell workflow
+Signal inspection must honor these validity bits. For example, zero-valued
+`theta_rad` fields are not treated as a valid body-angle measurement when the
+attitude-valid bit is clear.
+
+## Firmware shell workflow
 
 The firmware interface is designed around:
 
@@ -123,15 +144,36 @@ accepted only after state becomes `ready`. `log stop` drains SRAM, writes the
 header/CRC, and moves to `complete`. `log dump` is valid only for a complete log
 and streams binary after an ASCII length marker.
 
-Host-side download and decoding:
+## Host workflow
+
+The preferred host interface is the unified toolbox:
 
 ```powershell
-python tools/parameter_id/download_log_ble.py `
-  -o artifacts/run-01.twlog
+python tools/twtool.py log session 5 `
+  -o artifacts/run-01.twlog `
+  --csv artifacts/run-01.csv
 
-python tools/parameter_id/decode_twlog.py `
-  artifacts/run-01.twlog `
-  -o artifacts/run-01.csv
+python tools/twtool.py log inspect artifacts/run-01.twlog
+```
+
+`log session` keeps one BLE control connection open from prepare through start,
+the requested recording interval, and stop/finalization. This prevents BLE scan
+and reconnect latency from extending the recording interval and consuming the
+prepared record reserve. Binary download reconnects only after recording has
+completed.
+
+`log inspect` validates the payload CRC and reports nominal metadata plus actual
+`t_us` cadence (`min/mean/median/max`, counts above 1250 us and 2000 us), dropped
+records, validity coverage for encoder/wheel/IMU/attitude, and signal ranges only
+when the corresponding validity flags are present.
+
+Firmware diagnostics are also available without `idf.py monitor`:
+
+```powershell
+python tools/twtool.py diag timing
+python tools/twtool.py diag timing-reset
+python tools/twtool.py diag timing-test 5
+python tools/twtool.py diag imu
 ```
 
 The binary downloader reads the exact length announced by firmware. The decoder
