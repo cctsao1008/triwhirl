@@ -11,9 +11,17 @@ The host-testable three-phase field generator must satisfy:
 1. all phase commands stay inside `[0, voltage_limit]`;
 2. the three phase commands remain balanced around the same center voltage;
 3. excessive requested amplitude is clamped;
-4. invalid floating-point input fails passive.
+4. invalid floating-point input collapses to the board's zero line-to-line command rather than producing an uncontrolled phase command.
 
 Wheel kinematics are also exercised on the host. The tests cover forward/reverse AS5600 wrap, `micros()` timer wrap, zero-delta-time rejection, direction-ambiguous half-turn samples, and first-order velocity filtering.
+
+## Bridge stopped-field behavior
+
+The PCB ties each `Moto_INx` net to both EG2133 `HINx` and active-low `LINx#`. A driven low selects the low-side MOSFET and a driven high selects the high-side MOSFET. There is no separate phase-enable signal on this board.
+
+`stop` and the boot state command all three PWM duties to zero. This is the **low-side zero vector**: all three motor phases are tied to the low rail. The commanded line-to-line motor voltage is zero, but the bridge is not high impedance. A hand-spun reaction wheel may therefore show dynamic-braking drag. This behavior is expected from the board topology and should not be mistaken for an encoder or bearing fault.
+
+The same distinction applies to software fallback paths that emit `{0,0,0}`: they remove commanded line-to-line drive, but they do not electrically disconnect the motor.
 
 ## Stage M1: AS5600 sanity
 
@@ -21,10 +29,10 @@ The firmware reads the AS5600 directly over the board's dedicated I2C bus. Mecha
 
 The initial bring-up sampler requests angle data at 1 kHz. Wheel speed is derived from timestamped modular count differences and an initial 10 ms first-order low-pass filter. These are bring-up settings, not final control-loop parameters; real hardware logs determine whether they should change.
 
-With motor excitation disabled:
+With the rotating-field command stopped:
 
 1. run `status` and confirm the I2C read and magnetic-status fields are valid;
-2. rotate the reaction wheel slowly through repeated forward and reverse turns;
+2. rotate the reaction wheel slowly through repeated forward and reverse turns, allowing for the zero-vector braking drag described above;
 3. verify `raw` wraps at the 12-bit boundary while `unwrapped_count` remains continuous;
 4. verify the signs of `vel_inst_rad_s` and `vel_rad_s` for both directions;
 5. inspect noise while stationary and at several hand-driven speeds;
@@ -58,7 +66,7 @@ stop
 status
 ```
 
-`field` is accepted only after a successful AS5600 angle read and healthy magnet status. Start at low electrical frequency and low amplitude. Boot state is always stopped.
+`field` is accepted only after a successful AS5600 angle read and healthy magnet status. Start at low electrical frequency and low amplitude. Boot state is the stopped-field zero vector described above.
 
 This stage deliberately does not require a pole-pair assumption.
 
