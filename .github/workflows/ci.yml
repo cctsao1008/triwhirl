@@ -12,8 +12,8 @@ jobs:
       - name: Build and run host math tests
         run: |
           g++ -std=c++11 -Wall -Wextra -Werror \
-            -Ifirmware/esp32/include \
-            firmware/esp32/src/three_phase_field.cpp \
+            -Ilib/triwhirl_core/src \
+            lib/triwhirl_core/src/three_phase_field.cpp \
             test/test_three_phase_field.cpp \
             -o /tmp/test_three_phase_field
           /tmp/test_three_phase_field
