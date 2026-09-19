@@ -23,6 +23,36 @@ class ToolCommand:
 COMMANDS: tuple[ToolCommand, ...] = (
     ToolCommand(
         group="log",
+        name="status",
+        handler="commands.log:status_main",
+        description="Read firmware TWLG logger state over BLE.",
+    ),
+    ToolCommand(
+        group="log",
+        name="prepare",
+        handler="commands.log:prepare_main",
+        description="Pre-erase/prepare the TWLG region before a realtime run.",
+    ),
+    ToolCommand(
+        group="log",
+        name="start",
+        handler="commands.log:start_main",
+        description="Start synchronized 1 kHz firmware TWLG capture.",
+    ),
+    ToolCommand(
+        group="log",
+        name="critical",
+        handler="commands.log:critical_main",
+        description="Pause/resume flash programming while SRAM capture continues.",
+    ),
+    ToolCommand(
+        group="log",
+        name="stop",
+        handler="commands.log:stop_main",
+        description="Stop TWLG capture and wait for flash finalization.",
+    ),
+    ToolCommand(
+        group="log",
         name="capture-uart",
         script="logging/capture.py",
         description="Capture live UART telemetry to schema-versioned CSV.",
