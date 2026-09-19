@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "triwhirl/attitude_estimator.hpp"
 #include "triwhirl/board.hpp"
 #include "triwhirl/drivers/as5600.hpp"
 #include "triwhirl/drivers/mpu6050.hpp"
@@ -21,8 +22,10 @@
 
 namespace {
 
+using triwhirl::AttitudeEstimate;
 using triwhirl::MotorElectricalConfig;
 using triwhirl::PhaseVoltages;
+using triwhirl::PlanarAttitudeEstimator;
 using triwhirl::WheelKinematics;
 using triwhirl::WheelKinematicsState;
 using triwhirl::drivers::As5600;
@@ -78,9 +81,19 @@ struct GyroCalibrationState {
   double sum_rad_s[3]{};
 };
 
+struct ImuPlanarMap {
+  int accel_sin_axis = 0;
+  int accel_cos_axis = 1;
+  int gyro_axis = 2;
+  int accel_sin_sign = 1;
+  int accel_cos_sign = 1;
+  int gyro_sign = 1;
+};
+
 As5600 encoder;
 Mpu6050 imu;
 WheelKinematics wheel_kinematics(kWheelVelocityFilterTauS);
+PlanarAttitudeEstimator attitude_estimator;
 ThreePwmBridge bridge;
 
 As5600Status encoder_status{};
@@ -96,6 +109,10 @@ bool gyro_bias_valid = false;
 float gyro_bias_rad_s[3]{};
 std::uint32_t imu_read_errors = 0U;
 GyroCalibrationState gyro_calibration{};
+ImuPlanarMap imu_map{};
+AttitudeEstimate attitude_state{};
+bool attitude_initialized = false;
+std::uint32_t last_attitude_update_us = 0U;
 
 MotorMode motor_mode = MotorMode::kStopped;
 MotorElectricalConfig motor_config{};
@@ -125,7 +142,7 @@ void consoleWrite(const char* text) {
 }
 
 void consolePrintf(const char* format, ...) {
-  char buffer[640];
+  char buffer[768];
   va_list args;
   va_start(args, format);
   const int length = std::vsnprintf(buffer, sizeof(buffer), format, args);
@@ -166,6 +183,22 @@ float clampFinite(const float value, const float low, const float high) {
   return value < low ? low : (value > high ? high : value);
 }
 
+bool validAxis(const int axis) {
+  return axis >= 0 && axis <= 2;
+}
+
+bool validSign(const int sign) {
+  return sign == 1 || sign == -1;
+}
+
+bool validImuMap(const ImuPlanarMap& map) {
+  return validAxis(map.accel_sin_axis) && validAxis(map.accel_cos_axis) &&
+         validAxis(map.gyro_axis) &&
+         map.accel_sin_axis != map.accel_cos_axis &&
+         validSign(map.accel_sin_sign) && validSign(map.accel_cos_sign) &&
+         validSign(map.gyro_sign);
+}
+
 bool refreshEncoderHealth() {
   As5600Status status{};
   if (!encoder.readStatus(&status)) {
@@ -197,6 +230,55 @@ float correctedGyro(const int axis) {
          (gyro_bias_valid ? gyro_bias_rad_s[axis] : 0.0F);
 }
 
+float mappedAccelSin() {
+  return static_cast<float>(imu_map.accel_sin_sign) *
+         imu_sample.accel_mps2[imu_map.accel_sin_axis];
+}
+
+float mappedAccelCos() {
+  return static_cast<float>(imu_map.accel_cos_sign) *
+         imu_sample.accel_mps2[imu_map.accel_cos_axis];
+}
+
+float mappedGyro() {
+  return static_cast<float>(imu_map.gyro_sign) *
+         correctedGyro(imu_map.gyro_axis);
+}
+
+void resetAttitudeFromAccel() {
+  if (!imu_sample_valid || !validImuMap(imu_map)) {
+    attitude_initialized = false;
+    attitude_state = {};
+    return;
+  }
+  const float initial_angle = std::atan2(mappedAccelSin(), mappedAccelCos());
+  attitude_estimator.reset(initial_angle, 0.0F);
+  attitude_state = attitude_estimator.state();
+  attitude_initialized = true;
+  last_attitude_update_us = static_cast<std::uint32_t>(esp_timer_get_time());
+}
+
+void updateAttitude(const std::uint32_t now_us) {
+  if (!imu_sample_valid || !gyro_bias_valid || !validImuMap(imu_map)) {
+    return;
+  }
+
+  if (!attitude_initialized) {
+    resetAttitudeFromAccel();
+    last_attitude_update_us = now_us;
+    return;
+  }
+
+  const std::uint32_t elapsed_us = now_us - last_attitude_update_us;
+  if (elapsed_us == 0U) {
+    return;
+  }
+  last_attitude_update_us = now_us;
+  const float dt_s = static_cast<float>(elapsed_us) * 1.0e-6F;
+  attitude_state = attitude_estimator.update(
+      mappedAccelSin(), mappedAccelCos(), mappedGyro(), dt_s, true);
+}
+
 void startGyroCalibration(std::uint32_t samples) {
   if (!imu_ready) {
     consoleWrite("ERR imu unavailable\r\n");
@@ -211,6 +293,8 @@ void startGyroCalibration(std::uint32_t samples) {
   gyro_calibration.active = true;
   gyro_calibration.target_samples = samples;
   gyro_bias_valid = false;
+  attitude_initialized = false;
+  attitude_state = {};
   consolePrintf("OK imu gyro calibration started samples=%lu\r\n",
                 static_cast<unsigned long>(samples));
 }
@@ -268,7 +352,9 @@ void updateImu(const std::uint32_t now_us) {
     return;
   }
   last_imu_sample_us = now_us;
-  sampleImu();
+  if (sampleImu()) {
+    updateAttitude(now_us);
+  }
 }
 
 void stopMotor() {
@@ -420,6 +506,9 @@ void printHelp() {
   consoleWrite("  motor stop\r\n");
   consoleWrite("  imu status\r\n");
   consoleWrite("  imu calibrate [samples]\r\n");
+  consoleWrite("  imu map <sin_axis> <cos_axis> <gyro_axis> <sin_sign> <cos_sign> <gyro_sign>\r\n");
+  consoleWrite("  attitude status\r\n");
+  consoleWrite("  attitude reset [angle_rad]\r\n");
   consoleWrite("  field <electrical_hz> <amplitude_v>\r\n");
   consoleWrite("  stop\r\n");
   consoleWrite("  status\r\n");
@@ -430,7 +519,7 @@ void printHelp() {
 void printStatus() {
   refreshEncoderHealth();
   consolePrintf(
-      "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu\r\n",
+      "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu,imu_ok=%d,attitude_ok=%d,theta_rad=%.6f,theta_rate_rad_s=%.6f\r\n",
       motorModeName(motor_mode), telemetry_enabled ? 1 : 0, vq_command_v,
       open_loop_hz, open_loop_amplitude_v, motor_config_valid ? 1 : 0,
       motor_config.pole_pairs, motor_config.sensor_direction,
@@ -444,21 +533,34 @@ void printStatus() {
       wheel_state.unwrapped_angle_rad, wheel_state.velocity_rad_s,
       wheel_state.instantaneous_velocity_rad_s,
       wheel_state.velocity_valid ? 1 : 0,
-      static_cast<unsigned long>(encoder_read_errors));
+      static_cast<unsigned long>(encoder_read_errors), imu_sample_valid ? 1 : 0,
+      attitude_state.valid ? 1 : 0, attitude_state.angle_rad,
+      attitude_state.rate_rad_s);
 }
 
 void printImuStatus() {
   std::uint8_t who_am_i = 0U;
   const bool who_ok = imu_ready && imu.readWhoAmI(&who_am_i);
   consolePrintf(
-      "imu,ready=%d,sample_ok=%d,who_ok=%d,who=0x%02x,bias_valid=%d,calibrating=%d,ax=%.6f,ay=%.6f,az=%.6f,gx=%.6f,gy=%.6f,gz=%.6f,temp_c=%.3f,bx=%.6f,by=%.6f,bz=%.6f,read_errors=%lu\r\n",
+      "imu,ready=%d,sample_ok=%d,who_ok=%d,who=0x%02x,bias_valid=%d,calibrating=%d,ax=%.6f,ay=%.6f,az=%.6f,gx=%.6f,gy=%.6f,gz=%.6f,temp_c=%.3f,bx=%.6f,by=%.6f,bz=%.6f,map=%d:%d:%d:%d:%d:%d,read_errors=%lu\r\n",
       imu_ready ? 1 : 0, imu_sample_valid ? 1 : 0, who_ok ? 1 : 0,
       static_cast<unsigned>(who_am_i), gyro_bias_valid ? 1 : 0,
       gyro_calibration.active ? 1 : 0, imu_sample.accel_mps2[0],
       imu_sample.accel_mps2[1], imu_sample.accel_mps2[2], correctedGyro(0),
       correctedGyro(1), correctedGyro(2), imu_sample.temperature_c,
       gyro_bias_rad_s[0], gyro_bias_rad_s[1], gyro_bias_rad_s[2],
+      imu_map.accel_sin_axis, imu_map.accel_cos_axis, imu_map.gyro_axis,
+      imu_map.accel_sin_sign, imu_map.accel_cos_sign, imu_map.gyro_sign,
       static_cast<unsigned long>(imu_read_errors));
+}
+
+void printAttitudeStatus() {
+  consolePrintf(
+      "attitude,initialized=%d,valid=%d,theta_rad=%.6f,rate_rad_s=%.6f,residual_bias_rad_s=%.6f,innovation=%.6f,accel_weight=%.6f,wheel_rate_rad_s=%.6f\r\n",
+      attitude_initialized ? 1 : 0, attitude_state.valid ? 1 : 0,
+      attitude_state.angle_rad, attitude_state.rate_rad_s,
+      attitude_state.gyro_bias_rad_s, attitude_state.gravity_innovation,
+      attitude_state.accel_weight, wheel_state.velocity_rad_s);
 }
 
 void startCalibration(char* amplitude_token, char* hz_token, char* turns_token) {
@@ -592,7 +694,70 @@ void handleImuCommand() {
     return;
   }
 
-  consoleWrite("ERR usage: imu <status|calibrate [samples]>\r\n");
+  if (std::strcmp(action, "map") == 0) {
+    char* sin_axis_token = std::strtok(nullptr, " \t");
+    char* cos_axis_token = std::strtok(nullptr, " \t");
+    char* gyro_axis_token = std::strtok(nullptr, " \t");
+    char* sin_sign_token = std::strtok(nullptr, " \t");
+    char* cos_sign_token = std::strtok(nullptr, " \t");
+    char* gyro_sign_token = std::strtok(nullptr, " \t");
+    if (sin_axis_token == nullptr || cos_axis_token == nullptr ||
+        gyro_axis_token == nullptr || sin_sign_token == nullptr ||
+        cos_sign_token == nullptr || gyro_sign_token == nullptr) {
+      consoleWrite("ERR usage: imu map <sin_axis> <cos_axis> <gyro_axis> <sin_sign> <cos_sign> <gyro_sign>\r\n");
+      return;
+    }
+    ImuPlanarMap map{};
+    map.accel_sin_axis = std::atoi(sin_axis_token);
+    map.accel_cos_axis = std::atoi(cos_axis_token);
+    map.gyro_axis = std::atoi(gyro_axis_token);
+    map.accel_sin_sign = std::atoi(sin_sign_token);
+    map.accel_cos_sign = std::atoi(cos_sign_token);
+    map.gyro_sign = std::atoi(gyro_sign_token);
+    if (!validImuMap(map)) {
+      consoleWrite("ERR invalid imu map\r\n");
+      return;
+    }
+    imu_map = map;
+    resetAttitudeFromAccel();
+    consolePrintf("OK imu map %d %d %d %d %d %d\r\n",
+                  imu_map.accel_sin_axis, imu_map.accel_cos_axis,
+                  imu_map.gyro_axis, imu_map.accel_sin_sign,
+                  imu_map.accel_cos_sign, imu_map.gyro_sign);
+    return;
+  }
+
+  consoleWrite("ERR usage: imu <status|calibrate [samples]|map ...>\r\n");
+}
+
+void handleAttitudeCommand() {
+  char* action = std::strtok(nullptr, " \t");
+  if (action == nullptr || std::strcmp(action, "status") == 0) {
+    printAttitudeStatus();
+    return;
+  }
+
+  if (std::strcmp(action, "reset") == 0) {
+    char* angle_token = std::strtok(nullptr, " \t");
+    if (angle_token == nullptr) {
+      resetAttitudeFromAccel();
+      consoleWrite("OK attitude reset from accelerometer\r\n");
+      return;
+    }
+    const float angle = std::strtof(angle_token, nullptr);
+    if (!std::isfinite(angle)) {
+      consoleWrite("ERR invalid attitude angle\r\n");
+      return;
+    }
+    attitude_estimator.reset(angle, 0.0F);
+    attitude_state = attitude_estimator.state();
+    attitude_initialized = true;
+    last_attitude_update_us = static_cast<std::uint32_t>(esp_timer_get_time());
+    consolePrintf("OK attitude reset angle_rad=%.6f\r\n", angle);
+    return;
+  }
+
+  consoleWrite("ERR usage: attitude <status|reset [angle_rad]>\r\n");
 }
 
 void handleCommand(char* line) {
@@ -608,6 +773,11 @@ void handleCommand(char* line) {
 
   if (std::strcmp(command, "imu") == 0) {
     handleImuCommand();
+    return;
+  }
+
+  if (std::strcmp(command, "attitude") == 0) {
+    handleAttitudeCommand();
     return;
   }
 
@@ -726,7 +896,7 @@ void emitTelemetry(const std::uint32_t now_us) {
   }
   last_telemetry_us = now_us;
   consolePrintf(
-      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%lu\r\n",
+      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%lu,%d,%.6f,%.6f,%.6f\r\n",
       static_cast<unsigned long>(now_us), motorModeName(motor_mode),
       vq_command_v, electrical_angle_rad, open_loop_hz,
       encoder_status_valid ? 1 : 0, encoder_sample_valid ? 1 : 0,
@@ -739,7 +909,9 @@ void emitTelemetry(const std::uint32_t now_us) {
       static_cast<unsigned long>(encoder_read_errors), imu_sample_valid ? 1 : 0,
       imu_sample.accel_mps2[0], imu_sample.accel_mps2[1], imu_sample.accel_mps2[2],
       correctedGyro(0), correctedGyro(1), correctedGyro(2),
-      static_cast<unsigned long>(imu_read_errors));
+      static_cast<unsigned long>(imu_read_errors), attitude_state.valid ? 1 : 0,
+      attitude_state.angle_rad, attitude_state.rate_rad_s,
+      attitude_state.accel_weight);
 }
 
 bool initConsole() {
@@ -826,9 +998,9 @@ extern "C" void app_main(void) {
   last_imu_sample_us = now_us;
   last_telemetry_us = now_us;
 
-  consoleWrite("TriWhirl motor + IMU runtime ready\r\n");
+  consoleWrite("TriWhirl motor + IMU + attitude runtime ready\r\n");
   consoleWrite("telemetry is off by default; use 'telemetry on' when streaming is needed\r\n");
-  consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors,imu_ok,ax,ay,az,gx,gy,gz,imu_read_errors\r\n");
+  consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors,imu_ok,ax,ay,az,gx,gy,gz,imu_read_errors,attitude_ok,theta_rad,theta_rate_rad_s,accel_weight\r\n");
   printStatus();
   printHelp();
   printPrompt();
