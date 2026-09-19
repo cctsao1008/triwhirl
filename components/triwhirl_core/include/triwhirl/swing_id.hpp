@@ -99,6 +99,7 @@ class SwingIdRunner {
   SwingIdOutput output_{};
   std::uint32_t start_us_ = 0U;
   std::uint32_t probe_start_us_ = 0U;
+  std::uint32_t rearm_start_half_cycle_ = 0U;
   int pump_rate_sign_ = 1;
   float current_pump_v_ = 0.55F;
   float probe_vq_v_ = 0.0F;
