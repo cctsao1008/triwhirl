@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import importlib
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from . import __version__
 from .registry import commands_for_group, find_command, groups, iter_commands, resolve_script
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
+NativeHandler = Callable[[Sequence[str]], int]
 
 
 def _print_usage() -> None:
@@ -25,14 +27,28 @@ def _print_usage() -> None:
     for group in groups():
         print(f"  {group}")
         for command in commands_for_group(group):
-            print(f"    {command.name:<14} {command.description}")
+            backend = "native" if command.handler else "legacy"
+            print(f"    {command.name:<14} [{backend}] {command.description}")
     print()
     print("Legacy scripts remain supported during the toolbox migration.")
 
 
 def _print_compact_list() -> None:
     for command in iter_commands():
-        print(f"{command.group} {command.name}\t{command.script}")
+        target = command.handler if command.handler else command.script
+        backend = "native" if command.handler else "legacy"
+        print(f"{command.group} {command.name}\t{backend}\t{target}")
+
+
+def _load_handler(spec: str) -> NativeHandler:
+    module_name, separator, attribute = spec.partition(":")
+    if not separator or not module_name or not attribute:
+        raise RuntimeError(f"invalid toolbox handler specification: {spec}")
+    module = importlib.import_module(module_name)
+    handler = getattr(module, attribute, None)
+    if handler is None or not callable(handler):
+        raise RuntimeError(f"toolbox handler not found: {spec}")
+    return handler
 
 
 def _dispatch(group: str, name: str, args: Sequence[str]) -> int:
@@ -48,6 +64,14 @@ def _dispatch(group: str, name: str, args: Sequence[str]) -> int:
         else:
             print("groups: " + ", ".join(groups()), file=sys.stderr)
         return 2
+
+    if command.handler is not None:
+        try:
+            handler = _load_handler(command.handler)
+            return int(handler(args))
+        except (ImportError, RuntimeError, AttributeError) as exc:
+            print(f"twtool: {exc}", file=sys.stderr)
+            return 2
 
     script = resolve_script(TOOLS_ROOT, command)
     if not script.is_file():
