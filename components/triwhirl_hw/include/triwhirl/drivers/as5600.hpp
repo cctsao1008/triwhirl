@@ -3,13 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 
-class TwoWire;
+#include "driver/i2c_master.h"
 
 namespace triwhirl {
 namespace drivers {
 
 struct As5600Status {
-  std::uint8_t raw = 0;
+  std::uint8_t raw = 0U;
   bool magnet_detected = false;
   bool magnet_too_weak = false;
   bool magnet_too_strong = false;
@@ -17,8 +17,8 @@ struct As5600Status {
 
 class As5600 {
  public:
-  explicit As5600(TwoWire& wire, std::uint8_t address = 0x36U);
-
+  As5600() = default;
+  bool init(i2c_master_bus_handle_t bus, std::uint8_t address = 0x36U);
   bool readRawAngle(std::uint16_t* raw_count);
   bool readStatus(As5600Status* status);
 
@@ -26,9 +26,7 @@ class As5600 {
   bool readRegisters(std::uint8_t first_register,
                      std::uint8_t* data,
                      std::size_t length);
-
-  TwoWire& wire_;
-  std::uint8_t address_;
+  i2c_master_dev_handle_t device_ = nullptr;
 };
 
 }  // namespace drivers
