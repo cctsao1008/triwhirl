@@ -20,6 +20,8 @@ constexpr std::uint8_t kExpectedWhoAmI = 0x68U;
 constexpr int kI2cTimeoutMs = 20;
 constexpr std::uint32_t kPowerOnSettleMs = 100U;
 constexpr std::uint32_t kWakeSettleMs = 30U;
+constexpr std::uint32_t kRetrySettleMs = 30U;
+constexpr unsigned kInitAttempts = 3U;
 constexpr float kGravityMps2 = 9.80665F;
 constexpr float kAccelLsbPerG = 8192.0F;  // +/-4 g
 constexpr float kGyroLsbPerDps = 32.8F;  // +/-1000 deg/s
@@ -49,55 +51,72 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
   const std::uint8_t alternate = address == 0x68U ? 0x69U : 0x68U;
   const std::uint8_t candidates[2] = {address, alternate};
 
-  for (const std::uint8_t candidate : candidates) {
-    if (i2c_master_probe(bus, candidate, kI2cTimeoutMs) != ESP_OK) {
-      continue;
-    }
-
-    i2c_device_config_t config{};
-    config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-    config.device_address = candidate;
-    config.scl_speed_hz = 400000U;
-    if (i2c_master_bus_add_device(bus, &config, &device_) != ESP_OK) {
-      device_ = nullptr;
-      continue;
-    }
-
-    auto discard_device = [this]() {
+  // A firmware/flash reset resets the ESP32 I2C controller without necessarily
+  // power-cycling the external MPU6050.  If a reset interrupts an I2C transfer,
+  // the first probe/register sequence can fail even though a full power cycle
+  // immediately restores the sensor.  Retry locally and reset the master bus
+  // between attempts so a warm reset does not permanently disable IMU support
+  // for the rest of that boot.
+  for (unsigned attempt = 0U; attempt < kInitAttempts; ++attempt) {
+    if (attempt > 0U) {
       if (device_ != nullptr) {
         i2c_master_bus_rm_device(device_);
         device_ = nullptr;
       }
-    };
-
-    std::uint8_t who_am_i = 0U;
-    if (!readWhoAmI(&who_am_i) || who_am_i != kExpectedWhoAmI) {
-      discard_device();
-      continue;
+      i2c_master_bus_reset(bus);
+      vTaskDelay(pdMS_TO_TICKS(kRetrySettleMs));
     }
 
-    // Wake the device and use the X-axis gyro PLL as the clock source.
-    if (!writeRegister(kRegPowerManagement1, 0x01U)) {
-      discard_device();
-      continue;
+    for (const std::uint8_t candidate : candidates) {
+      if (i2c_master_probe(bus, candidate, kI2cTimeoutMs) != ESP_OK) {
+        continue;
+      }
+
+      i2c_device_config_t config{};
+      config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+      config.device_address = candidate;
+      config.scl_speed_hz = 400000U;
+      if (i2c_master_bus_add_device(bus, &config, &device_) != ESP_OK) {
+        device_ = nullptr;
+        continue;
+      }
+
+      auto discard_device = [this]() {
+        if (device_ != nullptr) {
+          i2c_master_bus_rm_device(device_);
+          device_ = nullptr;
+        }
+      };
+
+      std::uint8_t who_am_i = 0U;
+      if (!readWhoAmI(&who_am_i) || who_am_i != kExpectedWhoAmI) {
+        discard_device();
+        continue;
+      }
+
+      // Wake the device and use the X-axis gyro PLL as the clock source.
+      if (!writeRegister(kRegPowerManagement1, 0x01U)) {
+        discard_device();
+        continue;
+      }
+
+      // The gyro needs a short settling interval after wake before its output is
+      // used for bias calibration and attitude estimation.
+      vTaskDelay(pdMS_TO_TICKS(kWakeSettleMs));
+
+      // 1 kHz sample rate with DLPF enabled, DLPF_CFG=2.
+      if (!writeRegister(kRegSampleRateDivider, 0x00U) ||
+          !writeRegister(kRegConfig, 0x02U) ||
+          // GYRO_FS_SEL=2 => +/-1000 deg/s.
+          !writeRegister(kRegGyroConfig, 0x10U) ||
+          // ACCEL_FS_SEL=1 => +/-4 g.
+          !writeRegister(kRegAccelConfig, 0x08U)) {
+        discard_device();
+        continue;
+      }
+
+      return true;
     }
-
-    // The gyro needs a short settling interval after wake before its output is
-    // used for bias calibration and attitude estimation.
-    vTaskDelay(pdMS_TO_TICKS(kWakeSettleMs));
-
-    // 1 kHz sample rate with DLPF enabled, DLPF_CFG=2.
-    if (!writeRegister(kRegSampleRateDivider, 0x00U) ||
-        !writeRegister(kRegConfig, 0x02U) ||
-        // GYRO_FS_SEL=2 => +/-1000 deg/s.
-        !writeRegister(kRegGyroConfig, 0x10U) ||
-        // ACCEL_FS_SEL=1 => +/-4 g.
-        !writeRegister(kRegAccelConfig, 0x08U)) {
-      discard_device();
-      continue;
-    }
-
-    return true;
   }
 
   return false;
