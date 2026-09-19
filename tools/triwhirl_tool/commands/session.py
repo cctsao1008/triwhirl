@@ -7,15 +7,17 @@ import time
 from pathlib import Path
 from typing import Sequence
 
+from ..ble import DEVICE_NAME
+from ..host_log import host_print as print
+from ..host_log import print_session_header
+from .download import download_main
 from .log import (
     _close_line_transport,
     _open_line_transport,
     _request_log_status,
     _wait_console,
     decode_main,
-    download_main,
 )
-from ..ble import DEVICE_NAME
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -52,7 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prepare-timeout", type=float, default=90.0)
     parser.add_argument("--control-timeout", type=float, default=5.0)
     parser.add_argument("--finalize-timeout", type=float, default=20.0)
-    parser.add_argument("--download-timeout", type=float, default=60.0)
+    parser.add_argument("--download-timeout", type=float, default=180.0)
     return parser
 
 
@@ -164,6 +166,7 @@ async def _record_run(
 
 def session_main(argv: Sequence[str]) -> int:
     args = _parser().parse_args(list(argv))
+    print_session_header()
     if not math.isfinite(args.seconds) or args.seconds <= 0.0:
         print("error: seconds must be finite and > 0")
         return 2
@@ -195,7 +198,8 @@ def session_main(argv: Sequence[str]) -> int:
             *ble,
             "--timeout",
             f"{args.download_timeout:.9g}",
-        ]
+        ],
+        session_header=False,
     )
     if rc != 0:
         return rc
