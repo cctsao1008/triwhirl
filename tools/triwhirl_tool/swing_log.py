@@ -128,10 +128,13 @@ def extract_fit_rows(
         trial += 1
         center_deg = centers[vertex_id]
         planned_vq_v = float(records[start][4])
+        probe_phase = "zero_vector" if abs(planned_vq_v) <= 1.0e-6 else "active"
 
-        # Keep one pre-probe record as the fitter's kinematic anchor.  The
-        # on-device runner freezes the already-established pump Vq at Probe
-        # entry, so this sample should normally carry the same signed input.
+        # Keep one pre-probe record as the fitter's kinematic anchor.  Native
+        # swing ID now switches from the coarse pump to an independent probe
+        # schedule at Probe entry, so the armed sample may intentionally carry
+        # a different Vq.  The fitter rejects derivative windows that cross
+        # that input transition and uses firmware t_us as the time authority.
         if start > 0:
             rows.append(
                 _fit_row(
@@ -150,7 +153,7 @@ def extract_fit_rows(
                     trial=trial,
                     vertex_id=vertex_id,
                     center_deg=center_deg,
-                    phase="active",
+                    phase=probe_phase,
                     planned_vq_v=planned_vq_v,
                     record=records[probe_index],
                 )
