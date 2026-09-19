@@ -5,23 +5,35 @@ import asyncio
 import json
 import math
 import re
+import time
 from pathlib import Path
 from typing import Sequence
 
 from .. import twlog
-from ..ble import DEVICE_NAME, TX_UUID, drain_queue, discover_target, send_command
+from ..ble import (
+    DEVICE_NAME,
+    TX_UUID,
+    BleLineTransport,
+    drain_queue,
+    discover_target,
+    send_command,
+)
 
 MARKER = re.compile(
     rb"logdump,format=TWLG1,bytes=(\d+),record_size=(\d+),records=(\d+)\r?\n"
 )
 
 
-def _download_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Download a completed TWLG log over BLE")
-    parser.add_argument("-o", "--output", type=Path, required=True)
+def _add_ble_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--name", default=DEVICE_NAME)
     parser.add_argument("--address", default=None)
     parser.add_argument("--scan-timeout", type=float, default=10.0)
+
+
+def _download_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Download a completed TWLG log over BLE")
+    parser.add_argument("-o", "--output", type=Path, required=True)
+    _add_ble_args(parser)
     parser.add_argument("--timeout", type=float, default=60.0)
     return parser
 
@@ -38,6 +50,128 @@ def _inspect_parser() -> argparse.ArgumentParser:
     parser.add_argument("input", type=Path)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     return parser
+
+
+def _status_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Read firmware TWLG logger status over BLE")
+    _add_ble_args(parser)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--timeout", type=float, default=3.0)
+    return parser
+
+
+def _prepare_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Pre-erase/prepare the firmware TWLG region before an experiment"
+    )
+    parser.add_argument("seconds", nargs="?", type=float, default=45.0)
+    _add_ble_args(parser)
+    parser.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=90.0,
+        help="maximum time to wait for background sector erase to reach state=ready",
+    )
+    parser.add_argument("--no-wait", action="store_true")
+    return parser
+
+
+def _simple_control_parser(description: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
+    _add_ble_args(parser)
+    parser.add_argument("--timeout", type=float, default=5.0)
+    return parser
+
+
+def _critical_parser() -> argparse.ArgumentParser:
+    parser = _simple_control_parser(
+        "Pause/resume flash programming while retaining 1 kHz records in SRAM"
+    )
+    parser.add_argument("mode", choices=("on", "off"))
+    return parser
+
+
+def _normalize_console_line(line: str) -> str:
+    text = line.strip()
+    while text.startswith(">"):
+        text = text[1:].lstrip()
+    return text
+
+
+def _parse_key_values(line: str, prefix: str) -> dict[str, str]:
+    normalized = _normalize_console_line(line)
+    marker = prefix + ","
+    index = normalized.find(marker)
+    if index < 0:
+        raise RuntimeError(f"unexpected firmware response: {line}")
+    result: dict[str, str] = {}
+    for item in normalized[index + len(marker) :].split(","):
+        if "=" in item:
+            key, value = item.split("=", 1)
+            result[key] = value
+    return result
+
+
+async def _open_line_transport(args: argparse.Namespace):
+    from bleak import BleakClient
+
+    target = await discover_target(
+        name=args.name,
+        address=args.address,
+        scan_timeout=args.scan_timeout,
+    )
+    client = BleakClient(target)
+    await client.connect()
+    if not client.is_connected:
+        raise RuntimeError("BLE connection failed")
+    transport = BleLineTransport(client)
+    await client.start_notify(TX_UUID, transport.on_notify)
+    await asyncio.sleep(0.2)
+    await transport.send("telemetry off")
+    await asyncio.sleep(0.05)
+    transport.drain()
+    return client, transport
+
+
+async def _close_line_transport(client, transport: BleLineTransport) -> None:
+    try:
+        if client.is_connected:
+            await client.stop_notify(TX_UUID)
+    finally:
+        if client.is_connected:
+            await client.disconnect()
+
+
+async def _wait_console(
+    transport: BleLineTransport,
+    *,
+    prefixes: tuple[str, ...],
+    timeout_s: float,
+) -> str:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        remaining = max(0.001, deadline - time.monotonic())
+        line = await transport.read_line(min(0.5, remaining))
+        if not line:
+            continue
+        normalized = _normalize_console_line(line)
+        err_index = normalized.find("ERR ")
+        if err_index >= 0:
+            raise RuntimeError(normalized[err_index:])
+        for prefix in prefixes:
+            index = normalized.find(prefix)
+            if index >= 0:
+                return normalized[index:]
+    raise RuntimeError(f"timed out waiting for firmware response {prefixes}")
+
+
+async def _request_log_status(
+    transport: BleLineTransport,
+    timeout_s: float = 3.0,
+) -> tuple[str, dict[str, str]]:
+    await transport.send("log status")
+    line = await _wait_console(transport, prefixes=("log,",), timeout_s=timeout_s)
+    return line, _parse_key_values(line, "log")
 
 
 async def _download_run(args: argparse.Namespace) -> int:
@@ -114,9 +248,6 @@ async def _download_run(args: argparse.Namespace) -> int:
             f"short BLE dump: received {len(payload)} of {expected_bytes} bytes"
         )
 
-    # Validate the complete payload before committing it to disk.  This catches
-    # a truncated/corrupted transfer immediately instead of deferring failure to
-    # a later decode step.
     meta, _ = twlog.decode_bytes(bytes(payload), source="BLE download")
     if meta.record_count != record_count:
         raise RuntimeError(
@@ -219,3 +350,155 @@ def inspect_main(argv: Sequence[str]) -> int:
         f"record_flags_or=0x{stats.flags_or:04x}"
     )
     return 0
+
+
+async def _status_run(args: argparse.Namespace) -> int:
+    client, transport = await _open_line_transport(args)
+    try:
+        line, values = await _request_log_status(transport, args.timeout)
+        if args.json:
+            print(json.dumps(values, indent=2))
+        else:
+            print(line)
+        return 0
+    finally:
+        await _close_line_transport(client, transport)
+
+
+def status_main(argv: Sequence[str]) -> int:
+    args = _status_parser().parse_args(list(argv))
+    try:
+        return asyncio.run(_status_run(args))
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
+async def _prepare_run(args: argparse.Namespace) -> int:
+    if not math.isfinite(args.seconds) or args.seconds <= 0.0:
+        raise RuntimeError("seconds must be finite and > 0")
+    client, transport = await _open_line_transport(args)
+    try:
+        await transport.send(f"log prepare {args.seconds:.9g}")
+        line = await _wait_console(
+            transport,
+            prefixes=("OK log prepare",),
+            timeout_s=5.0,
+        )
+        print(line)
+        if args.no_wait:
+            return 0
+
+        deadline = time.monotonic() + args.wait_timeout
+        last_state = ""
+        while time.monotonic() < deadline:
+            _line, status = await _request_log_status(transport, 3.0)
+            state = status.get("state", "unknown")
+            if state != last_state:
+                print(
+                    f"log state={state} prepared_bytes={status.get('prepared_bytes', '?')} "
+                    f"partition_bytes={status.get('partition_bytes', '?')}"
+                )
+                last_state = state
+            if state == "ready":
+                return 0
+            if state in {"error", "unavailable"}:
+                raise RuntimeError(f"logger entered state={state}")
+            await asyncio.sleep(0.25)
+        raise RuntimeError(
+            f"timed out after {args.wait_timeout:.1f}s waiting for logger state=ready"
+        )
+    finally:
+        await _close_line_transport(client, transport)
+
+
+def prepare_main(argv: Sequence[str]) -> int:
+    args = _prepare_parser().parse_args(list(argv))
+    try:
+        return asyncio.run(_prepare_run(args))
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
+async def _simple_log_control_run(
+    args: argparse.Namespace,
+    command: str,
+    ok_prefix: str,
+    *,
+    wait_complete: bool = False,
+) -> int:
+    client, transport = await _open_line_transport(args)
+    try:
+        await transport.send(command)
+        line = await _wait_console(
+            transport,
+            prefixes=(ok_prefix,),
+            timeout_s=args.timeout,
+        )
+        print(line)
+        if not wait_complete:
+            return 0
+
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            _line, status = await _request_log_status(transport, 3.0)
+            state = status.get("state", "unknown")
+            buffered = status.get("buffered_bytes", "?")
+            if state == "complete":
+                print(
+                    f"log state=complete records={status.get('records_written', '?')} "
+                    f"logical_bytes={status.get('logical_bytes', '?')} dropped={status.get('dropped_records', '?')}"
+                )
+                return 0
+            if state == "error":
+                raise RuntimeError("logger entered state=error while stopping")
+            print(f"log state={state} buffered_bytes={buffered}")
+            await asyncio.sleep(0.1)
+        raise RuntimeError("timed out waiting for logger state=complete")
+    finally:
+        await _close_line_transport(client, transport)
+
+
+def start_main(argv: Sequence[str]) -> int:
+    args = _simple_control_parser("Start the prepared 1 kHz firmware TWLG logger").parse_args(
+        list(argv)
+    )
+    try:
+        return asyncio.run(
+            _simple_log_control_run(args, "log start", "OK log start")
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
+def stop_main(argv: Sequence[str]) -> int:
+    parser = _simple_control_parser(
+        "Stop the firmware TWLG logger and wait for SRAM/Flash finalization"
+    )
+    parser.set_defaults(timeout=15.0)
+    args = parser.parse_args(list(argv))
+    try:
+        return asyncio.run(
+            _simple_log_control_run(
+                args,
+                "log stop",
+                "OK log stopping",
+                wait_complete=True,
+            )
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
+def critical_main(argv: Sequence[str]) -> int:
+    args = _critical_parser().parse_args(list(argv))
+    command = f"log critical {args.mode}"
+    ok_prefix = f"OK log critical {args.mode}"
+    try:
+        return asyncio.run(_simple_log_control_run(args, command, ok_prefix))
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 1
