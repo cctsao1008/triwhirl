@@ -23,6 +23,11 @@ Current command tree:
 
 ```text
 log
+  status         firmware TWLG logger state over BLE
+  prepare        pre-erase/prepare flash before a realtime run
+  start          start synchronized 1 kHz TWLG capture
+  critical       pause/resume flash programming while SRAM capture continues
+  stop           stop capture and wait for flash/header finalization
   capture-uart   live UART telemetry -> CSV
   download       completed firmware TWLG -> .twlog over BLE
   decode         validate/decode .twlog -> CSV
@@ -42,32 +47,48 @@ fit
   body-active    active per-vertex A/B/C fit
 ```
 
-`log download`, `log decode`, and `log inspect` are now native toolbox commands backed by shared BLE/TWLG modules rather than subprocess wrappers. The identification/fitting commands still route to their proven legacy implementations during migration.
+The TWLG commands are native toolbox commands backed by shared BLE/TWLG modules. Identification/fitting commands still route to proven legacy implementations during migration.
 
-Examples:
+### Firmware logger workflow
+
+The normal logger lifecycle no longer needs a serial terminal:
 
 ```powershell
-python tools/twtool.py id swing --probes 12 -o artifacts/auto-swing-id-01.csv
-python tools/twtool.py fit body-active artifacts/body-active-B.csv -o artifacts/body-active-B-fit.json
+python tools/twtool.py log status
+python tools/twtool.py log prepare 45
+python tools/twtool.py log start
+# realtime experiment runs on ESP32
+python tools/twtool.py log stop
 python tools/twtool.py log download -o artifacts/run-01.twlog
 python tools/twtool.py log inspect artifacts/run-01.twlog
 python tools/twtool.py log decode artifacts/run-01.twlog -o artifacts/run-01.csv
 ```
 
-`log inspect` reports the validated TWLG header plus useful acquisition ranges such as body angle, body rate, wheel rate, Vq, dropped records, and fault coverage. Use `--json` when a machine-readable summary is useful.
+`log prepare` waits for the background flash erase to reach firmware `state=ready` unless `--no-wait` is supplied. `log stop` waits until the SRAM buffer has drained, the TWLG header/CRC are finalized, and firmware reaches `state=complete`.
+
+`log critical on` pauses flash programming without stopping 1 kHz SRAM capture; `log critical off` resumes flash writes. The future firmware-owned upright experiment supervisor will drive this automatically around critical local windows rather than relying on BLE timing.
+
+`log inspect` reports the validated TWLG header plus useful acquisition ranges such as body angle, body rate, wheel rate, Vq, dropped records, and fault coverage. Use `--json` for a machine-readable summary.
+
+Other examples:
+
+```powershell
+python tools/twtool.py id swing --probes 12 -o artifacts/auto-swing-id-01.csv
+python tools/twtool.py fit body-active artifacts/body-active-B.csv -o artifacts/body-active-B-fit.json
+```
 
 Use `help` to open command-specific argument help through the unified entry point:
 
 ```powershell
-python tools/twtool.py help id swing
-python tools/twtool.py help log decode
+python tools/twtool.py help log prepare
 python tools/twtool.py help log inspect
+python tools/twtool.py help id swing
 ```
 
 The old scripts remain available during migration. New host workflows should prefer `twtool` so command naming and shared BLE/TWLG/metadata infrastructure have one stable interface.
 
 ## Design boundary
 
-The toolbox is for commissioning, acquisition, identification, logging, analysis, and synthesis. Timing-critical control decisions belong in the ESP32 firmware. In particular, BLE is not a real-time control transport: the firmware-owned 1 kHz control/logger path records synchronized data locally and BLE is used after the run for bulk transfer.
+The toolbox is for commissioning, acquisition, identification, logging, analysis, and synthesis. Timing-critical control decisions belong in the ESP32 firmware. BLE is not a real-time control transport: the firmware-owned 1 kHz control/logger path records synchronized data locally and BLE is used for configuration and post-run transfer.
 
 Do not create a separate `host/` application hierarchy unless TriWhirl later gains an actual host-side runtime application.
