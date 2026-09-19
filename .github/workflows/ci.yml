@@ -9,6 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Smoke-test host toolbox routing
+        run: |
+          python tools/twtool.py --help
+          python tools/twtool.py --list
+          python -m tools.triwhirl_tool --list
       - name: Build with native ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:
