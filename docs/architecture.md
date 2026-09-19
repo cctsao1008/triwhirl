@@ -1,6 +1,6 @@
 # Repository architecture
 
-TriWhirl is a single-target ESP32 firmware project with supporting PC-side engineering tools. The repository structure should reflect that boundary directly rather than implying unsupported MCU targets.
+TriWhirl is a single-target ESP32 firmware project with supporting PC-side engineering tools. The repository structure reflects that boundary directly rather than implying unsupported MCU targets.
 
 ## Top-level layout
 
@@ -23,7 +23,7 @@ The intended dependency direction is:
 
 ```text
 tools/  ---- generated/identified parameters ----> firmware
-                                               
+
                          src/
                           |
                           v
@@ -44,7 +44,7 @@ tools/  ---- generated/identified parameters ----> firmware
 - Do not add MCU portability layers without an actual second target.
 - Do not add empty architectural directories before code or documentation needs them.
 
-## Planned firmware domains
+## Firmware domains
 
 As functionality is implemented, `src/` may grow by responsibility rather than by processor target, for example:
 
@@ -82,7 +82,3 @@ src/control/hinf           (runtime state feedback)
 ```
 
 The ESP32 runtime never depends on Python or an online convex solver.
-
-## Current development priority
-
-Repository structure is stabilized first. The active implementation track then resumes with reaction-wheel motor bring-up, followed by sensing/estimation and robust balance control.
