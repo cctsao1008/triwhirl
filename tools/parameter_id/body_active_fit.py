@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
-"""Fit the actively excited near-upright TriWhirl local model.
+"""Fit actively excited near-upright TriWhirl dynamics per upright vertex.
 
-Body model:
+TriWhirl has three legitimate upright equilibria.  They are geometrically 120
+degrees apart, but the real PCB/battery/motor mass distribution need not be
+perfectly three-fold symmetric.  Therefore this fitter classifies every trial
+as vertex A/B/C and fits each vertex separately; it never pools different
+vertices into one controller plant merely because their local coordinates can
+be normalized.
+
+Body model per vertex:
     theta_ddot = a_theta * theta_error_gyro
                + a_rate  * theta_rate
                + a_wheel * wheel_rate
                + b_vq    * vq
                + bias
 
-Wheel model:
+Wheel model per vertex:
     wheel_accel = c_theta * theta_error_gyro
                 + c_rate  * theta_rate
                 + c_wheel * wheel_rate
                 + d_vq    * vq
                 + bias
 
-`theta_error_gyro` is integrated from the calibrated gyro starting at the last
-armed sample before release. This keeps angle, rate, and acceleration
-kinematically consistent. The measured firmware telemetry `vq_v`, not the
-planned host command, is the identification input.
-
-The selected upright contact is part of the plant definition. By default the
-fit rejects trials whose held reference is not near the chosen ~68 degree
-vertex established by passive local identification, preventing neighboring
-Reuleaux vertices/contact postures from being mixed into one linear model.
+``theta_error_gyro`` is integrated from the calibrated gyro starting at the
+last armed sample before release.  The measured firmware ``vq_v`` is the
+identification input.  Older active CSV files without explicit ``vertex_id``
+columns are still supported by classifying their held ``theta_ref_rad``.
 """
 
 from __future__ import annotations
@@ -36,17 +38,24 @@ from pathlib import Path
 
 import numpy as np
 
+from vertex_geometry import VERTEX_IDS, classify_vertex_deg, vertex_centers_deg
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fit active near-upright plant dynamics.")
+    parser = argparse.ArgumentParser(
+        description="Fit active near-upright plant dynamics separately for A/B/C vertices."
+    )
     parser.add_argument("input", type=Path)
     parser.add_argument("--derivative-window", type=int, default=1)
     parser.add_argument("--max-angle-deg", type=float, default=8.0)
-    parser.add_argument("--target-theta-deg", type=float, default=68.0)
-    parser.add_argument("--target-tolerance-deg", type=float, default=12.0)
+    parser.add_argument(
+        "--vertex-a-deg", type=float, default=68.0,
+        help="nominal A-vertex angle; B/C are -120/+120 deg from A",
+    )
+    parser.add_argument("--vertex-tolerance-deg", type=float, default=20.0)
     parser.add_argument(
         "--min-active-samples-per-sign", type=int, default=6,
-        help="minimum held-input regression samples for each nonzero Vq sign",
+        help="minimum held-input regression samples for +Vq and -Vq within one vertex",
     )
     parser.add_argument("-o", "--output", type=Path, required=True)
     return parser.parse_args()
@@ -121,12 +130,148 @@ def fit_equation(x: np.ndarray, y: np.ndarray, names: list[str]) -> dict[str, ob
     }
 
 
+def classify_trial(
+    trial_rows: list[dict[str, str]],
+    vertex_a_deg: float,
+    tolerance_deg: float,
+) -> tuple[str | None, dict[str, object]]:
+    refs = [float(r["theta_ref_rad"]) for r in trial_rows if r.get("theta_ref_rad")]
+    if not refs:
+        return None, {"reason": "missing_theta_ref"}
+    ref_rad = float(np.median(refs))
+    ref_deg = math.degrees(ref_rad)
+    match = classify_vertex_deg(ref_deg, vertex_a_deg, tolerance_deg)
+    if match is None:
+        return None, {
+            "reason": "not_near_any_vertex",
+            "theta_ref_rad": ref_rad,
+            "theta_ref_deg": ref_deg,
+        }
+
+    explicit_ids = {
+        r.get("vertex_id", "").strip()
+        for r in trial_rows
+        if r.get("vertex_id", "").strip()
+    }
+    explicit_ids.discard("")
+    if explicit_ids and explicit_ids != {match.vertex_id}:
+        return None, {
+            "reason": "vertex_id_disagrees_with_theta_ref",
+            "theta_ref_rad": ref_rad,
+            "theta_ref_deg": ref_deg,
+            "classified_vertex": match.vertex_id,
+            "explicit_vertex_ids": sorted(explicit_ids),
+        }
+
+    return match.vertex_id, {
+        "theta_ref_rad": ref_rad,
+        "theta_ref_deg": ref_deg,
+        "vertex_id": match.vertex_id,
+        "vertex_center_deg": match.center_deg,
+        "vertex_error_deg": match.error_deg,
+    }
+
+
+def extract_trial_samples(
+    trial: int,
+    tr: list[dict[str, str]],
+    derivative_window: int,
+    max_angle: float,
+) -> tuple[list[list[float]], list[float], list[float], dict[str, object], int, int]:
+    tr = sorted(tr, key=lambda r: int(r["t_us"]))
+    dynamic_indices = [
+        i for i, r in enumerate(tr)
+        if r.get("phase") in ("active", "zero_vector")
+    ]
+    if not dynamic_indices:
+        return [], [], [], {"trial": trial, "used": 0, "reason": "no_dynamic_rows"}, 0, 0
+
+    first_dynamic = dynamic_indices[0]
+    armed_before = [i for i in range(first_dynamic) if tr[i].get("phase") == "armed"]
+    anchor_i = armed_before[-1] if armed_before else max(0, first_dynamic - 1)
+    dyn = tr[anchor_i: dynamic_indices[-1] + 1]
+
+    t = np.asarray([float(r["t_us"]) * 1.0e-6 for r in dyn])
+    rate = np.asarray([float(r["theta_rate_rad_s"]) for r in dyn])
+    wheel = np.asarray([float(r["vel_rad_s"]) for r in dyn])
+    vq = np.asarray([float(r["vq_v"]) for r in dyn])
+    theta = np.asarray([float(r["theta_rad"]) for r in dyn])
+    theta_ref = float(dyn[0]["theta_ref_rad"])
+
+    error = np.empty(len(dyn), dtype=float)
+    error[0] = angle_diff(theta[0], theta_ref)
+    for i in range(1, len(dyn)):
+        dt = t[i] - t[i - 1]
+        if dt <= 0.0:
+            error[i] = error[i - 1]
+        else:
+            error[i] = error[i - 1] + 0.5 * (rate[i - 1] + rate[i]) * dt
+
+    regressors: list[list[float]] = []
+    body_targets: list[float] = []
+    wheel_targets: list[float] = []
+    active_used = 0
+    zero_used = 0
+    rejected_transition = 0
+    rejected_angle = 0
+
+    for i in range(derivative_window, len(dyn) - derivative_window):
+        if dyn[i].get("phase") not in ("active", "zero_vector"):
+            continue
+        lo = i - derivative_window
+        hi = i + derivative_window + 1
+        if not np.all(np.diff(t[lo:hi]) > 0.0):
+            continue
+        if abs(error[i]) > max_angle:
+            rejected_angle += 1
+            continue
+        if float(np.max(vq[lo:hi]) - np.min(vq[lo:hi])) > 1.0e-6:
+            rejected_transition += 1
+            continue
+
+        body_accel = local_slope(t, rate, i, derivative_window)
+        wheel_accel = local_slope(t, wheel, i, derivative_window)
+        if not np.isfinite(body_accel) or not np.isfinite(wheel_accel):
+            continue
+
+        regressors.append([error[i], rate[i], wheel[i], vq[i], 1.0])
+        body_targets.append(body_accel)
+        wheel_targets.append(wheel_accel)
+        if abs(vq[i]) > 1.0e-9:
+            active_used += 1
+        else:
+            zero_used += 1
+
+    meta = {
+        "trial": trial,
+        "theta_ref_rad": theta_ref,
+        "theta_ref_deg": math.degrees(theta_ref),
+        "planned_vq_v": float(tr[first_dynamic].get("planned_vq_v", "nan")),
+        "dynamic_rows": len(dynamic_indices),
+        "used": len(regressors),
+        "active_used": active_used,
+        "zero_vector_used": zero_used,
+        "theta_error_min_deg": math.degrees(float(np.min(error))),
+        "theta_error_max_deg": math.degrees(float(np.max(error))),
+        "measured_vq_min_v": float(np.min(vq)),
+        "measured_vq_max_v": float(np.max(vq)),
+    }
+    return (
+        regressors,
+        body_targets,
+        wheel_targets,
+        meta,
+        rejected_transition,
+        rejected_angle,
+    )
+
+
 def main() -> int:
     args = parse_args()
     if args.derivative_window < 1:
         raise RuntimeError("--derivative-window must be >= 1")
-    if args.target_tolerance_deg <= 0.0 or args.target_tolerance_deg >= 60.0:
-        raise RuntimeError("--target-tolerance-deg must be > 0 and < 60")
+    if args.vertex_tolerance_deg <= 0.0 or args.vertex_tolerance_deg >= 60.0:
+        raise RuntimeError("--vertex-tolerance-deg must be > 0 and < 60")
     if args.min_active_samples_per_sign < 1:
         raise RuntimeError("--min-active-samples-per-sign must be >= 1")
 
@@ -134,194 +279,170 @@ def main() -> int:
     if not rows:
         raise RuntimeError("input CSV is empty")
 
-    trial_ids = sorted({int(r["trial"]) for r in rows if r.get("trial")})
-    target_theta = math.radians(args.target_theta_deg)
-    target_tolerance = math.radians(args.target_tolerance_deg)
-    wrong_contact: list[tuple[int, float]] = []
-    for trial in trial_ids:
-        refs = [
-            float(r["theta_ref_rad"]) for r in rows
-            if int(r.get("trial", "0")) == trial and r.get("theta_ref_rad")
-        ]
-        if not refs:
-            continue
-        ref = float(np.median(refs))
-        if abs(angle_diff(ref, target_theta)) > target_tolerance:
-            wrong_contact.append((trial, math.degrees(ref)))
-    if wrong_contact:
-        details = ", ".join(
-            f"trial {trial}={ref_deg:.2f} deg" for trial, ref_deg in wrong_contact
-        )
-        raise RuntimeError(
-            "active dataset mixes/uses the wrong upright contact for this plant: "
-            f"{details}; expected selected vertex near {args.target_theta_deg:.1f} deg "
-            f"(±{args.target_tolerance_deg:.1f} deg)"
-        )
-
-    max_angle = math.radians(args.max_angle_deg)
-    regressors: list[list[float]] = []
-    body_targets: list[float] = []
-    wheel_targets: list[float] = []
-    per_trial: list[dict[str, object]] = []
-    rejected_transition = 0
-    rejected_angle = 0
-
-    for trial in trial_ids:
-        tr = [r for r in rows if int(r.get("trial", "0")) == trial]
-        tr.sort(key=lambda r: int(r["t_us"]))
-        dynamic_indices = [
-            i for i, r in enumerate(tr)
-            if r.get("phase") in ("active", "zero_vector")
-        ]
-        if not dynamic_indices:
-            per_trial.append({"trial": trial, "used": 0, "reason": "no_dynamic_rows"})
-            continue
-
-        first_dynamic = dynamic_indices[0]
-        armed_before = [i for i in range(first_dynamic) if tr[i].get("phase") == "armed"]
-        anchor_i = armed_before[-1] if armed_before else max(0, first_dynamic - 1)
-        dyn = tr[anchor_i: dynamic_indices[-1] + 1]
-
-        t = np.asarray([float(r["t_us"]) * 1.0e-6 for r in dyn])
-        rate = np.asarray([float(r["theta_rate_rad_s"]) for r in dyn])
-        wheel = np.asarray([float(r["vel_rad_s"]) for r in dyn])
-        vq = np.asarray([float(r["vq_v"]) for r in dyn])
-        theta = np.asarray([float(r["theta_rad"]) for r in dyn])
-        theta_ref = float(dyn[0]["theta_ref_rad"])
-
-        error = np.empty(len(dyn), dtype=float)
-        error[0] = angle_diff(theta[0], theta_ref)
-        for i in range(1, len(dyn)):
-            dt = t[i] - t[i - 1]
-            if dt <= 0.0:
-                error[i] = error[i - 1]
-            else:
-                error[i] = error[i - 1] + 0.5 * (rate[i - 1] + rate[i]) * dt
-
-        used = 0
-        active_used = 0
-        zero_used = 0
-        for i in range(args.derivative_window, len(dyn) - args.derivative_window):
-            if dyn[i].get("phase") not in ("active", "zero_vector"):
-                continue
-            lo = i - args.derivative_window
-            hi = i + args.derivative_window + 1
-            if not np.all(np.diff(t[lo:hi]) > 0.0):
-                continue
-            if abs(error[i]) > max_angle:
-                rejected_angle += 1
-                continue
-            if float(np.max(vq[lo:hi]) - np.min(vq[lo:hi])) > 1.0e-6:
-                rejected_transition += 1
-                continue
-
-            body_accel = local_slope(t, rate, i, args.derivative_window)
-            wheel_accel = local_slope(t, wheel, i, args.derivative_window)
-            if not np.isfinite(body_accel) or not np.isfinite(wheel_accel):
-                continue
-
-            regressors.append([error[i], rate[i], wheel[i], vq[i], 1.0])
-            body_targets.append(body_accel)
-            wheel_targets.append(wheel_accel)
-            used += 1
-            if abs(vq[i]) > 1.0e-9:
-                active_used += 1
-            else:
-                zero_used += 1
-
-        per_trial.append({
-            "trial": trial,
-            "theta_ref_rad": theta_ref,
-            "theta_ref_deg": math.degrees(theta_ref),
-            "planned_vq_v": float(tr[first_dynamic].get("planned_vq_v", "nan")),
-            "dynamic_rows": len(dynamic_indices),
-            "used": used,
-            "active_used": active_used,
-            "zero_vector_used": zero_used,
-            "theta_error_min_deg": math.degrees(float(np.min(error))),
-            "theta_error_max_deg": math.degrees(float(np.max(error))),
-            "measured_vq_min_v": float(np.min(vq)),
-            "measured_vq_max_v": float(np.max(vq)),
-        })
-
-    if len(regressors) < 12:
-        raise RuntimeError(
-            f"only {len(regressors)} usable dynamic samples; active capture is insufficient"
-        )
-
-    x = np.asarray(regressors, dtype=float)
-    y_body = np.asarray(body_targets, dtype=float)
-    y_wheel = np.asarray(wheel_targets, dtype=float)
     names = [
         "theta_error_gyro_rad", "theta_rate_rad_s", "wheel_rate_rad_s",
         "vq_v", "bias",
     ]
+    max_angle = math.radians(args.max_angle_deg)
+    trial_ids = sorted({int(r["trial"]) for r in rows if r.get("trial")})
+    groups: dict[str, dict[str, object]] = {
+        vertex_id: {
+            "regressors": [],
+            "body_targets": [],
+            "wheel_targets": [],
+            "trials": [],
+            "rejected_transition": 0,
+            "rejected_angle": 0,
+        }
+        for vertex_id in VERTEX_IDS
+    }
+    unclassified_trials: list[dict[str, object]] = []
 
-    vq_values = x[:, 3]
-    positive_vq = int(np.sum(vq_values > 1.0e-9))
-    negative_vq = int(np.sum(vq_values < -1.0e-9))
-    if (
-        positive_vq < args.min_active_samples_per_sign
-        or negative_vq < args.min_active_samples_per_sign
-    ):
-        raise RuntimeError(
-            "active input coverage is insufficient after transition rejection: "
-            f"positive={positive_vq}, negative={negative_vq}; require at least "
-            f"{args.min_active_samples_per_sign} samples for each sign"
+    for trial in trial_ids:
+        tr = [r for r in rows if int(r.get("trial", "0")) == trial]
+        vertex_id, classification = classify_trial(
+            tr, args.vertex_a_deg, args.vertex_tolerance_deg
         )
+        if vertex_id is None:
+            unclassified_trials.append({"trial": trial, **classification})
+            continue
 
-    body_fit = fit_equation(x, y_body, names)
-    wheel_fit = fit_equation(x, y_wheel, names)
+        x_rows, y_body, y_wheel, meta, reject_transition, reject_angle = (
+            extract_trial_samples(
+                trial, tr, args.derivative_window, max_angle
+            )
+        )
+        meta.update(classification)
+        group = groups[vertex_id]
+        group["regressors"].extend(x_rows)
+        group["body_targets"].extend(y_body)
+        group["wheel_targets"].extend(y_wheel)
+        group["trials"].append(meta)
+        group["rejected_transition"] += reject_transition
+        group["rejected_angle"] += reject_angle
 
-    theta_values = x[:, 0]
+    vertex_fits: dict[str, object] = {}
+    candidate_vertices: list[str] = []
+
+    for vertex_id in VERTEX_IDS:
+        group = groups[vertex_id]
+        regressors = group["regressors"]
+        trial_meta = group["trials"]
+        center_deg = vertex_centers_deg(args.vertex_a_deg)[vertex_id]
+        base: dict[str, object] = {
+            "vertex_id": vertex_id,
+            "nominal_center_deg": center_deg,
+            "trials": trial_meta,
+            "sample_count": len(regressors),
+            "rejected_windows": {
+                "vq_transition": group["rejected_transition"],
+                "angle_limit": group["rejected_angle"],
+            },
+        }
+
+        if len(regressors) < 5:
+            base.update({
+                "status": "insufficient_data",
+                "reasons": [f"only {len(regressors)} usable samples"],
+            })
+            vertex_fits[vertex_id] = base
+            continue
+
+        x = np.asarray(regressors, dtype=float)
+        y_body = np.asarray(group["body_targets"], dtype=float)
+        y_wheel = np.asarray(group["wheel_targets"], dtype=float)
+        vq_values = x[:, 3]
+        theta_values = x[:, 0]
+        positive_vq = int(np.sum(vq_values > 1.0e-9))
+        negative_vq = int(np.sum(vq_values < -1.0e-9))
+        reasons: list[str] = []
+        if len(x) < 12:
+            reasons.append(f"only {len(x)} usable samples; need at least 12")
+        if positive_vq < args.min_active_samples_per_sign:
+            reasons.append(
+                f"positive Vq samples={positive_vq}; need {args.min_active_samples_per_sign}"
+            )
+        if negative_vq < args.min_active_samples_per_sign:
+            reasons.append(
+                f"negative Vq samples={negative_vq}; need {args.min_active_samples_per_sign}"
+            )
+
+        body_fit = fit_equation(x, y_body, names)
+        wheel_fit = fit_equation(x, y_wheel, names)
+        if body_fit["rank"] < 5 or wheel_fit["rank"] < 5:
+            reasons.append("regression is not full rank")
+
+        status = "candidate" if not reasons else "diagnostic_only"
+        if status == "candidate":
+            candidate_vertices.append(vertex_id)
+
+        base.update({
+            "status": status,
+            "reasons": reasons,
+            "condition_number_raw": float(np.linalg.cond(x)),
+            "condition_number_normalized": normalized_condition_number(x),
+            "input_coverage": {
+                "vq_min_v": float(np.min(vq_values)),
+                "vq_max_v": float(np.max(vq_values)),
+                "positive_vq_samples": positive_vq,
+                "negative_vq_samples": negative_vq,
+                "zero_vq_samples": int(np.sum(np.abs(vq_values) <= 1.0e-9)),
+                "positive_theta_error_samples": int(np.sum(theta_values > 0.0)),
+                "negative_theta_error_samples": int(np.sum(theta_values < 0.0)),
+            },
+            "body_equation": body_fit,
+            "wheel_equation": wheel_fit,
+            "candidate_A_rows": {
+                "body": {
+                    "theta_error": body_fit["coefficients"]["theta_error_gyro_rad"]["value"],
+                    "theta_rate": body_fit["coefficients"]["theta_rate_rad_s"]["value"],
+                    "wheel_rate": body_fit["coefficients"]["wheel_rate_rad_s"]["value"],
+                },
+                "wheel": {
+                    "theta_error": wheel_fit["coefficients"]["theta_error_gyro_rad"]["value"],
+                    "theta_rate": wheel_fit["coefficients"]["theta_rate_rad_s"]["value"],
+                    "wheel_rate": wheel_fit["coefficients"]["wheel_rate_rad_s"]["value"],
+                },
+            },
+            "candidate_B_v": {
+                "body": body_fit["coefficients"]["vq_v"]["value"],
+                "wheel": wheel_fit["coefficients"]["vq_v"]["value"],
+            },
+        })
+        vertex_fits[vertex_id] = base
+
     payload = {
-        "format": "triwhirl-body-active-fit-v2",
+        "format": "triwhirl-body-active-fit-v3",
         "input": str(args.input),
         "model": {
-            "body": "theta_ddot = a_theta*theta_error_gyro + a_rate*theta_rate + a_wheel*wheel_rate + b_vq*vq + bias",
-            "wheel": "wheel_accel = c_theta*theta_error_gyro + c_rate*theta_rate + c_wheel*wheel_rate + d_vq*vq + bias",
+            "body": (
+                "theta_ddot = a_theta*theta_error_gyro + a_rate*theta_rate + "
+                "a_wheel*wheel_rate + b_vq*vq + bias"
+            ),
+            "wheel": (
+                "wheel_accel = c_theta*theta_error_gyro + c_rate*theta_rate + "
+                "c_wheel*wheel_rate + d_vq*vq + bias"
+            ),
         },
-        "selected_contact": {
-            "target_theta_deg": args.target_theta_deg,
-            "target_tolerance_deg": args.target_tolerance_deg,
+        "vertex_geometry": {
+            "vertex_a_deg": args.vertex_a_deg,
+            "vertex_tolerance_deg": args.vertex_tolerance_deg,
+            "centers_deg": vertex_centers_deg(args.vertex_a_deg),
+            "note": (
+                "A/B/C labels are IMU-frame naming anchors. Fits remain separate because "
+                "real mass distribution may break ideal three-fold symmetry."
+            ),
         },
-        "sample_count": int(len(x)),
         "derivative_window_each_side": args.derivative_window,
         "max_angle_deg": args.max_angle_deg,
-        "condition_number_raw": float(np.linalg.cond(x)),
-        "condition_number_normalized": normalized_condition_number(x),
-        "input_coverage": {
-            "vq_min_v": float(np.min(vq_values)),
-            "vq_max_v": float(np.max(vq_values)),
-            "positive_vq_samples": positive_vq,
-            "negative_vq_samples": negative_vq,
-            "zero_vq_samples": int(np.sum(np.abs(vq_values) <= 1.0e-9)),
-            "positive_theta_error_samples": int(np.sum(theta_values > 0.0)),
-            "negative_theta_error_samples": int(np.sum(theta_values < 0.0)),
-        },
-        "rejected_windows": {
-            "vq_transition": rejected_transition,
-            "angle_limit": rejected_angle,
-        },
-        "trials": per_trial,
-        "body_equation": body_fit,
-        "wheel_equation": wheel_fit,
-        "candidate_state_row": {
-            "theta_error": body_fit["coefficients"]["theta_error_gyro_rad"]["value"],
-            "theta_rate": body_fit["coefficients"]["theta_rate_rad_s"]["value"],
-            "wheel_rate": body_fit["coefficients"]["wheel_rate_rad_s"]["value"],
-        },
-        "candidate_body_input_gain_vq": body_fit["coefficients"]["vq_v"]["value"],
-        "candidate_wheel_state_row": {
-            "theta_error": wheel_fit["coefficients"]["theta_error_gyro_rad"]["value"],
-            "theta_rate": wheel_fit["coefficients"]["theta_rate_rad_s"]["value"],
-            "wheel_rate": wheel_fit["coefficients"]["wheel_rate_rad_s"]["value"],
-        },
-        "candidate_wheel_input_gain_vq": wheel_fit["coefficients"]["vq_v"]["value"],
+        "min_active_samples_per_sign": args.min_active_samples_per_sign,
+        "unclassified_trials": unclassified_trials,
+        "candidate_vertices": candidate_vertices,
+        "vertex_fits": vertex_fits,
         "interpretation": (
-            "Candidate local A/B evidence only for the selected upright contact. "
-            "Accept coefficients for controller synthesis only after reviewing coefficient "
-            "uncertainty, conditioning, and residual quality."
+            "Never pool different upright vertices automatically. A vertex marked candidate "
+            "has enough local signed-Vq coverage and full-rank regression to be reviewed as "
+            "controller-model evidence; coefficient uncertainty/residual quality still matter."
         ),
     }
 
@@ -329,25 +450,42 @@ def main() -> int:
     args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     print(args.output)
+    centers = vertex_centers_deg(args.vertex_a_deg)
     print(
-        f"samples={len(x)} cond_norm={payload['condition_number_normalized']:.2f} "
-        f"Vq=[{payload['input_coverage']['vq_min_v']:.3f}, "
-        f"{payload['input_coverage']['vq_max_v']:.3f}] V"
+        "vertex centers: "
+        + ", ".join(f"{vertex_id}={center:.1f} deg" for vertex_id, center in centers.items())
     )
-    for label, fit in (("body", body_fit), ("wheel", wheel_fit)):
+    for vertex_id in VERTEX_IDS:
+        fit = vertex_fits[vertex_id]
         print(
-            f"{label}: rank={fit['rank']} R2={fit['r_squared']:.4f} "
-            f"RMSE={fit['rmse']:.4f}"
+            f"vertex {vertex_id}: status={fit['status']} samples={fit['sample_count']} "
+            f"trials={len(fit['trials'])}"
         )
-        for name in names:
-            item = fit["coefficients"][name]
-            se = item["std_error"]
-            ratio = item["abs_over_std_error"]
+        if fit.get("reasons"):
+            for reason in fit["reasons"]:
+                print(f"  - {reason}")
+        if "body_equation" in fit:
             print(
-                f"  {name}: {item['value']:.6g}"
-                + (f" +/- {se:.6g}" if se is not None else "")
-                + (f"  |coef|/SE={ratio:.2f}" if ratio is not None else "")
+                f"  body: R2={fit['body_equation']['r_squared']:.4f} "
+                f"RMSE={fit['body_equation']['rmse']:.4f}"
             )
+            print(
+                f"  wheel: R2={fit['wheel_equation']['r_squared']:.4f} "
+                f"RMSE={fit['wheel_equation']['rmse']:.4f}"
+            )
+            coverage = fit["input_coverage"]
+            print(
+                f"  Vq samples: +={coverage['positive_vq_samples']} "
+                f"-={coverage['negative_vq_samples']} zero={coverage['zero_vq_samples']}"
+            )
+    if unclassified_trials:
+        print("unclassified/non-vertex trials:")
+        for item in unclassified_trials:
+            print(f"  trial {item['trial']}: {item['reason']}")
+    if candidate_vertices:
+        print("candidate vertex models: " + ", ".join(candidate_vertices))
+    else:
+        print("no vertex model is synthesis-ready yet; retained fits are diagnostic evidence")
     return 0
 
 
