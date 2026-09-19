@@ -30,6 +30,8 @@ QueueHandle_t swing_event_queue = nullptr;
 std::uint32_t swing_event_drops = 0U;
 bool swing_log_finalize_pending = false;
 
+void printSwingHelp();
+
 bool swingTerminal(const SwingIdState state) {
   return state == SwingIdState::kComplete || state == SwingIdState::kAborted;
 }
@@ -67,6 +69,9 @@ void swingEventTask(void*) {
 }
 
 void setSwingCriticalWindow(const bool critical) {
+  if (log_critical_window == critical) {
+    return;
+  }
   log_critical_window = critical;
   runtime_logger.setFlashWritesAllowed(!critical);
 }
@@ -311,7 +316,11 @@ void handleSupervisorCommand(char* line) {
     consoleWrite("ERR swing experiment owns realtime actuation; use 'swing abort' first\r\n");
     return;
   }
+  const bool help = std::strcmp(begin, "help") == 0;
   handleCommand(begin);
+  if (help) {
+    printSwingHelp();
+  }
 }
 
 void consumeSupervisorBytes(const std::uint8_t* input,
@@ -328,7 +337,9 @@ void consumeSupervisorBytes(const std::uint8_t* input,
         state.line[state.length] = '\0';
         handleSupervisorCommand(state.line);
         state.length = 0U;
-        printPrompt();
+        if (!swing_id_runner.active()) {
+          printPrompt();
+        }
       }
       continue;
     }
@@ -348,7 +359,9 @@ void consumeSupervisorBytes(const std::uint8_t* input,
     } else {
       state.length = 0U;
       consoleWrite("\r\nERR command too long\r\n");
-      printPrompt();
+      if (!swing_id_runner.active()) {
+        printPrompt();
+      }
     }
   }
 }
