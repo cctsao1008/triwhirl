@@ -65,11 +65,11 @@ int main() {
     expectNear(std::fabs(output.desired_vq_v), config.pump_v_high);
 
     // One genuine body turning point at full pump amplitude is enough to
-    // re-arm the next probe.  This prevents immediate same-pass probing while
-    // preserving high-energy vertex crossings observed on hardware.
+    // re-arm the next probe. Alternate the synthetic body-rate sign so every
+    // loop iteration actually creates one new half-cycle transition.
     input.now_us += 1000U;
     input.theta_rad = degToRad(vertices_deg[capture] + 20.0F);
-    input.theta_rate_rad_s = -0.2F;
+    input.theta_rate_rad_s = (capture % 2U) == 0U ? -0.2F : 0.2F;
     output = runner.update(input);
     assert(output.state == triwhirl::SwingIdState::kPump);
     assert(output.pump_active);
