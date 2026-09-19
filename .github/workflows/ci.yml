@@ -25,6 +25,7 @@ jobs:
           python tools/twtool.py help diag timing-reset
           python tools/twtool.py help diag timing-test
           python tools/twtool.py help diag imu
+          python tools/twtool.py help id swing
           python -m tools.triwhirl_tool help log decode
           python -m compileall -q tools/triwhirl_tool
       - name: Smoke-test native TWLG tools
