@@ -4,7 +4,7 @@ This directory contains programs that run on the development host rather than on
 
 ## TriWhirl Toolbox
 
-`twtool` is the canonical host-tool entry point. It presents the existing acquisition, fitting, and logging programs as one command tree while the implementation is progressively refactored into shared modules.
+`twtool` is the canonical host-tool entry point. It presents acquisition, fitting, logging, and analysis as one command tree while legacy scripts are progressively folded into shared modules.
 
 From the repository root:
 
@@ -26,6 +26,7 @@ log
   capture-uart   live UART telemetry -> CSV
   download       completed firmware TWLG -> .twlog over BLE
   decode         validate/decode .twlog -> CSV
+  inspect        validate + summarize a .twlog without converting it
 
 id
   actuator-uart  tethered actuator acquisition
@@ -41,23 +42,29 @@ fit
   body-active    active per-vertex A/B/C fit
 ```
 
-Arguments after `<group> <command>` are passed unchanged to the underlying implementation, so existing experiment options continue to work. Examples:
+`log download`, `log decode`, and `log inspect` are now native toolbox commands backed by shared BLE/TWLG modules rather than subprocess wrappers. The identification/fitting commands still route to their proven legacy implementations during migration.
+
+Examples:
 
 ```powershell
 python tools/twtool.py id swing --probes 12 -o artifacts/auto-swing-id-01.csv
 python tools/twtool.py fit body-active artifacts/body-active-B.csv -o artifacts/body-active-B-fit.json
 python tools/twtool.py log download -o artifacts/run-01.twlog
+python tools/twtool.py log inspect artifacts/run-01.twlog
 python tools/twtool.py log decode artifacts/run-01.twlog -o artifacts/run-01.csv
 ```
 
-Use `help` to open the implementation-specific argument help through the unified entry point:
+`log inspect` reports the validated TWLG header plus useful acquisition ranges such as body angle, body rate, wheel rate, Vq, dropped records, and fault coverage. Use `--json` when a machine-readable summary is useful.
+
+Use `help` to open command-specific argument help through the unified entry point:
 
 ```powershell
 python tools/twtool.py help id swing
 python tools/twtool.py help log decode
+python tools/twtool.py help log inspect
 ```
 
-The old scripts remain available during migration. New host workflows should prefer `twtool` so command naming and future shared BLE/TWLG/metadata infrastructure have one stable interface.
+The old scripts remain available during migration. New host workflows should prefer `twtool` so command naming and shared BLE/TWLG/metadata infrastructure have one stable interface.
 
 ## Design boundary
 
