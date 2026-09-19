@@ -7,7 +7,7 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846F;
 constexpr float kRadToDeg = 180.0F / kPi;
-constexpr std::uint32_t kRecoveryHalfCycles = 4U;
+constexpr std::uint32_t kRecoveryHalfCycles = 1U;
 
 }  // namespace
 
@@ -277,10 +277,10 @@ SwingIdOutput SwingIdRunner::update(const SwingIdInput& input) {
       }
       rearm_start_half_cycle_ = output_.half_cycle_index;
       setState(SwingIdState::kRearm, true);
-      // A scheduled probe may deliberately weaken, zero, or oppose the pump.
-      // Rearm therefore uses the full pump amplitude until several genuine
-      // body half-cycles have restored swing energy before another capture is
-      // allowed.
+      // One genuine turning point at full pump amplitude separates adjacent
+      // probes.  Hardware run swing-native-03 showed that a four-half-cycle
+      // holdoff discarded a near-center crossing (about 0.15 deg) and then
+      // allowed the rocking envelope to decay below the 8 deg capture window.
       output_.desired_vq_v =
           static_cast<float>(config_.pump_polarity * pump_rate_sign_) *
           config_.pump_v_high;
