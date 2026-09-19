@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Sequence
 
 from ..ble import DEVICE_NAME
+from ..host_log import host_print as print
+from ..host_log import print_session_header
 from ..swing_log import write_fit_csv
+from .download import download_main
 from .log import (
     _close_line_transport,
     _normalize_console_line,
@@ -18,7 +21,6 @@ from .log import (
     _request_log_status,
     _wait_console,
     decode_main,
-    download_main,
     inspect_main,
 )
 
@@ -57,7 +59,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--scan-timeout", type=float, default=10.0)
     parser.add_argument("--prepare-timeout", type=float, default=90.0)
     parser.add_argument("--finalize-timeout", type=float, default=20.0)
-    parser.add_argument("--download-timeout", type=float, default=60.0)
+    parser.add_argument("--download-timeout", type=float, default=180.0)
     return parser
 
 
@@ -326,6 +328,7 @@ async def _run(args: argparse.Namespace) -> tuple[str, str]:
 
 def swing_main(argv: Sequence[str]) -> int:
     args = _parser().parse_args(list(argv))
+    print_session_header()
     try:
         _validate(args)
         state, reason = asyncio.run(_run(args))
@@ -337,11 +340,16 @@ def swing_main(argv: Sequence[str]) -> int:
         return 1
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    rc = download_main([
-        *_ble_args(args),
-        "--timeout", str(args.download_timeout),
-        "-o", str(args.output),
-    ])
+    rc = download_main(
+        [
+            *_ble_args(args),
+            "--timeout",
+            str(args.download_timeout),
+            "-o",
+            str(args.output),
+        ],
+        session_header=False,
+    )
     if rc != 0:
         return rc
 
