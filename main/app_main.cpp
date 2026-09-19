@@ -15,11 +15,13 @@
 #include "triwhirl/board.hpp"
 #include "triwhirl/drivers/as5600.hpp"
 #include "triwhirl/motor/three_pwm_bridge.hpp"
-#include "triwhirl/three_phase_field.hpp"
+#include "triwhirl/voltage_mode_foc.hpp"
 #include "triwhirl/wheel_kinematics.hpp"
 
 namespace {
 
+using triwhirl::MotorElectricalConfig;
+using triwhirl::PhaseVoltages;
 using triwhirl::WheelKinematics;
 using triwhirl::WheelKinematicsState;
 using triwhirl::drivers::As5600;
@@ -27,13 +29,42 @@ using triwhirl::drivers::As5600Status;
 using triwhirl::motor::ThreePwmBridge;
 
 constexpr float kTwoPi = 6.28318530717958647692F;
-constexpr float kDriverVoltageLimitV = 3.0F;
 constexpr float kMaxElectricalHz = 30.0F;
 constexpr float kWheelVelocityFilterTauS = 0.01F;
+constexpr float kMotorVectorLimitV = triwhirl::board::kBringupPhaseAmplitudeMaxV;
+constexpr float kDefaultCalibrationAmplitudeV = 0.6F;
+constexpr float kDefaultCalibrationElectricalHz = 0.5F;
+constexpr float kDefaultCalibrationTurns = 4.0F;
+constexpr std::uint32_t kCalibrationAlignUs = 500000U;
+constexpr std::uint32_t kCalibrationSettleUs = 400000U;
 constexpr std::uint32_t kEncoderSamplePeriodUs = 1000U;
 constexpr std::uint32_t kEncoderHealthPeriodUs = 100000U;
 constexpr std::uint32_t kTelemetryPeriodUs = 20000U;
 constexpr std::uint32_t kPwmFrequencyHz = 25000U;
+
+enum class MotorMode {
+  kStopped,
+  kOpenLoop,
+  kFoc,
+  kCalibrating,
+};
+
+enum class CalibrationStage {
+  kIdle,
+  kAlign,
+  kSweep,
+  kSettle,
+};
+
+struct CalibrationState {
+  CalibrationStage stage = CalibrationStage::kIdle;
+  float amplitude_v = kDefaultCalibrationAmplitudeV;
+  float electrical_hz = kDefaultCalibrationElectricalHz;
+  float electrical_turns = kDefaultCalibrationTurns;
+  float start_mechanical_rad = 0.0F;
+  float commanded_electrical_rad = 0.0F;
+  std::uint32_t stage_start_us = 0U;
+};
 
 As5600 encoder;
 WheelKinematics wheel_kinematics(kWheelVelocityFilterTauS);
@@ -45,17 +76,23 @@ bool encoder_status_valid = false;
 bool encoder_sample_valid = false;
 std::uint32_t encoder_read_errors = 0U;
 
-bool field_enabled = false;
+MotorMode motor_mode = MotorMode::kStopped;
+MotorElectricalConfig motor_config{};
+bool motor_config_valid = false;
+CalibrationState calibration{};
+
 bool telemetry_enabled = false;
-float field_amplitude_v = 0.0F;
-float electrical_hz = 0.0F;
+float open_loop_amplitude_v = 0.0F;
+float open_loop_hz = 0.0F;
+float open_loop_angle_rad = 0.0F;
+float vq_command_v = 0.0F;
 float electrical_angle_rad = 0.0F;
-std::uint32_t last_field_update_us = 0U;
+std::uint32_t last_motor_update_us = 0U;
 std::uint32_t last_encoder_sample_us = 0U;
 std::uint32_t last_encoder_health_us = 0U;
 std::uint32_t last_telemetry_us = 0U;
 
-char command_line[96]{};
+char command_line[128]{};
 std::size_t command_length = 0U;
 
 void consoleWrite(const char* text) {
@@ -66,7 +103,7 @@ void consoleWrite(const char* text) {
 }
 
 void consolePrintf(const char* format, ...) {
-  char buffer[384];
+  char buffer[512];
   va_list args;
   va_start(args, format);
   const int length = std::vsnprintf(buffer, sizeof(buffer), format, args);
@@ -78,6 +115,20 @@ void consolePrintf(const char* format, ...) {
                                 ? static_cast<std::size_t>(length)
                                 : sizeof(buffer) - 1U;
   uart_write_bytes(UART_NUM_0, buffer, count);
+}
+
+const char* motorModeName(const MotorMode mode) {
+  switch (mode) {
+    case MotorMode::kStopped:
+      return "stopped";
+    case MotorMode::kOpenLoop:
+      return "open_loop";
+    case MotorMode::kFoc:
+      return "foc";
+    case MotorMode::kCalibrating:
+      return "calibrating";
+  }
+  return "unknown";
 }
 
 void printPrompt() {
@@ -116,17 +167,20 @@ bool sampleEncoder(const std::uint32_t sample_time_us) {
   return true;
 }
 
-bool encoderHealthy() {
-  return encoder_status_valid && encoder_sample_valid &&
-         encoder_status.magnet_detected && !encoder_status.magnet_too_weak &&
-         !encoder_status.magnet_too_strong;
+void stopMotor() {
+  motor_mode = MotorMode::kStopped;
+  calibration.stage = CalibrationStage::kIdle;
+  open_loop_amplitude_v = 0.0F;
+  open_loop_hz = 0.0F;
+  vq_command_v = 0.0F;
+  bridge.stopZeroVector();
 }
 
-void stopField() {
-  field_enabled = false;
-  field_amplitude_v = 0.0F;
-  electrical_hz = 0.0F;
-  bridge.stopZeroVector();
+void applyDq(const float electrical_angle, const float vd_v, const float vq_v) {
+  const PhaseVoltages phase = triwhirl::makeDqVoltage(
+      electrical_angle, vd_v, vq_v, triwhirl::board::kMotorBusNominalV,
+      kMotorVectorLimitV);
+  bridge.setPhaseVoltages(phase.a, phase.b, phase.c);
 }
 
 void updateEncoder(const std::uint32_t now_us) {
@@ -138,14 +192,139 @@ void updateEncoder(const std::uint32_t now_us) {
     last_encoder_health_us = now_us;
     refreshEncoderHealth();
   }
-  if (field_enabled && !encoderHealthy()) {
-    stopField();
-    consoleWrite("ERR encoder health lost; field stopped\r\n");
+}
+
+void finishCalibration() {
+  const float delta_mechanical =
+      wheel_state.unwrapped_angle_rad - calibration.start_mechanical_rad;
+  const float total_electrical = calibration.electrical_turns * kTwoPi;
+  const float mechanical_travel = std::fabs(delta_mechanical);
+
+  if (!(mechanical_travel > 0.05F) || !std::isfinite(mechanical_travel)) {
+    stopMotor();
+    consoleWrite("ERR motor calibration: no usable mechanical motion\r\n");
+    return;
+  }
+
+  const float pole_pairs_estimate = total_electrical / mechanical_travel;
+  const int pole_pairs = static_cast<int>(std::lround(pole_pairs_estimate));
+  if (pole_pairs < 1 || pole_pairs > 64 ||
+      std::fabs(pole_pairs_estimate - static_cast<float>(pole_pairs)) > 0.45F) {
+    stopMotor();
+    consolePrintf("ERR motor calibration: pole-pair estimate %.3f is invalid\r\n",
+                  pole_pairs_estimate);
+    return;
+  }
+
+  const int sensor_direction = delta_mechanical >= 0.0F ? 1 : -1;
+  const float final_electrical =
+      triwhirl::wrapElectricalAngle(calibration.commanded_electrical_rad);
+  const float offset = triwhirl::wrapElectricalAngle(
+      final_electrical -
+      static_cast<float>(sensor_direction * pole_pairs) *
+          wheel_state.unwrapped_angle_rad);
+
+  motor_config.pole_pairs = pole_pairs;
+  motor_config.sensor_direction = sensor_direction;
+  motor_config.electrical_offset_rad = offset;
+  motor_config_valid = triwhirl::validMotorElectricalConfig(motor_config);
+
+  stopMotor();
+  consolePrintf(
+      "OK motor calibrated pole_pairs=%d sensor_dir=%d offset_rad=%.6f estimate=%.3f\r\n",
+      motor_config.pole_pairs, motor_config.sensor_direction,
+      motor_config.electrical_offset_rad, pole_pairs_estimate);
+}
+
+void updateCalibration(const std::uint32_t now_us) {
+  if (calibration.stage == CalibrationStage::kIdle) {
+    stopMotor();
+    return;
+  }
+
+  if (!encoder_sample_valid) {
+    stopMotor();
+    consoleWrite("ERR motor calibration: encoder read unavailable\r\n");
+    return;
+  }
+
+  if (calibration.stage == CalibrationStage::kAlign) {
+    calibration.commanded_electrical_rad = 0.0F;
+    applyDq(0.0F, calibration.amplitude_v, 0.0F);
+    if ((now_us - calibration.stage_start_us) >= kCalibrationAlignUs) {
+      calibration.start_mechanical_rad = wheel_state.unwrapped_angle_rad;
+      calibration.stage = CalibrationStage::kSweep;
+      calibration.stage_start_us = now_us;
+    }
+    return;
+  }
+
+  const float total_electrical = calibration.electrical_turns * kTwoPi;
+  if (calibration.stage == CalibrationStage::kSweep) {
+    const float elapsed_s =
+        static_cast<float>(now_us - calibration.stage_start_us) * 1.0e-6F;
+    calibration.commanded_electrical_rad =
+        kTwoPi * calibration.electrical_hz * elapsed_s;
+    if (calibration.commanded_electrical_rad >= total_electrical) {
+      calibration.commanded_electrical_rad = total_electrical;
+      calibration.stage = CalibrationStage::kSettle;
+      calibration.stage_start_us = now_us;
+    }
+    applyDq(calibration.commanded_electrical_rad,
+            calibration.amplitude_v, 0.0F);
+    return;
+  }
+
+  if (calibration.stage == CalibrationStage::kSettle) {
+    applyDq(calibration.commanded_electrical_rad,
+            calibration.amplitude_v, 0.0F);
+    if ((now_us - calibration.stage_start_us) >= kCalibrationSettleUs) {
+      finishCalibration();
+    }
+  }
+}
+
+void updateMotor(const std::uint32_t now_us) {
+  const std::uint32_t elapsed_us = now_us - last_motor_update_us;
+  last_motor_update_us = now_us;
+
+  if (motor_mode == MotorMode::kStopped) {
+    return;
+  }
+
+  if (motor_mode == MotorMode::kCalibrating) {
+    updateCalibration(now_us);
+    return;
+  }
+
+  if (motor_mode == MotorMode::kOpenLoop) {
+    const float dt = static_cast<float>(elapsed_us) * 1.0e-6F;
+    open_loop_angle_rad = triwhirl::wrapElectricalAngle(
+        open_loop_angle_rad + kTwoPi * open_loop_hz * dt);
+    electrical_angle_rad = open_loop_angle_rad;
+    applyDq(open_loop_angle_rad, open_loop_amplitude_v, 0.0F);
+    return;
+  }
+
+  if (motor_mode == MotorMode::kFoc) {
+    if (!motor_config_valid || !encoder_sample_valid) {
+      stopMotor();
+      consoleWrite("ERR FOC stopped: motor configuration or encoder unavailable\r\n");
+      return;
+    }
+    electrical_angle_rad = triwhirl::electricalAngleFromMechanical(
+        wheel_state.unwrapped_angle_rad, motor_config);
+    applyDq(electrical_angle_rad, 0.0F, vq_command_v);
   }
 }
 
 void printHelp() {
   consoleWrite("commands:\r\n");
+  consoleWrite("  motor calibrate [amplitude_v] [electrical_hz] [turns]\r\n");
+  consoleWrite("  motor config <pole_pairs> <sensor_dir> <offset_rad>\r\n");
+  consoleWrite("  motor vq <volts>\r\n");
+  consoleWrite("  motor status\r\n");
+  consoleWrite("  motor stop\r\n");
   consoleWrite("  field <electrical_hz> <amplitude_v>\r\n");
   consoleWrite("  stop\r\n");
   consoleWrite("  status\r\n");
@@ -156,10 +335,12 @@ void printHelp() {
 void printStatus() {
   refreshEncoderHealth();
   consolePrintf(
-      "status,enabled=%d,telemetry=%d,e_hz=%.6f,amp_v=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu\r\n",
-      field_enabled ? 1 : 0, telemetry_enabled ? 1 : 0, electrical_hz,
-      field_amplitude_v, encoder_status_valid ? 1 : 0,
-      encoder_sample_valid ? 1 : 0,
+      "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu\r\n",
+      motorModeName(motor_mode), telemetry_enabled ? 1 : 0, vq_command_v,
+      open_loop_hz, open_loop_amplitude_v, motor_config_valid ? 1 : 0,
+      motor_config.pole_pairs, motor_config.sensor_direction,
+      motor_config.electrical_offset_rad, electrical_angle_rad,
+      encoder_status_valid ? 1 : 0, encoder_sample_valid ? 1 : 0,
       encoder_status.magnet_detected ? 1 : 0,
       encoder_status.magnet_too_weak ? 1 : 0,
       encoder_status.magnet_too_strong ? 1 : 0,
@@ -171,20 +352,142 @@ void printStatus() {
       static_cast<unsigned long>(encoder_read_errors));
 }
 
+void startCalibration(char* amplitude_token, char* hz_token, char* turns_token) {
+  if (!encoder_sample_valid) {
+    consoleWrite("ERR motor calibrate: encoder read unavailable\r\n");
+    return;
+  }
+
+  calibration.amplitude_v = amplitude_token == nullptr
+                                ? kDefaultCalibrationAmplitudeV
+                                : clampFinite(std::strtof(amplitude_token, nullptr),
+                                              0.1F, kMotorVectorLimitV);
+  calibration.electrical_hz = hz_token == nullptr
+                                  ? kDefaultCalibrationElectricalHz
+                                  : clampFinite(std::strtof(hz_token, nullptr),
+                                                0.1F, 2.0F);
+  calibration.electrical_turns = turns_token == nullptr
+                                     ? kDefaultCalibrationTurns
+                                     : clampFinite(std::strtof(turns_token, nullptr),
+                                                   1.0F, 12.0F);
+  calibration.commanded_electrical_rad = 0.0F;
+  calibration.start_mechanical_rad = wheel_state.unwrapped_angle_rad;
+  calibration.stage = CalibrationStage::kAlign;
+  calibration.stage_start_us = static_cast<std::uint32_t>(esp_timer_get_time());
+  motor_mode = MotorMode::kCalibrating;
+  vq_command_v = 0.0F;
+  consolePrintf("OK motor calibration started amp_v=%.3f e_hz=%.3f turns=%.3f\r\n",
+                calibration.amplitude_v, calibration.electrical_hz,
+                calibration.electrical_turns);
+}
+
+void handleMotorCommand() {
+  char* action = std::strtok(nullptr, " \t");
+  if (action == nullptr) {
+    consoleWrite("ERR usage: motor <calibrate|config|vq|status|stop>\r\n");
+    return;
+  }
+
+  if (std::strcmp(action, "stop") == 0) {
+    stopMotor();
+    consoleWrite("OK motor stop\r\n");
+    return;
+  }
+
+  if (std::strcmp(action, "status") == 0) {
+    printStatus();
+    return;
+  }
+
+  if (std::strcmp(action, "config") == 0) {
+    char* pole_pairs_token = std::strtok(nullptr, " \t");
+    char* direction_token = std::strtok(nullptr, " \t");
+    char* offset_token = std::strtok(nullptr, " \t");
+    if (pole_pairs_token == nullptr || direction_token == nullptr ||
+        offset_token == nullptr) {
+      consoleWrite("ERR usage: motor config <pole_pairs> <sensor_dir> <offset_rad>\r\n");
+      return;
+    }
+    MotorElectricalConfig config{};
+    config.pole_pairs = std::atoi(pole_pairs_token);
+    config.sensor_direction = std::atoi(direction_token);
+    config.electrical_offset_rad =
+        triwhirl::wrapElectricalAngle(std::strtof(offset_token, nullptr));
+    if (!triwhirl::validMotorElectricalConfig(config)) {
+      consoleWrite("ERR invalid motor config\r\n");
+      return;
+    }
+    stopMotor();
+    motor_config = config;
+    motor_config_valid = true;
+    consolePrintf("OK motor config pole_pairs=%d sensor_dir=%d offset_rad=%.6f\r\n",
+                  motor_config.pole_pairs, motor_config.sensor_direction,
+                  motor_config.electrical_offset_rad);
+    return;
+  }
+
+  if (std::strcmp(action, "vq") == 0) {
+    char* vq_token = std::strtok(nullptr, " \t");
+    if (vq_token == nullptr) {
+      consoleWrite("ERR usage: motor vq <volts>\r\n");
+      return;
+    }
+    if (!motor_config_valid) {
+      consoleWrite("ERR motor is not calibrated/configured\r\n");
+      return;
+    }
+    if (!encoder_sample_valid) {
+      consoleWrite("ERR encoder read unavailable\r\n");
+      return;
+    }
+    const float requested_vq =
+        clampFinite(std::strtof(vq_token, nullptr), -kMotorVectorLimitV,
+                    kMotorVectorLimitV);
+    if (std::fabs(requested_vq) < 1.0e-4F) {
+      stopMotor();
+      consoleWrite("OK motor stop\r\n");
+      return;
+    }
+    vq_command_v = requested_vq;
+    motor_mode = MotorMode::kFoc;
+    consolePrintf("OK motor FOC vq_v=%.6f\r\n", vq_command_v);
+    return;
+  }
+
+  if (std::strcmp(action, "calibrate") == 0) {
+    char* amplitude_token = std::strtok(nullptr, " \t");
+    char* hz_token = std::strtok(nullptr, " \t");
+    char* turns_token = std::strtok(nullptr, " \t");
+    stopMotor();
+    startCalibration(amplitude_token, hz_token, turns_token);
+    return;
+  }
+
+  consoleWrite("ERR usage: motor <calibrate|config|vq|status|stop>\r\n");
+}
+
 void handleCommand(char* line) {
   char* command = std::strtok(line, " \t");
   if (command == nullptr) {
     return;
   }
+
+  if (std::strcmp(command, "motor") == 0) {
+    handleMotorCommand();
+    return;
+  }
+
   if (std::strcmp(command, "stop") == 0) {
-    stopField();
+    stopMotor();
     consoleWrite("OK stop\r\n");
     return;
   }
+
   if (std::strcmp(command, "status") == 0) {
     printStatus();
     return;
   }
+
   if (std::strcmp(command, "telemetry") == 0) {
     char* mode = std::strtok(nullptr, " \t");
     if (mode == nullptr) {
@@ -205,10 +508,12 @@ void handleCommand(char* line) {
     consoleWrite("ERR usage: telemetry [on|off]\r\n");
     return;
   }
+
   if (std::strcmp(command, "help") == 0) {
     printHelp();
     return;
   }
+
   if (std::strcmp(command, "field") == 0) {
     char* hz_token = std::strtok(nullptr, " \t");
     char* amplitude_token = std::strtok(nullptr, " \t");
@@ -216,26 +521,27 @@ void handleCommand(char* line) {
       consoleWrite("ERR usage: field <electrical_hz> <amplitude_v>\r\n");
       return;
     }
-    refreshEncoderHealth();
-    if (!encoderHealthy()) {
-      stopField();
-      consoleWrite("ERR AS5600/magnet not ready; field remains stopped\r\n");
+    const float requested_hz =
+        clampFinite(std::strtof(hz_token, nullptr), -kMaxElectricalHz,
+                    kMaxElectricalHz);
+    const float requested_amplitude =
+        clampFinite(std::strtof(amplitude_token, nullptr), 0.0F,
+                    kMotorVectorLimitV);
+    if (requested_amplitude <= 0.0F || requested_hz == 0.0F) {
+      stopMotor();
+      consoleWrite("OK field stopped\r\n");
       return;
     }
-    electrical_hz = clampFinite(std::strtof(hz_token, nullptr), -kMaxElectricalHz,
-                                kMaxElectricalHz);
-    field_amplitude_v = clampFinite(std::strtof(amplitude_token, nullptr), 0.0F,
-                                    triwhirl::board::kBringupPhaseAmplitudeMaxV);
-    if (field_amplitude_v <= 0.0F || electrical_hz == 0.0F) {
-      stopField();
-      consoleWrite("OK field stopped\r\n");
-    } else {
-      field_enabled = true;
-      consolePrintf("OK field e_hz=%.6f amp_v=%.6f\r\n", electrical_hz,
-                    field_amplitude_v);
-    }
+    stopMotor();
+    open_loop_hz = requested_hz;
+    open_loop_amplitude_v = requested_amplitude;
+    open_loop_angle_rad = 0.0F;
+    motor_mode = MotorMode::kOpenLoop;
+    consolePrintf("OK field e_hz=%.6f amp_v=%.6f\r\n", open_loop_hz,
+                  open_loop_amplitude_v);
     return;
   }
+
   consoleWrite("ERR unknown command\r\n");
 }
 
@@ -279,23 +585,6 @@ void pollConsole() {
   }
 }
 
-void updateField(const std::uint32_t now_us) {
-  const std::uint32_t elapsed_us = now_us - last_field_update_us;
-  last_field_update_us = now_us;
-  if (!field_enabled) {
-    return;
-  }
-  const float dt = static_cast<float>(elapsed_us) * 1.0e-6F;
-  electrical_angle_rad += kTwoPi * electrical_hz * dt;
-  electrical_angle_rad = std::fmod(electrical_angle_rad, kTwoPi);
-  if (electrical_angle_rad < 0.0F) {
-    electrical_angle_rad += kTwoPi;
-  }
-  const triwhirl::PhaseVoltages phase = triwhirl::makeRotatingField(
-      electrical_angle_rad, field_amplitude_v, kDriverVoltageLimitV);
-  bridge.setPhaseVoltages(phase.a, phase.b, phase.c);
-}
-
 void emitTelemetry(const std::uint32_t now_us) {
   if (!telemetry_enabled ||
       (now_us - last_telemetry_us) < kTelemetryPeriodUs) {
@@ -303,10 +592,10 @@ void emitTelemetry(const std::uint32_t now_us) {
   }
   last_telemetry_us = now_us;
   consolePrintf(
-      "telemetry,%lu,%d,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu\r\n",
-      static_cast<unsigned long>(now_us), field_enabled ? 1 : 0, electrical_hz,
-      field_amplitude_v, encoder_status_valid ? 1 : 0,
-      encoder_sample_valid ? 1 : 0,
+      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu\r\n",
+      static_cast<unsigned long>(now_us), motorModeName(motor_mode),
+      vq_command_v, electrical_angle_rad, open_loop_hz,
+      encoder_status_valid ? 1 : 0, encoder_sample_valid ? 1 : 0,
       encoder_status.magnet_detected ? 1 : 0,
       static_cast<unsigned>(wheel_state.raw_count),
       static_cast<long long>(wheel_state.unwrapped_count), wheel_state.angle_rad,
@@ -372,14 +661,14 @@ extern "C" void app_main(void) {
   const std::uint32_t now_us = static_cast<std::uint32_t>(esp_timer_get_time());
   sampleEncoder(now_us);
   refreshEncoderHealth();
-  last_field_update_us = now_us;
+  last_motor_update_us = now_us;
   last_encoder_sample_us = now_us;
   last_encoder_health_us = now_us;
   last_telemetry_us = now_us;
 
-  consoleWrite("TriWhirl native ESP-IDF motor bring-up ready\r\n");
+  consoleWrite("TriWhirl motor runtime ready\r\n");
   consoleWrite("telemetry is off by default; use 'telemetry on' when streaming is needed\r\n");
-  consoleWrite("telemetry_fields,t_us,field_enabled,e_hz,amp_v,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors\r\n");
+  consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors\r\n");
   printStatus();
   printHelp();
   printPrompt();
@@ -387,7 +676,7 @@ extern "C" void app_main(void) {
   while (true) {
     const std::uint32_t loop_us = static_cast<std::uint32_t>(esp_timer_get_time());
     updateEncoder(loop_us);
-    updateField(loop_us);
+    updateMotor(loop_us);
     pollConsole();
     emitTelemetry(loop_us);
     vTaskDelay(1);
