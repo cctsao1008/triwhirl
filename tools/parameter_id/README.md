@@ -86,6 +86,36 @@ For nonzero-`Vq` BLE experiments, the tools automatically reapply `artifacts/mot
 
 Use `--address <BLE-address-or-device-id>` only if name-based discovery is ambiguous; otherwise the default `TriWhirl` scan is sufficient.
 
+## Autonomous swing identification
+
+`auto_swing_id_ble.py` removes the repeated hand-hold/release step from local plant identification. It uses the measured body phase to drive coarse reaction-wheel pumping over BLE, watches all three legitimate upright vertices, pre-arms the signed local `Vq` probe before the body enters the local fit window, and then records the near-upright response. Coarse swing pumping may tolerate BLE latency; the local probe is required to be visible in firmware telemetry before the body enters the capture window.
+
+Run it untethered on the normal high-friction mat:
+
+```powershell
+python tools/parameter_id/auto_swing_id_ble.py `
+  --probes 12 `
+  -o artifacts/auto-swing-id-01.csv
+```
+
+No manual upright placement or release is required after the command starts. The default coarse pump is `0.25 V`; local probes use a balanced `+ - - +` sign sequence with independently configurable positive/negative magnitudes. The tool also has a bounded runtime and can reverse the coarse pump polarity if no upright capture is reached for the configured interval.
+
+Three artifacts are written:
+
+- `auto-swing-id-01.csv`: only local `armed` / `active` / `zero_vector` windows, intentionally compatible with `body_active_fit.py`;
+- `auto-swing-id-01-raw.csv`: complete rocking trajectory including coarse pump phases;
+- `auto-swing-id-01.csv.json`: exact experiment parameters and probe/vertex provenance.
+
+Fit the retained local windows directly with the existing per-vertex fitter:
+
+```powershell
+python tools/parameter_id/body_active_fit.py `
+  artifacts/auto-swing-id-01.csv `
+  -o artifacts/auto-swing-fit-01.json
+```
+
+This tool is identification infrastructure only. It does not close issue #20 or replace the final native ESP-IDF swing-up controller, which still requires the global rocking/contact model, explicit wheel-speed limits, capture supervision, and recovery behavior.
+
 ## UART acquisition
 
 `acquire.py` is retained for tethered motor/actuator work where the USB cable does not affect the experiment. It drives only the `Vq` values explicitly supplied on the command line and does not invent excitation amplitudes or hardware safety thresholds.
@@ -108,11 +138,11 @@ A segment is `Vq_volts:duration_seconds`. The UART tool:
 - commands the motor stopped before acquisition;
 - checks that a motor electrical configuration exists;
 - automatically reloads the last commissioned electrical configuration from `artifacts/motor-config.json` when firmware has restarted without one;
-- optionally runs the existing firmware calibration with `--auto-calibrate` when no reusable configuration exists, then saves the resulting pole pairs, sensor direction, and electrical offset for later runs;
+- optionally runs the existing firmware calibration with `--auto-calibrate` when no reusable configuration exists, then saves pole pairs, sensor direction, and electrical offset for later runs;
 - waits for valid attitude and wheel-rate telemetry;
 - enables telemetry and executes the requested `Vq` profile;
 - aborts on any firmware `FAULT` or nonzero `fault_mask`;
-- always sends `motor stop` and `telemetry off` on exit;
+- always sends `motor stop` and disables telemetry on exit;
 - writes schema-v2 CSV plus a JSON sidecar containing the exact excitation profile, motor configuration, and run metadata.
 
 The CSV adds a `phase` column but otherwise preserves the normal telemetry field names, so it can be consumed directly by `local_fit.py`.
