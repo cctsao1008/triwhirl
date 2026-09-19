@@ -20,6 +20,7 @@
 #include "triwhirl/drivers/as5600.hpp"
 #include "triwhirl/drivers/mpu6050.hpp"
 #include "triwhirl/motor/three_pwm_bridge.hpp"
+#include "triwhirl/runtime_logger.hpp"
 #include "triwhirl/safety.hpp"
 #include "triwhirl/voltage_mode_foc.hpp"
 #include "triwhirl/wheel_kinematics.hpp"
@@ -38,6 +39,9 @@ using triwhirl::drivers::As5600;
 using triwhirl::drivers::As5600Status;
 using triwhirl::drivers::Mpu6050;
 using triwhirl::drivers::Mpu6050Sample;
+using triwhirl::log::LoggerStatus;
+using triwhirl::log::RuntimeLogRecord;
+using triwhirl::log::RuntimeLogger;
 using triwhirl::motor::ThreePwmBridge;
 
 constexpr float kTwoPi = 6.28318530717958647692F;
@@ -58,6 +62,7 @@ constexpr std::uint32_t kDefaultGyroCalibrationSamples = 500U;
 constexpr std::uint32_t kTelemetryPeriodUs = 20000U;
 constexpr std::uint32_t kPwmFrequencyHz = 25000U;
 constexpr std::size_t kConsoleTxBufferBytes = 8192U;
+constexpr float kDefaultLogSeconds = 45.0F;
 
 struct CommandInputState {
   char line[128]{};
@@ -121,6 +126,7 @@ WheelKinematics wheel_kinematics(kWheelVelocityFilterTauS);
 PlanarAttitudeEstimator attitude_estimator;
 ThreePwmBridge bridge;
 SafetyLatch safety_latch;
+RuntimeLogger runtime_logger;
 
 As5600Status encoder_status{};
 WheelKinematicsState wheel_state{};
@@ -162,6 +168,9 @@ StreamBufferHandle_t console_tx_stream = nullptr;
 std::uint32_t console_tx_dropped_bytes = 0U;
 CommandInputState uart_command_input{};
 CommandInputState ble_command_input{};
+volatile bool log_critical_window = false;
+volatile bool binary_dump_active = false;
+TaskHandle_t log_dump_task = nullptr;
 
 void consoleWriteBytes(const char* data, const std::size_t length) {
   if (data == nullptr || length == 0U) {
@@ -177,7 +186,11 @@ void consoleWriteBytes(const char* data, const std::size_t length) {
     }
   }
 
-  triwhirl::ble::write(reinterpret_cast<const std::uint8_t*>(data), length);
+  // A TWLG dump owns the BLE TX byte stream until the announced binary length
+  // has been sent. Keep normal console text on UART only during that interval.
+  if (!binary_dump_active) {
+    triwhirl::ble::write(reinterpret_cast<const std::uint8_t*>(data), length);
+  }
 }
 
 void consoleWrite(const char* text) {
@@ -228,7 +241,7 @@ const char* motorModeName(const MotorMode mode) {
 }
 
 void printPrompt() {
-  if (!telemetry_enabled) {
+  if (!telemetry_enabled && !binary_dump_active) {
     consoleWrite("> ");
   }
 }
@@ -684,6 +697,53 @@ void updateMotor(const std::uint32_t now_us) {
   }
 }
 
+std::uint16_t runtimeLogFlags() {
+  std::uint16_t flags = 0U;
+  if (encoder_sample_valid) {
+    flags |= triwhirl::log::kRecordEncoderValid;
+  }
+  if (wheel_state.velocity_valid) {
+    flags |= triwhirl::log::kRecordWheelRateValid;
+  }
+  if (imu_sample_valid) {
+    flags |= triwhirl::log::kRecordImuValid;
+  }
+  if (attitude_state.valid) {
+    flags |= triwhirl::log::kRecordAttitudeValid;
+  }
+  if (motorActive()) {
+    flags |= triwhirl::log::kRecordMotorActive;
+  }
+  if (motor_mode == MotorMode::kFoc) {
+    flags |= triwhirl::log::kRecordMotorFoc;
+  } else if (motor_mode == MotorMode::kOpenLoop) {
+    flags |= triwhirl::log::kRecordMotorOpenLoop;
+  } else if (motor_mode == MotorMode::kCalibrating) {
+    flags |= triwhirl::log::kRecordMotorCalibrating;
+  }
+  if (safety_latch.faulted()) {
+    flags |= triwhirl::log::kRecordSafetyFaulted;
+  }
+  if (log_critical_window) {
+    flags |= triwhirl::log::kRecordCriticalWindow;
+  }
+  return flags;
+}
+
+void recordRuntimeLog(const std::uint32_t now_us) {
+  RuntimeLogRecord record{};
+  record.t_us = now_us;
+  record.theta_rad = attitude_state.angle_rad;
+  record.theta_rate_rad_s = attitude_state.rate_rad_s;
+  record.wheel_rate_rad_s = wheel_state.velocity_rad_s;
+  record.vq_v = vq_command_v;
+  record.accel_weight = attitude_state.accel_weight;
+  record.fault_mask = safety_latch.mask();
+  record.flags = runtimeLogFlags();
+  record.raw_count = wheel_state.raw_count;
+  runtime_logger.record(record);
+}
+
 void printBleStatus() {
   consolePrintf(
       "ble,connected=%d,subscribed=%d,rx_drop_bytes=%lu,tx_drop_bytes=%lu\r\n",
@@ -691,6 +751,72 @@ void printBleStatus() {
       triwhirl::ble::subscribed() ? 1 : 0,
       static_cast<unsigned long>(triwhirl::ble::rxDroppedBytes()),
       static_cast<unsigned long>(triwhirl::ble::txDroppedBytes()));
+}
+
+void printLogStatus() {
+  const LoggerStatus status = runtime_logger.status();
+  consolePrintf(
+      "log,state=%s,partition_bytes=%lu,prepared_bytes=%lu,max_records=%lu,buffered_bytes=%lu,records_written=%lu,dropped_records=%lu,logical_bytes=%lu,flash_write=%d,critical=%d,dump_active=%d\r\n",
+      triwhirl::log::loggerStateName(status.state),
+      static_cast<unsigned long>(status.partition_bytes),
+      static_cast<unsigned long>(status.prepared_bytes),
+      static_cast<unsigned long>(status.max_records),
+      static_cast<unsigned long>(status.buffered_bytes),
+      static_cast<unsigned long>(status.records_written),
+      static_cast<unsigned long>(status.dropped_records),
+      static_cast<unsigned long>(status.logical_bytes),
+      status.flash_writes_allowed ? 1 : 0,
+      log_critical_window ? 1 : 0,
+      binary_dump_active ? 1 : 0);
+}
+
+void logDumpTask(void*) {
+  const LoggerStatus status = runtime_logger.status();
+  const std::uint32_t logical_size = runtime_logger.logicalSize();
+  char marker[160];
+  const int marker_length = std::snprintf(
+      marker, sizeof(marker),
+      "logdump,format=TWLG1,bytes=%lu,record_size=%u,records=%lu\r\n",
+      static_cast<unsigned long>(logical_size),
+      static_cast<unsigned>(triwhirl::log::kTwLogRecordBytes),
+      static_cast<unsigned long>(status.records_written));
+
+  bool ok = marker_length > 0 &&
+      static_cast<std::size_t>(marker_length) < sizeof(marker) &&
+      triwhirl::ble::writeBlocking(
+          reinterpret_cast<const std::uint8_t*>(marker),
+          static_cast<std::size_t>(marker_length), 5000U) ==
+          static_cast<std::size_t>(marker_length);
+
+  std::uint8_t buffer[512];
+  std::uint32_t offset = 0U;
+  while (ok && offset < logical_size) {
+    const std::size_t count = std::min<std::size_t>(
+        sizeof(buffer), static_cast<std::size_t>(logical_size - offset));
+    if (!runtime_logger.readLogical(offset, buffer, count)) {
+      ok = false;
+      break;
+    }
+    if (triwhirl::ble::writeBlocking(buffer, count, 10000U) != count) {
+      ok = false;
+      break;
+    }
+    offset += static_cast<std::uint32_t>(count);
+  }
+
+  static constexpr char kEndMarker[] = "\r\nlogdump_end\r\n";
+  if (ok) {
+    triwhirl::ble::writeBlocking(
+        reinterpret_cast<const std::uint8_t*>(kEndMarker),
+        sizeof(kEndMarker) - 1U, 5000U);
+  }
+
+  binary_dump_active = false;
+  log_dump_task = nullptr;
+  if (!ok) {
+    consoleWrite("ERR log dump aborted\r\n");
+  }
+  vTaskDelete(nullptr);
 }
 
 void printFaultStatus() {
@@ -741,6 +867,12 @@ void printHelp() {
   consoleWrite("  fault status\r\n");
   consoleWrite("  fault clear\r\n");
   consoleWrite("  ble status\r\n");
+  consoleWrite("  log status\r\n");
+  consoleWrite("  log prepare [seconds]\r\n");
+  consoleWrite("  log start\r\n");
+  consoleWrite("  log critical <on|off>\r\n");
+  consoleWrite("  log stop\r\n");
+  consoleWrite("  log dump\r\n");
   consoleWrite("  field <electrical_hz> <amplitude_v>\r\n");
   consoleWrite("  stop\r\n");
   consoleWrite("  status\r\n");
@@ -1043,6 +1175,120 @@ void handleBleCommand() {
   consoleWrite("ERR usage: ble status\r\n");
 }
 
+void handleLogCommand() {
+  char* action = std::strtok(nullptr, " \t");
+  if (action == nullptr || std::strcmp(action, "status") == 0) {
+    printLogStatus();
+    return;
+  }
+
+  if (std::strcmp(action, "prepare") == 0) {
+    if (motorActive()) {
+      consoleWrite("ERR log prepare requires motor stopped\r\n");
+      return;
+    }
+    char* seconds_token = std::strtok(nullptr, " \t");
+    float seconds = kDefaultLogSeconds;
+    if (seconds_token != nullptr) {
+      seconds = std::strtof(seconds_token, nullptr);
+    }
+    if (!std::isfinite(seconds) || seconds <= 0.0F) {
+      consoleWrite("ERR log prepare seconds must be > 0\r\n");
+      return;
+    }
+    const double records_d = std::ceil(
+        static_cast<double>(seconds) * 1000000.0 /
+        static_cast<double>(triwhirl::log::kTwLogSamplePeriodUs));
+    if (records_d < 1.0 ||
+        records_d > static_cast<double>(std::numeric_limits<std::uint32_t>::max())) {
+      consoleWrite("ERR log prepare duration out of range\r\n");
+      return;
+    }
+    const std::uint32_t records = static_cast<std::uint32_t>(records_d);
+    if (!runtime_logger.prepare(records)) {
+      consoleWrite("ERR log prepare rejected; check log status/capacity\r\n");
+      return;
+    }
+    log_critical_window = false;
+    consolePrintf("OK log prepare records=%lu seconds=%.3f; erase in background\r\n",
+                  static_cast<unsigned long>(records), seconds);
+    return;
+  }
+
+  if (std::strcmp(action, "start") == 0) {
+    if (!runtime_logger.start()) {
+      consoleWrite("ERR log start requires state=ready\r\n");
+      return;
+    }
+    log_critical_window = false;
+    consoleWrite("OK log start sample_us=1000 record_bytes=32\r\n");
+    return;
+  }
+
+  if (std::strcmp(action, "critical") == 0) {
+    char* mode = std::strtok(nullptr, " \t");
+    if (mode == nullptr) {
+      consoleWrite("ERR usage: log critical <on|off>\r\n");
+      return;
+    }
+    if (std::strcmp(mode, "on") == 0) {
+      log_critical_window = true;
+      runtime_logger.setFlashWritesAllowed(false);
+      consoleWrite("OK log critical on; flash programming paused\r\n");
+      return;
+    }
+    if (std::strcmp(mode, "off") == 0) {
+      log_critical_window = false;
+      runtime_logger.setFlashWritesAllowed(true);
+      consoleWrite("OK log critical off; flash programming resumed\r\n");
+      return;
+    }
+    consoleWrite("ERR usage: log critical <on|off>\r\n");
+    return;
+  }
+
+  if (std::strcmp(action, "stop") == 0) {
+    log_critical_window = false;
+    runtime_logger.setFlashWritesAllowed(true);
+    if (!runtime_logger.stop()) {
+      consoleWrite("ERR log stop rejected; check log status\r\n");
+      return;
+    }
+    consoleWrite("OK log stopping; SRAM is draining and header will finalize\r\n");
+    return;
+  }
+
+  if (std::strcmp(action, "dump") == 0) {
+    if (binary_dump_active || log_dump_task != nullptr) {
+      consoleWrite("ERR log dump already active\r\n");
+      return;
+    }
+    if (!runtime_logger.complete()) {
+      consoleWrite("ERR log dump requires state=complete\r\n");
+      return;
+    }
+    if (motorActive()) {
+      consoleWrite("ERR log dump requires motor stopped\r\n");
+      return;
+    }
+    if (!triwhirl::ble::connected() || !triwhirl::ble::subscribed()) {
+      consoleWrite("ERR log dump requires BLE notify subscription\r\n");
+      return;
+    }
+    telemetry_enabled = false;
+    binary_dump_active = true;
+    if (xTaskCreatePinnedToCore(logDumpTask, "triwhirl_log_dump", 4096, nullptr,
+                                1, &log_dump_task, 0) != pdPASS) {
+      binary_dump_active = false;
+      log_dump_task = nullptr;
+      consoleWrite("ERR log dump task creation failed\r\n");
+    }
+    return;
+  }
+
+  consoleWrite("ERR usage: log <status|prepare [seconds]|start|critical on|off|stop|dump>\r\n");
+}
+
 void handleCommand(char* line) {
   char* command = std::strtok(line, " \t");
   if (command == nullptr) {
@@ -1076,6 +1322,11 @@ void handleCommand(char* line) {
 
   if (std::strcmp(command, "ble") == 0) {
     handleBleCommand();
+    return;
+  }
+
+  if (std::strcmp(command, "log") == 0) {
+    handleLogCommand();
     return;
   }
 
@@ -1202,6 +1453,9 @@ void pollConsole() {
                         uart_command_input);
   }
 
+  // During a binary dump the TX stream is reserved, but RX remains harmless.
+  // The host downloader sends no further commands until the announced payload
+  // is complete, so normal parsing can remain enabled here.
   const std::size_t ble_received = triwhirl::ble::read(input, sizeof(input));
   if (ble_received > 0U) {
     consumeConsoleBytes(input, ble_received, ble_command_input);
@@ -1209,7 +1463,7 @@ void pollConsole() {
 }
 
 void emitTelemetry(const std::uint32_t now_us) {
-  if (!telemetry_enabled ||
+  if (!telemetry_enabled || binary_dump_active ||
       (now_us - last_telemetry_us) < kTelemetryPeriodUs) {
     return;
   }
@@ -1275,6 +1529,9 @@ void controlTask(void*) {
     updateImu(loop_us);
     evaluateSafety(start_us);
     updateMotor(loop_us);
+    // This fixed-size SRAM copy is the timing authority for identification.
+    // Flash writes and BLE transfers happen in lower-priority tasks.
+    recordRuntimeLog(loop_us);
     pollConsole();
     emitTelemetry(loop_us);
     const std::int64_t end_us = esp_timer_get_time();
@@ -1346,6 +1603,9 @@ extern "C" void app_main(void) {
   if (!triwhirl::ble::init()) {
     consoleWrite("WARN BLE init failed; Web Bluetooth unavailable\r\n");
   }
+  if (!runtime_logger.init()) {
+    consoleWrite("WARN TWLG init failed; binary runtime logging unavailable\r\n");
+  }
 
   i2c_master_bus_handle_t encoder_bus = nullptr;
   if (!initEncoderBus(&encoder_bus) ||
@@ -1386,11 +1646,13 @@ extern "C" void app_main(void) {
   last_telemetry_us = now_us;
 
   consoleWrite("TriWhirl deterministic motor + IMU + attitude runtime ready\r\n");
-  consoleWrite("UART + Web Bluetooth share the same command/telemetry protocol\r\n");
+  consoleWrite("UART + Web Bluetooth share the command protocol; BLE is not realtime timing authority\r\n");
+  consoleWrite("TWLG records state + Vq at 1 kHz into SRAM and buffered flash; post-run BLE dump is binary\r\n");
   consoleWrite("motor actuation is inhibited while a safety fault is latched\r\n");
-  consoleWrite("telemetry is off by default; use 'telemetry on' when streaming is needed\r\n");
+  consoleWrite("telemetry is off by default; use 'telemetry on' only for diagnostic streaming\r\n");
   consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors,imu_ok,ax,ay,az,gx,gy,gz,imu_read_errors,attitude_ok,theta_rad,theta_rate_rad_s,accel_weight,loop_exec_us,loop_max_exec_us,loop_overruns,fault_mask\r\n");
   printStatus();
+  printLogStatus();
   printHelp();
   printPrompt();
 
