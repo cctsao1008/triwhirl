@@ -1,3 +1,8 @@
 CONFIG_FREERTOS_HZ=1000
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
 CONFIG_COMPILER_CXX_RTTI=n
+
+# Keep the UART console focused on TriWhirl's own bring-up shell.
+# Normal ESP-IDF boot/application chatter is suppressed; errors remain visible.
+CONFIG_BOOTLOADER_LOG_LEVEL_ERROR=y
+CONFIG_LOG_DEFAULT_LEVEL_ERROR=y
