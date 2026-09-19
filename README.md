@@ -2,8 +2,6 @@
 
 Robust control research platform for an ESP32-based reaction-wheel Reuleaux triangle.
 
-TriWhirl is a clean-room redevelopment for the existing hardware. Seller firmware is not used as an implementation baseline.
-
 ## Repository layout
 
 TriWhirl is a single-target ESP32 firmware project with PC-side engineering tools. The repository follows the conventional PlatformIO project layout instead of adding an extra MCU-specific directory level.
@@ -69,16 +67,6 @@ field 2 0.5
 ```
 
 `field` is disabled at boot. The initial software ceiling is 1.5 V field amplitude and exists only for controlled bring-up; it is not yet a measured hardware operating limit.
-
-## Scope constraints
-
-- Existing PCB only; no hardware redesign.
-- No phase-current sensing.
-- Final balance control: robust H-infinity state feedback synthesized offline via LMI.
-- No LQR implementation or benchmark.
-- USB/UART is the primary development interface.
-- Classic Bluetooth SPP may later be used for optional telemetry/debug.
-- Wi-Fi is out of scope.
 
 ## License
 
