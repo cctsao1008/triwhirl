@@ -28,6 +28,7 @@ log
   start          start synchronized 1 kHz TWLG capture
   critical       pause/resume flash programming while SRAM capture continues
   stop           stop capture and wait for flash/header finalization
+  session        prepare + record + finalize + download (+ optional decode)
   capture-uart   live UART telemetry -> CSV
   download       completed firmware TWLG -> .twlog over BLE
   decode         validate/decode .twlog -> CSV
@@ -64,6 +65,16 @@ python tools/twtool.py log inspect artifacts/run-01.twlog
 python tools/twtool.py log decode artifacts/run-01.twlog -o artifacts/run-01.csv
 ```
 
+For a simple fixed-duration recording, the same lifecycle can be collapsed into one host command. The data path is still firmware-owned; the host only starts/stops the session and downloads after capture:
+
+```powershell
+python tools/twtool.py log session 45 `
+  -o artifacts/run-01.twlog `
+  --csv artifacts/run-01.csv
+```
+
+`log session` reserves a small amount of extra flash capacity for host stop-command latency, then runs `prepare -> start -> wait -> stop/finalize -> download`. `Ctrl-C` still asks firmware to finalize and download the partial log before the tool exits.
+
 `log prepare` waits for the background flash erase to reach firmware `state=ready` unless `--no-wait` is supplied. `log stop` waits until the SRAM buffer has drained, the TWLG header/CRC are finalized, and firmware reaches `state=complete`.
 
 `log critical on` pauses flash programming without stopping 1 kHz SRAM capture; `log critical off` resumes flash writes. The future firmware-owned upright experiment supervisor will drive this automatically around critical local windows rather than relying on BLE timing.
@@ -80,7 +91,7 @@ python tools/twtool.py fit body-active artifacts/body-active-B.csv -o artifacts/
 Use `help` to open command-specific argument help through the unified entry point:
 
 ```powershell
-python tools/twtool.py help log prepare
+python tools/twtool.py help log session
 python tools/twtool.py help log inspect
 python tools/twtool.py help id swing
 ```
