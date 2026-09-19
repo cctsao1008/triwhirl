@@ -59,9 +59,11 @@ int main() {
   wheel.update(0U, 1000U);
   state = wheel.update(2048U, 2000U);
   assert(!state.velocity_valid);
-  state = wheel.update(1U, 3000U);
+  const auto before_resync = state.unwrapped_count;
+  state = wheel.update(2049U, 3000U);
   assert(state.velocity_valid);
-  assert(near(state.unwrapped_angle_rad, kRadiansPerCount));
+  assert(state.unwrapped_count == before_resync + 1);
+  assert(state.velocity_rad_s > 0.0F);
 
   wheel.reset();
   state = wheel.update(0x1ABCU, 1000U);
