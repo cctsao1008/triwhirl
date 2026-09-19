@@ -18,6 +18,13 @@ jobs:
             -o /tmp/test_three_phase_field
           /tmp/test_three_phase_field
 
+          g++ -std=c++11 -Wall -Wextra -Werror \
+            -Ilib/triwhirl_core/src \
+            lib/triwhirl_core/src/wheel_kinematics.cpp \
+            test/test_wheel_kinematics.cpp \
+            -o /tmp/test_wheel_kinematics
+          /tmp/test_wheel_kinematics
+
   esp32-build:
     runs-on: ubuntu-latest
     steps:
