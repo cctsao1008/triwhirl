@@ -3,6 +3,8 @@
 #include <Wire.h>
 
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
@@ -66,6 +68,7 @@ float clampFinite(const float value, const float low, const float high) {
 bool refreshEncoderHealth() {
   As5600Status status{};
   if (!encoder.readStatus(&status)) {
+    encoder_status = {};
     encoder_status_valid = false;
     return false;
   }
@@ -130,7 +133,6 @@ void printHelp() {
 
 void printStatus() {
   refreshEncoderHealth();
-  sampleEncoder();
 
   Serial.printf(
       "status,enabled=%d,e_hz=%.6f,amp_v=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu\n",
