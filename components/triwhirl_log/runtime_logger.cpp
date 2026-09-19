@@ -193,17 +193,17 @@ bool RuntimeLogger::record(const RuntimeLogRecord& record_value) {
     return false;
   }
   if (accepted_records_ >= max_records_) {
-    ++dropped_records_;
+    dropped_records_ = dropped_records_ + 1U;
     return false;
   }
 
   const std::size_t sent = xStreamBufferSend(
       stream, &record_value, sizeof(record_value), 0);
   if (sent != sizeof(record_value)) {
-    ++dropped_records_;
+    dropped_records_ = dropped_records_ + 1U;
     return false;
   }
-  ++accepted_records_;
+  accepted_records_ = accepted_records_ + 1U;
 
   if (flash_writes_allowed_ &&
       xStreamBufferBytesAvailable(stream) >= kFlashBatchBytes &&
@@ -388,7 +388,7 @@ bool RuntimeLogger::writePayload(const std::uint8_t* data,
     return false;
   }
   payload_crc32_ = crc32Update(payload_crc32_, data, length);
-  records_written_ += record_count;
+  records_written_ = records_written_ + record_count;
   return true;
 }
 
