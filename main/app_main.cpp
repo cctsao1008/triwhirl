@@ -46,6 +46,7 @@ bool encoder_sample_valid = false;
 std::uint32_t encoder_read_errors = 0U;
 
 bool field_enabled = false;
+bool telemetry_enabled = false;
 float field_amplitude_v = 0.0F;
 float electrical_hz = 0.0F;
 float electrical_angle_rad = 0.0F;
@@ -142,15 +143,17 @@ void printHelp() {
   consoleWrite("  field <electrical_hz> <amplitude_v>\r\n");
   consoleWrite("  stop\r\n");
   consoleWrite("  status\r\n");
+  consoleWrite("  telemetry [on|off]\r\n");
   consoleWrite("  help\r\n");
 }
 
 void printStatus() {
   refreshEncoderHealth();
   consolePrintf(
-      "status,enabled=%d,e_hz=%.6f,amp_v=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu\r\n",
-      field_enabled ? 1 : 0, electrical_hz, field_amplitude_v,
-      encoder_status_valid ? 1 : 0, encoder_sample_valid ? 1 : 0,
+      "status,enabled=%d,telemetry=%d,e_hz=%.6f,amp_v=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu\r\n",
+      field_enabled ? 1 : 0, telemetry_enabled ? 1 : 0, electrical_hz,
+      field_amplitude_v, encoder_status_valid ? 1 : 0,
+      encoder_sample_valid ? 1 : 0,
       encoder_status.magnet_detected ? 1 : 0,
       encoder_status.magnet_too_weak ? 1 : 0,
       encoder_status.magnet_too_strong ? 1 : 0,
@@ -174,6 +177,26 @@ void handleCommand(char* line) {
   }
   if (std::strcmp(command, "status") == 0) {
     printStatus();
+    return;
+  }
+  if (std::strcmp(command, "telemetry") == 0) {
+    char* mode = std::strtok(nullptr, " \t");
+    if (mode == nullptr) {
+      consolePrintf("telemetry=%s\r\n", telemetry_enabled ? "on" : "off");
+      return;
+    }
+    if (std::strcmp(mode, "on") == 0) {
+      telemetry_enabled = true;
+      last_telemetry_us = static_cast<std::uint32_t>(esp_timer_get_time());
+      consoleWrite("OK telemetry on\r\n");
+      return;
+    }
+    if (std::strcmp(mode, "off") == 0) {
+      telemetry_enabled = false;
+      consoleWrite("OK telemetry off\r\n");
+      return;
+    }
+    consoleWrite("ERR usage: telemetry [on|off]\r\n");
     return;
   }
   if (std::strcmp(command, "help") == 0) {
@@ -251,7 +274,8 @@ void updateField(const std::uint32_t now_us) {
 }
 
 void emitTelemetry(const std::uint32_t now_us) {
-  if ((now_us - last_telemetry_us) < kTelemetryPeriodUs) {
+  if (!telemetry_enabled ||
+      (now_us - last_telemetry_us) < kTelemetryPeriodUs) {
     return;
   }
   last_telemetry_us = now_us;
@@ -331,6 +355,7 @@ extern "C" void app_main(void) {
   last_telemetry_us = now_us;
 
   consoleWrite("TriWhirl native ESP-IDF motor bring-up ready\r\n");
+  consoleWrite("telemetry is off by default; use 'telemetry on' when streaming is needed\r\n");
   consoleWrite("telemetry_fields,t_us,field_enabled,e_hz,amp_v,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors\r\n");
   printStatus();
   printHelp();
