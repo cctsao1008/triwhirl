@@ -2,6 +2,13 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
 CONFIG_COMPILER_CXX_RTTI=n
 
+# ESP32-WROOM-32 module flash geometry and dedicated raw binary logger region.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
 # Keep the UART console focused on TriWhirl's own bring-up shell.
 # Normal ESP-IDF boot/application chatter is suppressed; errors remain visible.
 CONFIG_BOOTLOADER_LOG_LEVEL_ERROR=y
