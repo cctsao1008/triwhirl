@@ -1,4 +1,4 @@
 idf_component_register(
-    SRCS "three_phase_field.cpp" "wheel_kinematics.cpp"
+    SRCS "three_phase_field.cpp" "voltage_mode_foc.cpp" "wheel_kinematics.cpp"
     INCLUDE_DIRS "include"
 )
