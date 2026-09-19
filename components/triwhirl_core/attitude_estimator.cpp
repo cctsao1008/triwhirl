@@ -59,6 +59,10 @@ AttitudeEstimate PlanarAttitudeEstimator::update(
     const float az = body_accel_z_mps2 / accel_norm;
     const float gravity_x = std::sin(state_.angle_rad);
     const float gravity_z = std::cos(state_.angle_rad);
+
+    // innovation = sin(theta_est - theta_accel).  Positive innovation means
+    // the estimate is ahead of gravity, so both proportional correction and
+    // bias adaptation must act in the negative-error direction.
     innovation = gravity_x * az - gravity_z * ax;
 
     if (accel_norm >= config_.accel_norm_min_mps2 &&
@@ -76,13 +80,13 @@ AttitudeEstimate PlanarAttitudeEstimator::update(
   }
 
   if (allow_bias_update && accel_weight > 0.0F) {
-    state_.gyro_bias_rad_s -=
+    state_.gyro_bias_rad_s +=
         config_.ki * accel_weight * innovation * dt_s;
   }
 
   state_.rate_rad_s = body_gyro_rad_s - state_.gyro_bias_rad_s;
   const float corrected_rate =
-      state_.rate_rad_s + config_.kp * accel_weight * innovation;
+      state_.rate_rad_s - config_.kp * accel_weight * innovation;
   state_.angle_rad = wrapAngle(state_.angle_rad + corrected_rate * dt_s);
   state_.gravity_innovation = innovation;
   state_.accel_weight = accel_weight;
