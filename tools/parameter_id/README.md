@@ -23,20 +23,25 @@ A segment is `Vq_volts:duration_seconds`. The tool:
 - opens the existing CH340 UART;
 - commands the motor stopped before acquisition;
 - checks that a motor electrical configuration exists;
-- optionally runs the existing firmware calibration with `--auto-calibrate` if configuration is absent;
+- automatically reloads the last commissioned electrical configuration from `artifacts/motor-config.json` when firmware has restarted without one;
+- optionally runs the existing firmware calibration with `--auto-calibrate` when no reusable configuration exists, then saves the resulting pole pairs, sensor direction, and electrical offset for later runs;
 - waits for valid attitude and wheel-rate telemetry;
 - enables telemetry and executes the requested `Vq` profile;
 - aborts on any firmware `FAULT` or nonzero `fault_mask`;
 - always sends `motor stop` and `telemetry off` on exit;
-- writes schema-v2 CSV plus a JSON sidecar containing the exact excitation profile and run metadata.
+- writes schema-v2 CSV plus a JSON sidecar containing the exact excitation profile, motor configuration, and run metadata.
 
 The CSV adds a `phase` column but otherwise preserves the normal telemetry field names, so it can be consumed directly by `local_fit.py`.
 
-If the motor has not yet been commissioned after boot, the same run can request the existing firmware calibration:
+The first run after commissioning can request calibration explicitly:
 
 ```powershell
-python tools/parameter_id/acquire.py COM28 --auto-calibrate --segment 0.25:0.8 --segment 0:0.4 -o logs/local-id.csv
+python tools/parameter_id/acquire.py COM28 --auto-calibrate `
+  --segment 0.25:0.8 --segment 0:0.4 `
+  -o logs/local-id.csv
 ```
+
+After that, the same local `artifacts/motor-config.json` is reapplied automatically after firmware resets. Use `--motor-config <path>` to select a different board/motor commissioning file, or delete the file when the actuator configuration must be re-established.
 
 The operator still chooses the actual `Vq` profile. Firmware remains authoritative for actuation limits and latched faults.
 
