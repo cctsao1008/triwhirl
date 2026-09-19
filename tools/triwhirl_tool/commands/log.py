@@ -46,7 +46,9 @@ def _decode_parser() -> argparse.ArgumentParser:
 
 
 def _inspect_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Inspect a TWLG v1 runtime log")
+    parser = argparse.ArgumentParser(
+        description="Inspect TWLG metadata, actual timestamp cadence, validity, and signals"
+    )
     parser.add_argument("input", type=Path)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     return parser
@@ -258,7 +260,7 @@ async def _download_run(args: argparse.Namespace) -> int:
     args.output.write_bytes(payload)
     print(
         f"saved TWLG v{meta.version}: {meta.record_count} records, "
-        f"{meta.duration_s:.3f} s, CRC=0x{meta.payload_crc32:08x}"
+        f"nominal={meta.duration_s:.3f} s, CRC=0x{meta.payload_crc32:08x}"
     )
     print(args.output)
     return 0
@@ -291,6 +293,10 @@ def decode_main(argv: Sequence[str]) -> int:
     return 0
 
 
+def _valid_percent(valid: int, total: int) -> float:
+    return 100.0 * valid / total if total > 0 else 0.0
+
+
 def inspect_main(argv: Sequence[str]) -> int:
     args = _inspect_parser().parse_args(list(argv))
     try:
@@ -300,18 +306,38 @@ def inspect_main(argv: Sequence[str]) -> int:
         print(f"error: {exc}")
         return 1
 
+    actual_rate_hz = 1.0e6 / stats.dt_mean_us if stats.dt_mean_us > 0.0 else 0.0
+    theta_min_deg = (
+        math.degrees(stats.theta_min_rad) if stats.theta_min_rad is not None else None
+    )
+    theta_max_deg = (
+        math.degrees(stats.theta_max_rad) if stats.theta_max_rad is not None else None
+    )
+
     result = {
         "format": f"TWLG{meta.version}",
         "records": meta.record_count,
         "record_bytes": meta.record_size,
         "sample_period_us": meta.sample_period_us,
-        "sample_rate_hz": meta.sample_rate_hz,
-        "duration_s": meta.duration_s,
+        "nominal_sample_rate_hz": meta.sample_rate_hz,
+        "nominal_duration_s": meta.duration_s,
+        "actual_duration_s": stats.actual_duration_s,
+        "actual_mean_sample_rate_hz": actual_rate_hz,
+        "dt_min_us": stats.dt_min_us,
+        "dt_mean_us": stats.dt_mean_us,
+        "dt_median_us": stats.dt_median_us,
+        "dt_max_us": stats.dt_max_us,
+        "dt_over_1250us": stats.dt_over_1250us,
+        "dt_over_2000us": stats.dt_over_2000us,
         "dropped_records": meta.dropped_records,
         "payload_crc32": f"0x{meta.payload_crc32:08x}",
         "header_flags": f"0x{meta.flags:08x}",
-        "theta_min_deg": math.degrees(stats.theta_min_rad),
-        "theta_max_deg": math.degrees(stats.theta_max_rad),
+        "encoder_valid_records": stats.encoder_valid_records,
+        "wheel_rate_valid_records": stats.wheel_rate_valid_records,
+        "imu_valid_records": stats.imu_valid_records,
+        "attitude_valid_records": stats.attitude_valid_records,
+        "theta_min_deg": theta_min_deg,
+        "theta_max_deg": theta_max_deg,
         "max_abs_theta_rate_rad_s": stats.max_abs_theta_rate_rad_s,
         "max_abs_wheel_rate_rad_s": stats.max_abs_wheel_rate_rad_s,
         "vq_min_v": stats.vq_min_v,
@@ -330,21 +356,56 @@ def inspect_main(argv: Sequence[str]) -> int:
     print(f"{args.input}")
     print(
         f"TWLG v{meta.version}  records={meta.record_count}  "
-        f"Ts={meta.sample_period_us} us ({meta.sample_rate_hz:.1f} Hz)  "
-        f"duration={meta.duration_s:.3f} s"
+        f"nominal Ts={meta.sample_period_us} us ({meta.sample_rate_hz:.1f} Hz)"
+    )
+    print(
+        f"duration nominal={meta.duration_s:.3f} s  "
+        f"actual={stats.actual_duration_s:.3f} s  "
+        f"actual mean rate={actual_rate_hz:.2f} Hz"
+    )
+    print(
+        f"dt_us min={stats.dt_min_us} mean={stats.dt_mean_us:.3f} "
+        f"median={stats.dt_median_us:.1f} max={stats.dt_max_us}  "
+        f">1250={stats.dt_over_1250us} >2000={stats.dt_over_2000us}"
     )
     print(
         f"dropped={meta.dropped_records}  CRC=0x{meta.payload_crc32:08x}  "
         f"header_flags=0x{meta.flags:08x}"
     )
+    if meta.dropped_records:
+        print("WARNING: dropped_records is nonzero; this run is incomplete for identification")
+
     print(
-        f"theta=[{result['theta_min_deg']:+.2f}, {result['theta_max_deg']:+.2f}] deg  "
-        f"max|theta_rate|={stats.max_abs_theta_rate_rad_s:.3f} rad/s"
+        "validity "
+        f"encoder={stats.encoder_valid_records}/{meta.record_count} "
+        f"({_valid_percent(stats.encoder_valid_records, meta.record_count):.1f}%)  "
+        f"wheel={stats.wheel_rate_valid_records}/{meta.record_count} "
+        f"({_valid_percent(stats.wheel_rate_valid_records, meta.record_count):.1f}%)  "
+        f"imu={stats.imu_valid_records}/{meta.record_count} "
+        f"({_valid_percent(stats.imu_valid_records, meta.record_count):.1f}%)  "
+        f"attitude={stats.attitude_valid_records}/{meta.record_count} "
+        f"({_valid_percent(stats.attitude_valid_records, meta.record_count):.1f}%)"
     )
-    print(
-        f"max|wheel_rate|={stats.max_abs_wheel_rate_rad_s:.3f} rad/s  "
-        f"Vq=[{stats.vq_min_v:+.3f}, {stats.vq_max_v:+.3f}] V"
-    )
+
+    if stats.attitude_valid_records > 0:
+        print(
+            f"theta=[{theta_min_deg:+.2f}, {theta_max_deg:+.2f}] deg  "
+            f"max|theta_rate|={stats.max_abs_theta_rate_rad_s:.3f} rad/s"
+        )
+    else:
+        print("theta=unavailable (no records have the attitude-valid flag)")
+
+    if stats.wheel_rate_valid_records > 0:
+        print(
+            f"max|wheel_rate|={stats.max_abs_wheel_rate_rad_s:.3f} rad/s  "
+            f"Vq=[{stats.vq_min_v:+.3f}, {stats.vq_max_v:+.3f}] V"
+        )
+    else:
+        print(
+            "wheel_rate=unavailable (no records have the wheel-rate-valid flag)  "
+            f"Vq=[{stats.vq_min_v:+.3f}, {stats.vq_max_v:+.3f}] V"
+        )
+
     print(
         f"fault_or=0x{stats.fault_or:08x}  faulted_records={stats.faulted_records}  "
         f"record_flags_or=0x{stats.flags_or:04x}"
@@ -448,7 +509,8 @@ async def _simple_log_control_run(
             if state == "complete":
                 print(
                     f"log state=complete records={status.get('records_written', '?')} "
-                    f"logical_bytes={status.get('logical_bytes', '?')} dropped={status.get('dropped_records', '?')}"
+                    f"logical_bytes={status.get('logical_bytes', '?')} "
+                    f"dropped={status.get('dropped_records', '?')}"
                 )
                 return 0
             if state == "error":
