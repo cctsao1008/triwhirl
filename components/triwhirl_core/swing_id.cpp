@@ -22,6 +22,10 @@ bool SwingIdRunner::validConfig(const SwingIdConfig& config) {
          std::isfinite(config.pump_v_high) &&
          config.pump_v_low > 0.0F &&
          config.pump_v_high >= config.pump_v_low &&
+         std::isfinite(config.probe_v_negative) &&
+         std::isfinite(config.probe_v_positive) &&
+         config.probe_v_negative < 0.0F &&
+         config.probe_v_positive > 0.0F &&
          std::isfinite(config.capture_deg) &&
          std::isfinite(config.probe_exit_deg) &&
          std::isfinite(config.rearm_deg) &&
@@ -64,6 +68,20 @@ float SwingIdRunner::angleDiffDeg(const float angle_deg,
 
 float SwingIdRunner::radiansToDegrees(const float angle_rad) {
   return angle_rad * kRadToDeg;
+}
+
+int SwingIdRunner::vertexIndex(const SwingIdVertex vertex) {
+  switch (vertex) {
+    case SwingIdVertex::kA:
+      return 0;
+    case SwingIdVertex::kB:
+      return 1;
+    case SwingIdVertex::kC:
+      return 2;
+    case SwingIdVertex::kNone:
+      return -1;
+  }
+  return -1;
 }
 
 void SwingIdRunner::classifyVertex(const float theta_rad,
@@ -126,12 +144,30 @@ float SwingIdRunner::pumpCommand() const {
          current_pump_v_;
 }
 
+float SwingIdRunner::scheduledProbeCommand(const SwingIdVertex vertex) const {
+  const int index = vertexIndex(vertex);
+  if (index < 0) {
+    return 0.0F;
+  }
+
+  switch (vertex_capture_counts_[index] % 3U) {
+    case 0U:
+      return config_.probe_v_negative;
+    case 1U:
+      return config_.probe_v_positive;
+    default:
+      return 0.0F;
+  }
+}
+
 void SwingIdRunner::setState(const SwingIdState state, const bool transition) {
   output_.state = state;
   output_.transition = transition;
+  // Probe excitation is deliberately independent of the coarse swing pump.
+  // Keep PumpActive semantically strict so TWLG can distinguish pump, probe,
+  // and zero-vector identification intervals without inference from Vq sign.
   output_.pump_active =
-      state == SwingIdState::kPump || state == SwingIdState::kProbe ||
-      state == SwingIdState::kRearm;
+      state == SwingIdState::kPump || state == SwingIdState::kRearm;
   output_.probe_active = state == SwingIdState::kProbe;
   output_.critical_window = state == SwingIdState::kProbe;
 }
@@ -153,6 +189,9 @@ bool SwingIdRunner::start(const SwingIdInput& input) {
   probe_vq_v_ = 0.0F;
   probe_vertex_ = SwingIdVertex::kNone;
   probe_center_deg_ = 0.0F;
+  for (std::uint32_t& count : vertex_capture_counts_) {
+    count = 0U;
+  }
   setState(SwingIdState::kPump, true);
   output_.desired_vq_v = pumpCommand();
   return true;
@@ -225,6 +264,10 @@ SwingIdOutput SwingIdRunner::update(const SwingIdInput& input) {
     const bool left_window =
         std::fabs(output_.vertex_error_deg) >= config_.probe_exit_deg;
     if (timed_out || left_window) {
+      const int index = vertexIndex(probe_vertex_);
+      if (index >= 0) {
+        ++vertex_capture_counts_[index];
+      }
       ++output_.capture_count;
       if (output_.capture_count >= config_.target_captures) {
         return stop(SwingIdState::kComplete,
@@ -246,7 +289,7 @@ SwingIdOutput SwingIdRunner::update(const SwingIdInput& input) {
       probe_vertex_ = nearest;
       probe_center_deg_ = nearest_center_deg;
       probe_start_us_ = input.now_us;
-      probe_vq_v_ = output_.desired_vq_v;
+      probe_vq_v_ = scheduledProbeCommand(nearest);
       setState(SwingIdState::kProbe, true);
       output_.vertex = probe_vertex_;
       output_.vertex_error_deg = nearest_error_deg;
