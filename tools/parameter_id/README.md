@@ -2,6 +2,16 @@
 
 TriWhirl keeps acquisition and model fitting separate: the firmware owns motor/safety limits, `acquire.py` records an explicit commanded experiment, and `local_fit.py` estimates a preliminary local model from the resulting telemetry.
 
+## Python dependencies
+
+Install the host-side dependencies into the active Python environment once:
+
+```powershell
+python -m pip install -r tools/parameter_id/requirements.txt
+```
+
+This installs NumPy for fitting and pySerial for UART acquisition.
+
 ## Acquire a run
 
 `acquire.py` drives only the `Vq` values explicitly supplied on the command line. It does not invent excitation amplitudes or hardware safety thresholds.
