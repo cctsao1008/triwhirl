@@ -44,7 +44,7 @@ def _load_handler(spec: str) -> NativeHandler:
     module_name, separator, attribute = spec.partition(":")
     if not separator or not module_name or not attribute:
         raise RuntimeError(f"invalid toolbox handler specification: {spec}")
-    module = importlib.import_module(module_name)
+    module = importlib.import_module(f".{module_name}", package=__package__)
     handler = getattr(module, attribute, None)
     if handler is None or not callable(handler):
         raise RuntimeError(f"toolbox handler not found: {spec}")
