@@ -14,6 +14,7 @@
 
 #include "triwhirl/board.hpp"
 #include "triwhirl/drivers/as5600.hpp"
+#include "triwhirl/drivers/mpu6050.hpp"
 #include "triwhirl/motor/three_pwm_bridge.hpp"
 #include "triwhirl/voltage_mode_foc.hpp"
 #include "triwhirl/wheel_kinematics.hpp"
@@ -26,6 +27,8 @@ using triwhirl::WheelKinematics;
 using triwhirl::WheelKinematicsState;
 using triwhirl::drivers::As5600;
 using triwhirl::drivers::As5600Status;
+using triwhirl::drivers::Mpu6050;
+using triwhirl::drivers::Mpu6050Sample;
 using triwhirl::motor::ThreePwmBridge;
 
 constexpr float kTwoPi = 6.28318530717958647692F;
@@ -39,6 +42,8 @@ constexpr std::uint32_t kCalibrationAlignUs = 500000U;
 constexpr std::uint32_t kCalibrationSettleUs = 400000U;
 constexpr std::uint32_t kEncoderSamplePeriodUs = 1000U;
 constexpr std::uint32_t kEncoderHealthPeriodUs = 100000U;
+constexpr std::uint32_t kImuSamplePeriodUs = 1000U;
+constexpr std::uint32_t kDefaultGyroCalibrationSamples = 500U;
 constexpr std::uint32_t kTelemetryPeriodUs = 20000U;
 constexpr std::uint32_t kPwmFrequencyHz = 25000U;
 
@@ -66,7 +71,15 @@ struct CalibrationState {
   std::uint32_t stage_start_us = 0U;
 };
 
+struct GyroCalibrationState {
+  bool active = false;
+  std::uint32_t target_samples = kDefaultGyroCalibrationSamples;
+  std::uint32_t collected_samples = 0U;
+  double sum_rad_s[3]{};
+};
+
 As5600 encoder;
+Mpu6050 imu;
 WheelKinematics wheel_kinematics(kWheelVelocityFilterTauS);
 ThreePwmBridge bridge;
 
@@ -75,6 +88,14 @@ WheelKinematicsState wheel_state{};
 bool encoder_status_valid = false;
 bool encoder_sample_valid = false;
 std::uint32_t encoder_read_errors = 0U;
+
+Mpu6050Sample imu_sample{};
+bool imu_ready = false;
+bool imu_sample_valid = false;
+bool gyro_bias_valid = false;
+float gyro_bias_rad_s[3]{};
+std::uint32_t imu_read_errors = 0U;
+GyroCalibrationState gyro_calibration{};
 
 MotorMode motor_mode = MotorMode::kStopped;
 MotorElectricalConfig motor_config{};
@@ -90,6 +111,7 @@ float electrical_angle_rad = 0.0F;
 std::uint32_t last_motor_update_us = 0U;
 std::uint32_t last_encoder_sample_us = 0U;
 std::uint32_t last_encoder_health_us = 0U;
+std::uint32_t last_imu_sample_us = 0U;
 std::uint32_t last_telemetry_us = 0U;
 
 char command_line[128]{};
@@ -103,7 +125,7 @@ void consoleWrite(const char* text) {
 }
 
 void consolePrintf(const char* format, ...) {
-  char buffer[512];
+  char buffer[640];
   va_list args;
   va_start(args, format);
   const int length = std::vsnprintf(buffer, sizeof(buffer), format, args);
@@ -167,6 +189,88 @@ bool sampleEncoder(const std::uint32_t sample_time_us) {
   return true;
 }
 
+float correctedGyro(const int axis) {
+  if (axis < 0 || axis > 2 || !imu_sample_valid) {
+    return 0.0F;
+  }
+  return imu_sample.gyro_rad_s[axis] -
+         (gyro_bias_valid ? gyro_bias_rad_s[axis] : 0.0F);
+}
+
+void startGyroCalibration(std::uint32_t samples) {
+  if (!imu_ready) {
+    consoleWrite("ERR imu unavailable\r\n");
+    return;
+  }
+  if (samples < 50U) {
+    samples = 50U;
+  } else if (samples > 5000U) {
+    samples = 5000U;
+  }
+  gyro_calibration = {};
+  gyro_calibration.active = true;
+  gyro_calibration.target_samples = samples;
+  gyro_bias_valid = false;
+  consolePrintf("OK imu gyro calibration started samples=%lu\r\n",
+                static_cast<unsigned long>(samples));
+}
+
+bool sampleImu() {
+  Mpu6050Sample sample{};
+  if (!imu_ready || !imu.readSample(&sample)) {
+    imu_sample_valid = false;
+    if (imu_ready) {
+      ++imu_read_errors;
+    }
+    return false;
+  }
+
+  imu_sample = sample;
+  imu_sample_valid = true;
+
+  if (gyro_calibration.active) {
+    for (int axis = 0; axis < 3; ++axis) {
+      gyro_calibration.sum_rad_s[axis] +=
+          static_cast<double>(sample.gyro_rad_s[axis]);
+    }
+    ++gyro_calibration.collected_samples;
+    if (gyro_calibration.collected_samples >= gyro_calibration.target_samples) {
+      const double denominator =
+          static_cast<double>(gyro_calibration.collected_samples);
+      for (int axis = 0; axis < 3; ++axis) {
+        gyro_bias_rad_s[axis] = static_cast<float>(
+            gyro_calibration.sum_rad_s[axis] / denominator);
+      }
+      gyro_calibration.active = false;
+      gyro_bias_valid = true;
+      consolePrintf(
+          "OK imu gyro calibration bx=%.6f by=%.6f bz=%.6f rad_s\r\n",
+          gyro_bias_rad_s[0], gyro_bias_rad_s[1], gyro_bias_rad_s[2]);
+    }
+  }
+
+  return true;
+}
+
+void updateEncoder(const std::uint32_t now_us) {
+  if ((now_us - last_encoder_sample_us) >= kEncoderSamplePeriodUs) {
+    last_encoder_sample_us = now_us;
+    sampleEncoder(now_us);
+  }
+  if ((now_us - last_encoder_health_us) >= kEncoderHealthPeriodUs) {
+    last_encoder_health_us = now_us;
+    refreshEncoderHealth();
+  }
+}
+
+void updateImu(const std::uint32_t now_us) {
+  if ((now_us - last_imu_sample_us) < kImuSamplePeriodUs) {
+    return;
+  }
+  last_imu_sample_us = now_us;
+  sampleImu();
+}
+
 void stopMotor() {
   motor_mode = MotorMode::kStopped;
   calibration.stage = CalibrationStage::kIdle;
@@ -181,17 +285,6 @@ void applyDq(const float electrical_angle, const float vd_v, const float vq_v) {
       electrical_angle, vd_v, vq_v, triwhirl::board::kMotorBusNominalV,
       kMotorVectorLimitV);
   bridge.setPhaseVoltages(phase.a, phase.b, phase.c);
-}
-
-void updateEncoder(const std::uint32_t now_us) {
-  if ((now_us - last_encoder_sample_us) >= kEncoderSamplePeriodUs) {
-    last_encoder_sample_us = now_us;
-    sampleEncoder(now_us);
-  }
-  if ((now_us - last_encoder_health_us) >= kEncoderHealthPeriodUs) {
-    last_encoder_health_us = now_us;
-    refreshEncoderHealth();
-  }
 }
 
 void finishCalibration() {
@@ -325,6 +418,8 @@ void printHelp() {
   consoleWrite("  motor vq <volts>\r\n");
   consoleWrite("  motor status\r\n");
   consoleWrite("  motor stop\r\n");
+  consoleWrite("  imu status\r\n");
+  consoleWrite("  imu calibrate [samples]\r\n");
   consoleWrite("  field <electrical_hz> <amplitude_v>\r\n");
   consoleWrite("  stop\r\n");
   consoleWrite("  status\r\n");
@@ -350,6 +445,20 @@ void printStatus() {
       wheel_state.instantaneous_velocity_rad_s,
       wheel_state.velocity_valid ? 1 : 0,
       static_cast<unsigned long>(encoder_read_errors));
+}
+
+void printImuStatus() {
+  std::uint8_t who_am_i = 0U;
+  const bool who_ok = imu_ready && imu.readWhoAmI(&who_am_i);
+  consolePrintf(
+      "imu,ready=%d,sample_ok=%d,who_ok=%d,who=0x%02x,bias_valid=%d,calibrating=%d,ax=%.6f,ay=%.6f,az=%.6f,gx=%.6f,gy=%.6f,gz=%.6f,temp_c=%.3f,bx=%.6f,by=%.6f,bz=%.6f,read_errors=%lu\r\n",
+      imu_ready ? 1 : 0, imu_sample_valid ? 1 : 0, who_ok ? 1 : 0,
+      static_cast<unsigned>(who_am_i), gyro_bias_valid ? 1 : 0,
+      gyro_calibration.active ? 1 : 0, imu_sample.accel_mps2[0],
+      imu_sample.accel_mps2[1], imu_sample.accel_mps2[2], correctedGyro(0),
+      correctedGyro(1), correctedGyro(2), imu_sample.temperature_c,
+      gyro_bias_rad_s[0], gyro_bias_rad_s[1], gyro_bias_rad_s[2],
+      static_cast<unsigned long>(imu_read_errors));
 }
 
 void startCalibration(char* amplitude_token, char* hz_token, char* turns_token) {
@@ -466,6 +575,26 @@ void handleMotorCommand() {
   consoleWrite("ERR usage: motor <calibrate|config|vq|status|stop>\r\n");
 }
 
+void handleImuCommand() {
+  char* action = std::strtok(nullptr, " \t");
+  if (action == nullptr || std::strcmp(action, "status") == 0) {
+    printImuStatus();
+    return;
+  }
+
+  if (std::strcmp(action, "calibrate") == 0) {
+    char* samples_token = std::strtok(nullptr, " \t");
+    std::uint32_t samples = kDefaultGyroCalibrationSamples;
+    if (samples_token != nullptr) {
+      samples = static_cast<std::uint32_t>(std::strtoul(samples_token, nullptr, 10));
+    }
+    startGyroCalibration(samples);
+    return;
+  }
+
+  consoleWrite("ERR usage: imu <status|calibrate [samples]>\r\n");
+}
+
 void handleCommand(char* line) {
   char* command = std::strtok(line, " \t");
   if (command == nullptr) {
@@ -474,6 +603,11 @@ void handleCommand(char* line) {
 
   if (std::strcmp(command, "motor") == 0) {
     handleMotorCommand();
+    return;
+  }
+
+  if (std::strcmp(command, "imu") == 0) {
+    handleImuCommand();
     return;
   }
 
@@ -592,7 +726,7 @@ void emitTelemetry(const std::uint32_t now_us) {
   }
   last_telemetry_us = now_us;
   consolePrintf(
-      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu\r\n",
+      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%lu\r\n",
       static_cast<unsigned long>(now_us), motorModeName(motor_mode),
       vq_command_v, electrical_angle_rad, open_loop_hz,
       encoder_status_valid ? 1 : 0, encoder_sample_valid ? 1 : 0,
@@ -602,7 +736,10 @@ void emitTelemetry(const std::uint32_t now_us) {
       wheel_state.unwrapped_angle_rad, wheel_state.velocity_rad_s,
       wheel_state.instantaneous_velocity_rad_s,
       wheel_state.velocity_valid ? 1 : 0,
-      static_cast<unsigned long>(encoder_read_errors));
+      static_cast<unsigned long>(encoder_read_errors), imu_sample_valid ? 1 : 0,
+      imu_sample.accel_mps2[0], imu_sample.accel_mps2[1], imu_sample.accel_mps2[2],
+      correctedGyro(0), correctedGyro(1), correctedGyro(2),
+      static_cast<unsigned long>(imu_read_errors));
 }
 
 bool initConsole() {
@@ -635,6 +772,17 @@ bool initEncoderBus(i2c_master_bus_handle_t* bus) {
   return i2c_new_master_bus(&config, bus) == ESP_OK;
 }
 
+bool initImuBus(i2c_master_bus_handle_t* bus) {
+  i2c_master_bus_config_t config{};
+  config.i2c_port = I2C_NUM_1;
+  config.sda_io_num = static_cast<gpio_num_t>(triwhirl::board::kMpu6050SdaGpio);
+  config.scl_io_num = static_cast<gpio_num_t>(triwhirl::board::kMpu6050SclGpio);
+  config.clk_source = I2C_CLK_SRC_DEFAULT;
+  config.glitch_ignore_cnt = 7;
+  config.flags.enable_internal_pullup = true;
+  return i2c_new_master_bus(&config, bus) == ESP_OK;
+}
+
 }  // namespace
 
 extern "C" void app_main(void) {
@@ -642,11 +790,18 @@ extern "C" void app_main(void) {
     return;
   }
 
-  i2c_master_bus_handle_t i2c_bus = nullptr;
-  if (!initEncoderBus(&i2c_bus) ||
-      !encoder.init(i2c_bus, triwhirl::board::kAs5600I2cAddress)) {
+  i2c_master_bus_handle_t encoder_bus = nullptr;
+  if (!initEncoderBus(&encoder_bus) ||
+      !encoder.init(encoder_bus, triwhirl::board::kAs5600I2cAddress)) {
     consoleWrite("FATAL AS5600 I2C init failed\r\n");
     return;
+  }
+
+  i2c_master_bus_handle_t imu_bus = nullptr;
+  imu_ready = initImuBus(&imu_bus) &&
+              imu.init(imu_bus, triwhirl::board::kMpu6050I2cAddress);
+  if (!imu_ready) {
+    consoleWrite("WARN MPU6050 init failed; IMU functions unavailable\r\n");
   }
 
   if (!bridge.init(triwhirl::board::kMotorIn1Gpio,
@@ -661,14 +816,19 @@ extern "C" void app_main(void) {
   const std::uint32_t now_us = static_cast<std::uint32_t>(esp_timer_get_time());
   sampleEncoder(now_us);
   refreshEncoderHealth();
+  if (imu_ready) {
+    sampleImu();
+    startGyroCalibration(kDefaultGyroCalibrationSamples);
+  }
   last_motor_update_us = now_us;
   last_encoder_sample_us = now_us;
   last_encoder_health_us = now_us;
+  last_imu_sample_us = now_us;
   last_telemetry_us = now_us;
 
-  consoleWrite("TriWhirl motor runtime ready\r\n");
+  consoleWrite("TriWhirl motor + IMU runtime ready\r\n");
   consoleWrite("telemetry is off by default; use 'telemetry on' when streaming is needed\r\n");
-  consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors\r\n");
+  consoleWrite("telemetry_fields,t_us,mode,vq_v,e_angle_rad,e_hz,status_ok,sample_ok,mag,raw,unwrapped_count,angle_rad,unwrapped_rad,vel_rad_s,vel_inst_rad_s,vel_valid,read_errors,imu_ok,ax,ay,az,gx,gy,gz,imu_read_errors\r\n");
   printStatus();
   printHelp();
   printPrompt();
@@ -676,6 +836,7 @@ extern "C" void app_main(void) {
   while (true) {
     const std::uint32_t loop_us = static_cast<std::uint32_t>(esp_timer_get_time());
     updateEncoder(loop_us);
+    updateImu(loop_us);
     updateMotor(loop_us);
     pollConsole();
     emitTelemetry(loop_us);
