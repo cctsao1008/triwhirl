@@ -53,8 +53,17 @@ WheelKinematicsState WheelKinematics::update(const std::uint16_t raw_count,
     delta_counts += static_cast<std::int32_t>(kCountsPerTurn);
   }
 
-  if (delta_counts == kHalfTurnCounts || delta_counts == -kHalfTurnCounts ||
-      elapsed_us == 0U) {
+  if (elapsed_us == 0U) {
+    state_.velocity_valid = false;
+    state_.instantaneous_velocity_rad_s = 0.0F;
+    return state_;
+  }
+
+  if (delta_counts == kHalfTurnCounts || delta_counts == -kHalfTurnCounts) {
+    // Direction is unknowable at exactly half a turn. Resynchronize the raw
+    // reference without inventing a signed displacement.
+    previous_raw_count_ = count;
+    previous_timestamp_us_ = timestamp_us;
     state_.velocity_valid = false;
     state_.instantaneous_velocity_rad_s = 0.0F;
     return state_;
