@@ -4,6 +4,21 @@ Robust control research platform for an ESP32-based reaction-wheel Reuleaux tria
 
 TriWhirl is a clean-room redevelopment for the existing hardware. Seller firmware is not used as an implementation baseline.
 
+## Repository layout
+
+TriWhirl is a single-target ESP32 firmware project with PC-side engineering tools. The repository follows the conventional PlatformIO project layout instead of adding an extra MCU-specific directory level.
+
+```text
+src/             ESP32 application and hardware/runtime integration
+include/         project headers
+lib/             reusable platform-independent C++ components
+test/            native and embedded tests
+tools/           PC-side logging, calibration, identification, modeling, synthesis, simulation
+docs/            architecture, hardware, control, and experiment documentation
+```
+
+See `docs/architecture.md` for placement and dependency rules.
+
 ## Current focus: motor-first bring-up
 
 The first executable milestone is the reaction-wheel actuator path:
