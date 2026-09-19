@@ -53,6 +53,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
     ),
     ToolCommand(
         group="log",
+        name="session",
+        handler="commands.session:session_main",
+        description="Prepare, record, finalize, download, and optionally decode TWLG.",
+    ),
+    ToolCommand(
+        group="log",
         name="capture-uart",
         script="logging/capture.py",
         description="Capture live UART telemetry to schema-versioned CSV.",
