@@ -21,12 +21,14 @@ This bring-up mode is not closed-loop FOC and is not the final controller.
 
 ## Toolchain
 
-- PlatformIO `espressif32@7.1.3`
-- Arduino framework supplied by that PlatformIO platform
+- PlatformIO Core
+- pinned pioarduino `platform-espressif32` release `55.03.311`
+- Arduino-ESP32 `3.3.11`
+- ESP-IDF libraries `5.5.5`
 - SimpleFOC `2.4.0`
 - ESP32 / ESP-WROOM-32 target
 
-Dependencies are pinned intentionally.
+The pioarduino platform is used because SimpleFOC 2.4.0's ESP32 backend requires ESP-IDF 5.x / Arduino-ESP32 3.x. Dependencies are pinned intentionally and the ESP32 cross-build is exercised in CI.
 
 ## Build
 
