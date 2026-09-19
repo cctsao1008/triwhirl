@@ -13,6 +13,10 @@ constexpr int kAs5600SclGpio = 5;
 constexpr int kAs5600SdaGpio = 23;
 constexpr std::uint8_t kAs5600I2cAddress = 0x36U;
 
+constexpr int kMpu6050SclGpio = 18;
+constexpr int kMpu6050SdaGpio = 19;
+constexpr std::uint8_t kMpu6050I2cAddress = 0x68U;
+
 constexpr float kMotorBusNominalV = 12.0F;
 constexpr float kBringupPhaseAmplitudeMaxV = 1.5F;
 
