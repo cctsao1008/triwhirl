@@ -44,6 +44,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-angle-deg", type=float, default=8.0)
     parser.add_argument("--target-theta-deg", type=float, default=68.0)
     parser.add_argument("--target-tolerance-deg", type=float, default=12.0)
+    parser.add_argument(
+        "--min-active-samples-per-sign", type=int, default=6,
+        help="minimum held-input regression samples for each nonzero Vq sign",
+    )
     parser.add_argument("-o", "--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -123,6 +127,8 @@ def main() -> int:
         raise RuntimeError("--derivative-window must be >= 1")
     if args.target_tolerance_deg <= 0.0 or args.target_tolerance_deg >= 60.0:
         raise RuntimeError("--target-tolerance-deg must be > 0 and < 60")
+    if args.min_active_samples_per_sign < 1:
+        raise RuntimeError("--min-active-samples-per-sign must be >= 1")
 
     rows = read_rows(args.input)
     if not rows:
@@ -250,10 +256,23 @@ def main() -> int:
         "theta_error_gyro_rad", "theta_rate_rad_s", "wheel_rate_rad_s",
         "vq_v", "bias",
     ]
+
+    vq_values = x[:, 3]
+    positive_vq = int(np.sum(vq_values > 1.0e-9))
+    negative_vq = int(np.sum(vq_values < -1.0e-9))
+    if (
+        positive_vq < args.min_active_samples_per_sign
+        or negative_vq < args.min_active_samples_per_sign
+    ):
+        raise RuntimeError(
+            "active input coverage is insufficient after transition rejection: "
+            f"positive={positive_vq}, negative={negative_vq}; require at least "
+            f"{args.min_active_samples_per_sign} samples for each sign"
+        )
+
     body_fit = fit_equation(x, y_body, names)
     wheel_fit = fit_equation(x, y_wheel, names)
 
-    vq_values = x[:, 3]
     theta_values = x[:, 0]
     payload = {
         "format": "triwhirl-body-active-fit-v2",
@@ -274,8 +293,8 @@ def main() -> int:
         "input_coverage": {
             "vq_min_v": float(np.min(vq_values)),
             "vq_max_v": float(np.max(vq_values)),
-            "positive_vq_samples": int(np.sum(vq_values > 1.0e-9)),
-            "negative_vq_samples": int(np.sum(vq_values < -1.0e-9)),
+            "positive_vq_samples": positive_vq,
+            "negative_vq_samples": negative_vq,
             "zero_vq_samples": int(np.sum(np.abs(vq_values) <= 1.0e-9)),
             "positive_theta_error_samples": int(np.sum(theta_values > 0.0)),
             "negative_theta_error_samples": int(np.sum(theta_values < 0.0)),
@@ -301,7 +320,7 @@ def main() -> int:
         "candidate_wheel_input_gain_vq": wheel_fit["coefficients"]["vq_v"]["value"],
         "interpretation": (
             "Candidate local A/B evidence only. Accept coefficients for controller synthesis "
-            "only after reviewing sign coverage, coefficient uncertainty, conditioning, and residual quality."
+            "only after reviewing coefficient uncertainty, conditioning, and residual quality."
         ),
     }
 
