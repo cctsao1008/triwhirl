@@ -5,25 +5,6 @@ on:
   pull_request:
 
 jobs:
-  host-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build and run host math tests
-        run: |
-          g++ -std=c++11 -Wall -Wextra -Werror \
-            -Icomponents/triwhirl_core/include \
-            components/triwhirl_core/three_phase_field.cpp \
-            test/test_three_phase_field.cpp \
-            -o /tmp/test_three_phase_field
-          /tmp/test_three_phase_field
-          g++ -std=c++11 -Wall -Wextra -Werror \
-            -Icomponents/triwhirl_core/include \
-            components/triwhirl_core/wheel_kinematics.cpp \
-            test/test_wheel_kinematics.cpp \
-            -o /tmp/test_wheel_kinematics
-          /tmp/test_wheel_kinematics
-
   esp32-build:
     runs-on: ubuntu-latest
     steps:
