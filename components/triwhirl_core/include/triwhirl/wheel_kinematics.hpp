@@ -18,7 +18,6 @@ struct WheelKinematicsState {
 class WheelKinematics {
  public:
   explicit WheelKinematics(float velocity_time_constant_s = 0.01F);
-
   void reset();
   WheelKinematicsState update(std::uint16_t raw_count,
                               std::uint32_t timestamp_us);
@@ -27,7 +26,6 @@ class WheelKinematics {
  private:
   static constexpr std::uint16_t kCountsPerTurn = 4096U;
   static constexpr std::int32_t kHalfTurnCounts = 2048;
-
   float velocity_time_constant_s_;
   std::uint16_t previous_raw_count_ = 0;
   std::uint32_t previous_timestamp_us_ = 0;

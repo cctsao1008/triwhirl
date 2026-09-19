@@ -1,4 +1,6 @@
-.pio/
+build/
+sdkconfig
+sdkconfig.old
 .vscode/
 .idea/
 __pycache__/

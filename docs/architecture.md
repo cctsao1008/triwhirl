@@ -1,84 +1,43 @@
-# Repository architecture
+# Architecture
 
-TriWhirl is a single-target ESP32 firmware project with supporting PC-side engineering tools. The repository structure reflects that boundary directly rather than implying unsupported MCU targets.
+TriWhirl is organized as a native ESP-IDF application with project components and PC-side engineering tools.
 
 ## Top-level layout
 
 ```text
 triwhirl/
-├── src/             ESP32 application and hardware/runtime integration
-├── include/         project headers used by the firmware application
-├── lib/             reusable, platform-independent C++ components
-├── test/            native and embedded tests
-├── tools/           PC-side engineering and research tools
-├── docs/            design, hardware, experiments, and control documentation
-├── platformio.ini   pinned ESP32 build definition
+├── main/                       application wiring / entry point
+├── components/
+│   ├── triwhirl_core/          platform-independent control/math code
+│   └── triwhirl_hw/            ESP32 peripheral and board integration
+├── tools/                      PC-side engineering/research tools
+├── docs/                       documentation
+├── CMakeLists.txt
+├── sdkconfig.defaults
 ├── README.md
 └── LICENSE
 ```
 
-## Dependency direction
+## Component boundaries
 
-The intended dependency direction is:
+`main/` owns application wiring and runtime orchestration.
 
-```text
-tools/  ---- generated/identified parameters ----> firmware
+`components/triwhirl_core/` contains project-owned deterministic control and signal-processing code that does not depend on ESP32 peripheral APIs.
 
-                         src/
-                          |
-                          v
-                    lib/triwhirl_core
-```
+`components/triwhirl_hw/` contains ESP32-specific board and peripheral integration using native ESP-IDF drivers.
 
-`src/` may depend on ESP32, Arduino, Wire, SimpleFOC, and board-specific definitions. Code in `lib/triwhirl_core` must remain independent of Arduino/ESP32 APIs so the same implementation can be exercised by native tests.
+`tools/` contains PC-side engineering utilities such as logging, calibration, identification, modeling, controller synthesis, and simulation when those tools are needed.
 
-`tools/` runs on the development PC. It may analyze logs, identify models, run simulations, solve LMIs, and generate or verify constants. It is not part of the real-time control loop.
-
-## Placement rules
-
-- Put hardware integration and runtime orchestration in `src/`.
-- Put project headers required by firmware integration in `include/triwhirl/`.
-- Put reusable deterministic C++ logic that can be tested without the target in `lib/triwhirl_core/`.
-- Put PC-only analysis, calibration, identification, synthesis, and simulation code in `tools/`.
-- Do not add an `esp32/` directory solely to restate the fixed target.
-- Do not add MCU portability layers without an actual second target.
-- Do not add empty architectural directories before code or documentation needs them.
-
-## Firmware domains
-
-As functionality is implemented, `src/` may grow by responsibility rather than by processor target, for example:
+## Runtime direction
 
 ```text
-src/
-├── board/
-├── drivers/
-├── estimation/
-├── control/
-├── telemetry/
-├── safety/
-└── main.cpp
+sensors -> state estimation -> supervisor/control -> Vq -> motor modulation -> MCPWM -> bridge
 ```
 
-These directories should be introduced only when the corresponding implementation exists.
+Communication and UI paths stay outside the real-time control path. BLE/Web Bluetooth is implemented as an ESP-IDF NimBLE GATT transport when added.
 
-## Control boundary
+## Dependency rule
 
-The project keeps offline design separate from embedded execution:
+Application wiring may depend on project components. Hardware-specific code may depend on ESP-IDF drivers. `triwhirl_core` must not depend on Arduino, PlatformIO, or ESP32 peripheral APIs.
 
-```text
-tools/identification + tools/modeling
-                |
-                v
-tools/synthesis/hinf       (offline LMI solve)
-                |
-                v
-        controller constants
-                |
-                v
-src/control/hinf           (runtime state feedback)
-                |
-                v
-        Vq -> SimpleFOC -> motor
-```
-
-The ESP32 runtime never depends on Python or an online convex solver.
+The ESP32 runtime does not depend on Python or an online convex solver. Offline identification/modeling/synthesis tools may generate parameters consumed by the firmware.

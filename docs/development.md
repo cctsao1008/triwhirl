@@ -1,48 +1,45 @@
 # Development
 
-This document covers the development environment and build workflow for TriWhirl.
+TriWhirl uses the official Espressif ESP-IDF toolchain directly.
 
-## Toolchain
+## Firmware toolchain
 
-The ESP32 build is defined by `platformio.ini` and pins the toolchain and firmware dependencies used by CI.
+- ESP-IDF `v6.1`
+- target: classic ESP32 / ESP-WROOM-32
+- native ESP-IDF C/C++ components and CMake build
 
-Current pinned versions:
-
-- pioarduino `platform-espressif32` release `55.03.311`
-- Arduino-ESP32 `3.3.11`
-- ESP-IDF libraries `5.5.5`
-- SimpleFOC `2.4.0`
-- target: ESP32 / ESP-WROOM-32
-
-The pioarduino platform is used because the selected SimpleFOC ESP32 backend depends on the Arduino-ESP32 3.x / ESP-IDF 5.x generation.
+There is no PlatformIO, Arduino core, or SimpleFOC runtime dependency.
 
 ## Build
 
-From the repository root:
+Activate an ESP-IDF v6.1 environment, then from the repository root run:
 
 ```bash
-pio run
+idf.py build
 ```
 
-The default PlatformIO environment is `esp32_motor_bringup`.
+## Flash and monitor
 
-## Serial monitor
-
-The development console uses 115200 baud.
+For the current CH340 connection on Windows, replace the port as needed:
 
 ```bash
-pio device monitor -b 115200
+idf.py -p COM28 flash monitor
 ```
 
-Motor-specific console commands and validation steps are documented in [motor-bringup.md](motor-bringup.md).
+Exit the monitor with the ESP-IDF monitor escape sequence shown by `idf.py monitor`.
 
-## Tests and CI
+## Repository structure
 
-CI performs two independent checks:
+```text
+main/                       application wiring / entry point
+components/triwhirl_core/   platform-independent control/math code
+components/triwhirl_hw/     ESP32 peripheral and board integration
+tools/                      PC-side engineering/research tools
+docs/                       documentation
+```
 
-1. native compilation and execution of host-testable C++ logic;
-2. ESP32 PlatformIO cross-build using the pinned embedded toolchain.
+The build follows ESP-IDF's native component model. `main/` wires the application together; reusable project code is kept in components.
 
-Hardware-independent deterministic logic should live in `lib/triwhirl_core` where practical so the same implementation can be exercised by native tests and embedded builds.
+## CI
 
-See [architecture.md](architecture.md) for repository placement and dependency rules.
+CI performs a native ESP-IDF cross-build with Espressif's official CI action pinned to ESP-IDF v6.1. Hardware behavior is validated on the actual TriWhirl board during bring-up rather than through a permanent duplicate host-test suite.
