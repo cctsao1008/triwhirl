@@ -30,19 +30,19 @@ COMMANDS: tuple[ToolCommand, ...] = (
     ToolCommand(
         group="log",
         name="download",
-        handler="triwhirl_tool.commands.log:download_main",
+        handler="commands.log:download_main",
         description="Download and validate a completed TWLG binary log over BLE.",
     ),
     ToolCommand(
         group="log",
         name="decode",
-        handler="triwhirl_tool.commands.log:decode_main",
+        handler="commands.log:decode_main",
         description="Validate and decode a TWLG binary log to CSV.",
     ),
     ToolCommand(
         group="log",
         name="inspect",
-        handler="triwhirl_tool.commands.log:inspect_main",
+        handler="commands.log:inspect_main",
         description="Inspect TWLG metadata and signal ranges without converting it.",
     ),
     ToolCommand(
