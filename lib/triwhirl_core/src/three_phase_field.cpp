@@ -7,13 +7,7 @@ namespace {
 constexpr float kSqrt3Over2 = 0.8660254037844386F;
 
 float clampValue(const float value, const float low, const float high) {
-  if (value < low) {
-    return low;
-  }
-  if (value > high) {
-    return high;
-  }
-  return value;
+  return value < low ? low : (value > high ? high : value);
 }
 }  // namespace
 
