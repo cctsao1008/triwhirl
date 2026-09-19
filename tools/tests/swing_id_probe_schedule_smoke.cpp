@@ -64,22 +64,16 @@ int main() {
     assert(!output.probe_active);
     expectNear(std::fabs(output.desired_vq_v), config.pump_v_high);
 
-    // Rearm must restore energy for four genuine body half-cycles before the
-    // next probe can be armed.  Keep the body outside the rearm angle while
-    // alternating a rate sign above the switch deadband.
-    for (std::uint32_t half_cycle = 0U; half_cycle < 4U; ++half_cycle) {
-      input.now_us += 1000U;
-      input.theta_rad = degToRad(vertices_deg[capture] + 20.0F);
-      input.theta_rate_rad_s = (half_cycle % 2U) == 0U ? -0.2F : 0.2F;
-      output = runner.update(input);
-      expectNear(std::fabs(output.desired_vq_v), config.pump_v_high);
-      if (half_cycle < 3U) {
-        assert(output.state == triwhirl::SwingIdState::kRearm);
-      } else {
-        assert(output.state == triwhirl::SwingIdState::kPump);
-      }
-      assert(output.pump_active);
-    }
+    // One genuine body turning point at full pump amplitude is enough to
+    // re-arm the next probe.  This prevents immediate same-pass probing while
+    // preserving high-energy vertex crossings observed on hardware.
+    input.now_us += 1000U;
+    input.theta_rad = degToRad(vertices_deg[capture] + 20.0F);
+    input.theta_rate_rad_s = -0.2F;
+    output = runner.update(input);
+    assert(output.state == triwhirl::SwingIdState::kPump);
+    assert(output.pump_active);
+    expectNear(std::fabs(output.desired_vq_v), config.pump_v_high);
   }
 
   return 0;
