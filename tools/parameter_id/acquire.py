@@ -21,6 +21,7 @@ from pathlib import Path
 import serial
 
 SCHEMA_VERSION = 2
+DEFAULT_MOTOR_CONFIG = Path("artifacts/motor-config.json")
 TELEMETRY_FIELDS = (
     "t_us",
     "mode",
@@ -63,6 +64,13 @@ class Segment:
     duration_s: float
 
 
+@dataclass(frozen=True)
+class MotorConfig:
+    pole_pairs: int
+    sensor_dir: int
+    offset_rad: float
+
+
 def parse_segment(text: str) -> Segment:
     try:
         vq_text, duration_text = text.split(":", 1)
@@ -98,8 +106,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pre-roll", type=float, default=1.0, help="stopped capture before profile [s]")
     parser.add_argument("--post-roll", type=float, default=1.0, help="stopped capture after profile [s]")
     parser.add_argument("--ready-timeout", type=float, default=10.0, help="wait for valid attitude/wheel telemetry [s]")
-    parser.add_argument("--auto-calibrate", action="store_true", help="run the existing firmware motor calibration if config is absent")
+    parser.add_argument("--auto-calibrate", action="store_true", help="run the existing firmware motor calibration if no reusable config exists")
     parser.add_argument("--calibration-timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--motor-config",
+        type=Path,
+        default=DEFAULT_MOTOR_CONFIG,
+        help=f"reusable motor electrical config JSON (default: {DEFAULT_MOTOR_CONFIG})",
+    )
     parser.add_argument("-b", "--baud", type=int, default=115200)
     parser.add_argument("-o", "--output", type=Path, default=None)
     return parser.parse_args()
@@ -140,13 +154,104 @@ def wait_for_status(port: serial.Serial, timeout_s: float = 3.0) -> dict[str, st
     raise RuntimeError("timed out waiting for firmware status")
 
 
-def ensure_motor_config(port: serial.Serial, auto_calibrate: bool, timeout_s: float) -> dict[str, str]:
+def motor_config_from_status(status: dict[str, str]) -> MotorConfig | None:
+    if status.get("config") != "1":
+        return None
+    try:
+        config = MotorConfig(
+            pole_pairs=int(status["pole_pairs"]),
+            sensor_dir=int(status["sensor_dir"]),
+            offset_rad=float(status["offset_rad"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        config.pole_pairs < 1
+        or config.pole_pairs > 64
+        or config.sensor_dir not in (-1, 1)
+        or not math.isfinite(config.offset_rad)
+    ):
+        return None
+    return config
+
+
+def load_motor_config(path: Path) -> MotorConfig | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        config = MotorConfig(
+            pole_pairs=int(data["pole_pairs"]),
+            sensor_dir=int(data["sensor_dir"]),
+            offset_rad=float(data["offset_rad"]),
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid motor config file {path}: {exc}") from exc
+    if (
+        config.pole_pairs < 1
+        or config.pole_pairs > 64
+        or config.sensor_dir not in (-1, 1)
+        or not math.isfinite(config.offset_rad)
+    ):
+        raise RuntimeError(f"invalid motor config values in {path}")
+    return config
+
+
+def save_motor_config(path: Path, config: MotorConfig, source: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "format": "triwhirl-motor-config-v1",
+        "pole_pairs": config.pole_pairs,
+        "sensor_dir": config.sensor_dir,
+        "offset_rad": config.offset_rad,
+        "source": source,
+        "saved": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def apply_motor_config(port: serial.Serial, config: MotorConfig) -> dict[str, str]:
+    write_command(
+        port,
+        f"motor config {config.pole_pairs} {config.sensor_dir} {config.offset_rad:.9g}",
+    )
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        line = read_line(port)
+        if not line:
+            continue
+        if line.startswith("FAULT,") or line.startswith("ERR"):
+            raise RuntimeError(f"firmware rejected motor config: {line}")
+        if line.startswith("OK motor config"):
+            status = wait_for_status(port)
+            if motor_config_from_status(status) is None:
+                raise RuntimeError("firmware did not retain the supplied motor config")
+            return status
+    raise RuntimeError("timed out applying motor config")
+
+
+def ensure_motor_config(
+    port: serial.Serial,
+    config_path: Path,
+    auto_calibrate: bool,
+    timeout_s: float,
+) -> tuple[dict[str, str], MotorConfig]:
     status = wait_for_status(port)
-    if status.get("config") == "1":
-        return status
+    config = motor_config_from_status(status)
+    if config is not None:
+        save_motor_config(config_path, config, "firmware-status")
+        return status, config
+
+    saved = load_motor_config(config_path)
+    if saved is not None:
+        print(f"loading motor config from {config_path}")
+        status = apply_motor_config(port, saved)
+        return status, saved
+
     if not auto_calibrate:
         raise RuntimeError(
-            "motor electrical config is absent; rerun with --auto-calibrate or calibrate once before acquisition"
+            f"motor electrical config is absent and {config_path} does not exist; "
+            "rerun with --auto-calibrate once"
         )
 
     print("motor config absent; starting firmware calibration")
@@ -161,7 +266,13 @@ def ensure_motor_config(port: serial.Serial, auto_calibrate: bool, timeout_s: fl
         if line.startswith("FAULT,") or line.startswith("ERR motor calibration"):
             raise RuntimeError(f"motor calibration failed: {line}")
         if line.startswith("OK motor calibrated"):
-            return wait_for_status(port)
+            status = wait_for_status(port)
+            config = motor_config_from_status(status)
+            if config is None:
+                raise RuntimeError("calibration completed but firmware config is invalid")
+            save_motor_config(config_path, config, "firmware-calibration")
+            print(f"saved reusable motor config -> {config_path}")
+            return status, config
     raise RuntimeError("motor calibration timed out")
 
 
@@ -238,6 +349,7 @@ def main() -> int:
     rows = [0]
     started_wall = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     completed = False
+    motor_config: MotorConfig | None = None
 
     try:
         time.sleep(0.15)
@@ -245,8 +357,13 @@ def main() -> int:
         write_command(port, "motor stop")
         write_command(port, "telemetry off")
 
-        status = ensure_motor_config(port, args.auto_calibrate, args.calibration_timeout)
-        if status.get("fault_mask", "0x00000000") != "0x00000000":
+        status, motor_config = ensure_motor_config(
+            port,
+            args.motor_config,
+            args.auto_calibrate,
+            args.calibration_timeout,
+        )
+        if int(status.get("fault_mask", "0"), 0) != 0:
             write_command(port, "fault clear")
             status = wait_for_status(port)
             if int(status.get("fault_mask", "0"), 0) != 0:
@@ -313,6 +430,14 @@ def main() -> int:
             "pre_roll_s": args.pre_roll,
             "post_roll_s": args.post_roll,
             "auto_calibrate": bool(args.auto_calibrate),
+            "motor_config_file": str(args.motor_config),
+            "motor_config": None
+            if motor_config is None
+            else {
+                "pole_pairs": motor_config.pole_pairs,
+                "sensor_dir": motor_config.sensor_dir,
+                "offset_rad": motor_config.offset_rad,
+            },
             "segments": [
                 {"vq_v": segment.vq_v, "duration_s": segment.duration_s}
                 for segment in args.segment
