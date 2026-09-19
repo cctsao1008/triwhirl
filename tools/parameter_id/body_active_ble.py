@@ -9,8 +9,8 @@ then asks for release. That removes host/BLE command latency from the post-relea
 plant response.
 
 The chosen upright vertex is also checked explicitly. TriWhirl's three vertices
-are separated by roughly 120 electrical/body degrees in the IMU frame, so silently
-accepting a neighboring vertex would mix different contact equilibria in one fit.
+are separated by roughly 120 body degrees in the IMU frame, so silently accepting
+a neighboring vertex would mix different contact equilibria in one fit.
 
 The recorded firmware telemetry `vq_v`, not the planned host command, remains the
 authoritative identification input used by the fitter.
@@ -87,8 +87,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def planned_sign(trial: int) -> int:
-    # Balanced + - - + for four trials; repeats in blocks of four. The nontrivial
-    # order reduces correlation with slow drift/repositioning between trials.
     return (1, -1, -1, 1)[(trial - 1) % 4]
 
 
