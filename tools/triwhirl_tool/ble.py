@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from .host_log import host_print
+
 if TYPE_CHECKING:
     from bleak import BleakClient
 
@@ -27,12 +29,12 @@ async def discover_target(
     from bleak import BleakScanner
 
     if verbose:
-        print(f"scanning for BLE device {name!r} ...")
+        host_print(f"scanning for BLE device {name!r} ...")
     device = await BleakScanner.find_device_by_name(name, timeout=scan_timeout)
     if device is None:
         raise RuntimeError(f"BLE device {name!r} not found")
     if verbose:
-        print(f"found {device.name or name}: {device.address}")
+        host_print(f"found {device.name or name}: {device.address}")
     return device
 
 
