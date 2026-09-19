@@ -1,6 +1,7 @@
 const SERVICE_UUID = "54f10000-8f4d-4f3a-b691-54524957484c";
 const RX_UUID = "54f10001-8f4d-4f3a-b691-54524957484c";
 const TX_UUID = "54f10002-8f4d-4f3a-b691-54524957484c";
+const SCHEMA_VERSION = 2;
 
 const TELEMETRY_FIELDS = [
   "t_us", "mode", "vq_v", "e_angle_rad", "e_hz", "status_ok",
@@ -9,6 +10,7 @@ const TELEMETRY_FIELDS = [
   "read_errors", "imu_ok", "ax", "ay", "az", "gx", "gy", "gz",
   "imu_read_errors", "attitude_ok", "theta_rad", "theta_rate_rad_s",
   "accel_weight", "loop_exec_us", "loop_max_exec_us", "loop_overruns",
+  "fault_mask",
 ];
 
 const ui = {
@@ -25,6 +27,7 @@ const ui = {
   wheelRate: document.querySelector("#wheelRate"),
   vq: document.querySelector("#vq"),
   loopMax: document.querySelector("#loopMax"),
+  faultMask: document.querySelector("#faultMask"),
   record: document.querySelector("#recordButton"),
   save: document.querySelector("#saveButton"),
   clear: document.querySelector("#clearButton"),
@@ -85,6 +88,7 @@ function consumeTelemetry(line) {
   ui.loopMax.textContent = Number.isFinite(Number(frame.loop_max_exec_us))
     ? String(Number(frame.loop_max_exec_us))
     : "—";
+  ui.faultMask.textContent = String(Number(frame.fault_mask) || 0);
 
   if (recording) {
     recordedRows.push(values);
@@ -176,7 +180,7 @@ function saveCsv() {
   const header = ["schema_version", ...TELEMETRY_FIELDS];
   const rows = [
     header,
-    ...recordedRows.map((row) => ["1", ...row]),
+    ...recordedRows.map((row) => [String(SCHEMA_VERSION), ...row]),
   ];
   const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
