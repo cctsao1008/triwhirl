@@ -105,6 +105,14 @@ jobs:
           assert [row["phase"] for row in rows[1:]] == ["active", "active", "active"]
           assert all(abs(float(row["planned_vq_v"]) + 0.55) < 1e-6 for row in rows)
           PY
+      - name: Smoke-test independent swing probe scheduler
+        run: |
+          g++ -std=c++17 \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/swing_id_probe_schedule_smoke.cpp \
+            components/triwhirl_core/swing_id.cpp \
+            -o /tmp/swing-id-probe-schedule-smoke
+          /tmp/swing-id-probe-schedule-smoke
       - name: Build with native ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:
