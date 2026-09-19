@@ -7,6 +7,7 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846F;
 constexpr float kRadToDeg = 180.0F / kPi;
+constexpr std::uint32_t kRecoveryHalfCycles = 4U;
 
 }  // namespace
 
@@ -181,6 +182,7 @@ bool SwingIdRunner::start(const SwingIdInput& input) {
   output_ = {};
   start_us_ = input.now_us;
   probe_start_us_ = 0U;
+  rearm_start_half_cycle_ = 0U;
   pump_rate_sign_ =
       std::fabs(input.theta_rate_rad_s) >= config_.rate_switch_rad_s
           ? (input.theta_rate_rad_s > 0.0F ? 1 : -1)
@@ -273,8 +275,15 @@ SwingIdOutput SwingIdRunner::update(const SwingIdInput& input) {
         return stop(SwingIdState::kComplete,
                     SwingIdStopReason::kTargetReached);
       }
+      rearm_start_half_cycle_ = output_.half_cycle_index;
       setState(SwingIdState::kRearm, true);
-      output_.desired_vq_v = pumpCommand();
+      // A scheduled probe may deliberately weaken, zero, or oppose the pump.
+      // Rearm therefore uses the full pump amplitude until several genuine
+      // body half-cycles have restored swing energy before another capture is
+      // allowed.
+      output_.desired_vq_v =
+          static_cast<float>(config_.pump_polarity * pump_rate_sign_) *
+          config_.pump_v_high;
     }
     return output_;
   }
@@ -299,16 +308,24 @@ SwingIdOutput SwingIdRunner::update(const SwingIdInput& input) {
   }
 
   if (output_.state == SwingIdState::kRearm) {
+    output_.desired_vq_v =
+        static_cast<float>(config_.pump_polarity * pump_rate_sign_) *
+        config_.pump_v_high;
     const float probe_error = angleDiffDeg(
         radiansToDegrees(input.theta_rad), probe_center_deg_);
     output_.vertex = probe_vertex_;
     output_.vertex_error_deg = probe_error;
-    if (std::fabs(probe_error) >= config_.rearm_deg) {
+    const std::uint32_t recovered_half_cycles =
+        output_.half_cycle_index - rearm_start_half_cycle_;
+    if (std::fabs(probe_error) >= config_.rearm_deg &&
+        recovered_half_cycles >= kRecoveryHalfCycles) {
       probe_vertex_ = SwingIdVertex::kNone;
       probe_center_deg_ = 0.0F;
+      current_pump_v_ = config_.pump_v_high;
       setState(SwingIdState::kPump, true);
       output_.vertex = nearest;
       output_.vertex_error_deg = nearest_error_deg;
+      output_.desired_vq_v = pumpCommand();
     }
   }
 
