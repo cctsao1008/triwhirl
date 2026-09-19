@@ -26,6 +26,12 @@ Wheel model per vertex:
 last armed sample before release.  The measured firmware ``vq_v`` is the
 identification input.  Older active CSV files without explicit ``vertex_id``
 columns are still supported by classifying their held ``theta_ref_rad``.
+
+A full-rank least-squares result is not enough to call a vertex model a
+controller candidate.  Candidate acceptance also requires useful two-sided
+local-angle coverage and statistically separated Vq gains in both body and
+wheel equations.  This prevents a numerically clean but physically weak fit
+from being promoted into controller synthesis.
 """
 
 from __future__ import annotations
@@ -56,6 +62,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-active-samples-per-sign", type=int, default=6,
         help="minimum held-input regression samples for +Vq and -Vq within one vertex",
+    )
+    parser.add_argument(
+        "--min-theta-samples-per-sign", type=int, default=4,
+        help="minimum usable gyro-integrated theta-error samples on each side of zero",
+    )
+    parser.add_argument(
+        "--min-vq-coef-sigma", type=float, default=2.0,
+        help="minimum |Vq coefficient|/standard-error for both body and wheel equations",
     )
     parser.add_argument("-o", "--output", type=Path, required=True)
     return parser.parse_args()
@@ -274,6 +288,10 @@ def main() -> int:
         raise RuntimeError("--vertex-tolerance-deg must be > 0 and < 60")
     if args.min_active_samples_per_sign < 1:
         raise RuntimeError("--min-active-samples-per-sign must be >= 1")
+    if args.min_theta_samples_per_sign < 1:
+        raise RuntimeError("--min-theta-samples-per-sign must be >= 1")
+    if args.min_vq_coef_sigma <= 0.0:
+        raise RuntimeError("--min-vq-coef-sigma must be > 0")
 
     rows = read_rows(args.input)
     if not rows:
@@ -355,6 +373,8 @@ def main() -> int:
         theta_values = x[:, 0]
         positive_vq = int(np.sum(vq_values > 1.0e-9))
         negative_vq = int(np.sum(vq_values < -1.0e-9))
+        positive_theta = int(np.sum(theta_values > 0.0))
+        negative_theta = int(np.sum(theta_values < 0.0))
         reasons: list[str] = []
         if len(x) < 12:
             reasons.append(f"only {len(x)} usable samples; need at least 12")
@@ -366,11 +386,34 @@ def main() -> int:
             reasons.append(
                 f"negative Vq samples={negative_vq}; need {args.min_active_samples_per_sign}"
             )
+        if positive_theta < args.min_theta_samples_per_sign:
+            reasons.append(
+                f"positive theta-error samples={positive_theta}; need {args.min_theta_samples_per_sign}"
+            )
+        if negative_theta < args.min_theta_samples_per_sign:
+            reasons.append(
+                f"negative theta-error samples={negative_theta}; need {args.min_theta_samples_per_sign}"
+            )
 
         body_fit = fit_equation(x, y_body, names)
         wheel_fit = fit_equation(x, y_wheel, names)
         if body_fit["rank"] < 5 or wheel_fit["rank"] < 5:
             reasons.append("regression is not full rank")
+
+        body_vq_sigma = body_fit["coefficients"]["vq_v"]["abs_over_std_error"]
+        wheel_vq_sigma = wheel_fit["coefficients"]["vq_v"]["abs_over_std_error"]
+        if body_vq_sigma is None or body_vq_sigma < args.min_vq_coef_sigma:
+            reasons.append(
+                "body Vq gain is not statistically separated: "
+                f"|coef|/SE={body_vq_sigma if body_vq_sigma is not None else 'n/a'}; "
+                f"need {args.min_vq_coef_sigma:.2f}"
+            )
+        if wheel_vq_sigma is None or wheel_vq_sigma < args.min_vq_coef_sigma:
+            reasons.append(
+                "wheel Vq gain is not statistically separated: "
+                f"|coef|/SE={wheel_vq_sigma if wheel_vq_sigma is not None else 'n/a'}; "
+                f"need {args.min_vq_coef_sigma:.2f}"
+            )
 
         status = "candidate" if not reasons else "diagnostic_only"
         if status == "candidate":
@@ -387,8 +430,14 @@ def main() -> int:
                 "positive_vq_samples": positive_vq,
                 "negative_vq_samples": negative_vq,
                 "zero_vq_samples": int(np.sum(np.abs(vq_values) <= 1.0e-9)),
-                "positive_theta_error_samples": int(np.sum(theta_values > 0.0)),
-                "negative_theta_error_samples": int(np.sum(theta_values < 0.0)),
+                "positive_theta_error_samples": positive_theta,
+                "negative_theta_error_samples": negative_theta,
+            },
+            "acceptance_metrics": {
+                "body_vq_abs_over_std_error": body_vq_sigma,
+                "wheel_vq_abs_over_std_error": wheel_vq_sigma,
+                "min_vq_coef_sigma": args.min_vq_coef_sigma,
+                "min_theta_samples_per_sign": args.min_theta_samples_per_sign,
             },
             "body_equation": body_fit,
             "wheel_equation": wheel_fit,
@@ -412,7 +461,7 @@ def main() -> int:
         vertex_fits[vertex_id] = base
 
     payload = {
-        "format": "triwhirl-body-active-fit-v3",
+        "format": "triwhirl-body-active-fit-v4",
         "input": str(args.input),
         "model": {
             "body": (
@@ -436,13 +485,16 @@ def main() -> int:
         "derivative_window_each_side": args.derivative_window,
         "max_angle_deg": args.max_angle_deg,
         "min_active_samples_per_sign": args.min_active_samples_per_sign,
+        "min_theta_samples_per_sign": args.min_theta_samples_per_sign,
+        "min_vq_coef_sigma": args.min_vq_coef_sigma,
         "unclassified_trials": unclassified_trials,
         "candidate_vertices": candidate_vertices,
         "vertex_fits": vertex_fits,
         "interpretation": (
-            "Never pool different upright vertices automatically. A vertex marked candidate "
-            "has enough local signed-Vq coverage and full-rank regression to be reviewed as "
-            "controller-model evidence; coefficient uncertainty/residual quality still matter."
+            "Never pool different upright vertices automatically. Candidate status requires "
+            "two-sided local-angle coverage, signed-Vq coverage, full-rank regression, and "
+            "statistically separated body/wheel Vq gains; otherwise the fit is retained as "
+            "diagnostic plant evidence only."
         ),
     }
 
@@ -474,9 +526,18 @@ def main() -> int:
                 f"RMSE={fit['wheel_equation']['rmse']:.4f}"
             )
             coverage = fit["input_coverage"]
+            metrics = fit["acceptance_metrics"]
             print(
                 f"  Vq samples: +={coverage['positive_vq_samples']} "
                 f"-={coverage['negative_vq_samples']} zero={coverage['zero_vq_samples']}"
+            )
+            print(
+                f"  theta-error samples: +={coverage['positive_theta_error_samples']} "
+                f"-={coverage['negative_theta_error_samples']}"
+            )
+            print(
+                f"  Vq |coef|/SE: body={metrics['body_vq_abs_over_std_error']:.2f} "
+                f"wheel={metrics['wheel_vq_abs_over_std_error']:.2f}"
             )
     if unclassified_trials:
         print("unclassified/non-vertex trials:")
