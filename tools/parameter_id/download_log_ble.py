@@ -14,7 +14,7 @@ TOOLS_ROOT = Path(__file__).resolve().parents[1]
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
-from triwhirl_tool.commands.log import download_main
+from triwhirl_tool.commands.download import download_main
 
 
 if __name__ == "__main__":
