@@ -66,7 +66,7 @@ COMMANDS: tuple[ToolCommand, ...] = (
     ToolCommand(
         group="log",
         name="download",
-        handler="commands.log:download_main",
+        handler="commands.download:download_main",
         description="Download and validate a completed TWLG binary log over BLE.",
     ),
     ToolCommand(
