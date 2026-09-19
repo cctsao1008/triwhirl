@@ -335,6 +335,7 @@ async def run(args: argparse.Namespace) -> int:
     completed = False
     motor_config: MotorConfig | None = None
     target = await discover_target(args)
+    resolved_address = getattr(target, "address", None) or args.address
 
     try:
         async with BleakClient(target) as client:
@@ -344,70 +345,85 @@ async def run(args: argparse.Namespace) -> int:
             await client.start_notify(TX_UUID, transport.on_notify)
             await asyncio.sleep(0.2)
 
-            await transport.send("motor stop")
-            await transport.send("telemetry off")
-
-            status, motor_config = await ensure_motor_config(
-                transport, args.motor_config, args.auto_calibrate,
-                args.calibration_timeout,
-            )
-            if int(status.get("fault_mask", "0"), 0) != 0:
-                await transport.send("fault clear")
-                status = await wait_for_status(transport)
-                if int(status.get("fault_mask", "0"), 0) != 0:
-                    raise RuntimeError(
-                        f"firmware fault remains latched: {status.get('fault_mask')}"
-                    )
-
-            needs_motor_config = any(abs(segment.vq_v) >= 1.0e-9 for segment in args.segment)
-            if needs_motor_config and motor_config is None:
-                raise RuntimeError(
-                    "nonzero Vq profile requires motor config; restore artifacts/motor-config.json "
-                    "or use --auto-calibrate"
-                )
-
-            with output.open("w", newline="", encoding="utf-8") as stream:
-                writer = csv.writer(stream)
-                writer.writerow(("schema_version", "phase", *TELEMETRY_FIELDS))
-                await transport.send("telemetry on")
-
-                ready_deadline = time.monotonic() + args.ready_timeout
-                if not await capture_until(
-                    transport, writer, ready_deadline, "ready", rows, require_ready=True
-                ):
-                    raise RuntimeError("attitude/wheel state did not become ready before timeout")
-
-                if args.pre_roll > 0.0:
-                    await capture_until(
-                        transport, writer, time.monotonic() + args.pre_roll, "pre", rows
-                    )
-
-                for repetition in range(args.repeat):
-                    for index, segment in enumerate(args.segment, start=1):
-                        phase = f"r{repetition + 1}_s{index}"
-                        if abs(segment.vq_v) < 1.0e-9:
-                            await transport.send("motor stop")
-                        else:
-                            await transport.send(f"motor vq {segment.vq_v:.9g}")
-                        await capture_until(
-                            transport, writer,
-                            time.monotonic() + segment.duration_s,
-                            phase, rows,
-                        )
-
-                await transport.send("motor stop")
-                if args.post_roll > 0.0:
-                    await capture_until(
-                        transport, writer, time.monotonic() + args.post_roll,
-                        "post", rows,
-                    )
-                completed = True
-
             try:
                 await transport.send("motor stop")
                 await transport.send("telemetry off")
+
+                status, motor_config = await ensure_motor_config(
+                    transport, args.motor_config, args.auto_calibrate,
+                    args.calibration_timeout,
+                )
+                if int(status.get("fault_mask", "0"), 0) != 0:
+                    await transport.send("fault clear")
+                    status = await wait_for_status(transport)
+                    if int(status.get("fault_mask", "0"), 0) != 0:
+                        raise RuntimeError(
+                            f"firmware fault remains latched: {status.get('fault_mask')}"
+                        )
+
+                needs_motor_config = any(
+                    abs(segment.vq_v) >= 1.0e-9 for segment in args.segment
+                )
+                if needs_motor_config and motor_config is None:
+                    raise RuntimeError(
+                        "nonzero Vq profile requires motor config; restore "
+                        "artifacts/motor-config.json or use --auto-calibrate"
+                    )
+
+                with output.open("w", newline="", encoding="utf-8") as stream:
+                    writer = csv.writer(stream)
+                    writer.writerow(("schema_version", "phase", *TELEMETRY_FIELDS))
+                    await transport.send("telemetry on")
+
+                    ready_deadline = time.monotonic() + args.ready_timeout
+                    if not await capture_until(
+                        transport, writer, ready_deadline, "ready", rows,
+                        require_ready=True,
+                    ):
+                        raise RuntimeError(
+                            "attitude/wheel state did not become ready before timeout"
+                        )
+
+                    if args.pre_roll > 0.0:
+                        await capture_until(
+                            transport, writer, time.monotonic() + args.pre_roll,
+                            "pre", rows,
+                        )
+
+                    for repetition in range(args.repeat):
+                        for index, segment in enumerate(args.segment, start=1):
+                            phase = f"r{repetition + 1}_s{index}"
+                            if abs(segment.vq_v) < 1.0e-9:
+                                await transport.send("motor stop")
+                            else:
+                                await transport.send(f"motor vq {segment.vq_v:.9g}")
+                            await capture_until(
+                                transport, writer,
+                                time.monotonic() + segment.duration_s,
+                                phase, rows,
+                            )
+
+                    await transport.send("motor stop")
+                    if args.post_roll > 0.0:
+                        await capture_until(
+                            transport, writer,
+                            time.monotonic() + args.post_roll,
+                            "post", rows,
+                        )
+                    completed = True
             finally:
-                await client.stop_notify(TX_UUID)
+                # Disconnect does not change motor state in firmware, so stop
+                # explicitly while the GATT link is still alive whenever possible.
+                if client.is_connected:
+                    for command in ("motor stop", "telemetry off"):
+                        try:
+                            await transport.send(command)
+                        except Exception:
+                            pass
+                    try:
+                        await client.stop_notify(TX_UUID)
+                    except Exception:
+                        pass
 
     finally:
         metadata = {
@@ -415,7 +431,7 @@ async def run(args: argparse.Namespace) -> int:
             "telemetry_schema_version": SCHEMA_VERSION,
             "transport": "ble",
             "device_name": args.name,
-            "device_address": args.address,
+            "device_address": resolved_address,
             "started": started_wall,
             "completed": completed,
             "repeat": args.repeat,
