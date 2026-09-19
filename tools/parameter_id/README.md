@@ -1,6 +1,6 @@
 # Local parameter identification
 
-TriWhirl keeps acquisition and model fitting separate: the firmware owns motor/safety limits, the host acquisition tools record an explicit commanded experiment, and the fitting tools estimate local models from the resulting telemetry.
+TriWhirl keeps acquisition and model fitting separate. Firmware owns motor/safety limits and is now the timing authority for control/identification. BLE remains useful for setup, diagnostics, and post-run transfer, but host BLE arrival time is not used as a realtime measurement clock.
 
 ## Python dependencies
 
@@ -10,7 +10,7 @@ Install the host-side dependencies into the active Python environment once:
 python -m pip install -r tools/parameter_id/requirements.txt
 ```
 
-This installs NumPy for fitting, pySerial for UART acquisition, and Bleak for untethered BLE acquisition.
+This installs NumPy for fitting, pySerial for UART acquisition, and Bleak for untethered BLE communication.
 
 ## Three upright vertices
 
@@ -28,11 +28,43 @@ These are classification centers, not a claim that the real mass distribution is
 
 `vertex_geometry.py` centralizes the 120-degree geometry and circular-angle classification.
 
-## Untethered BLE acquisition
+## Realtime TWLG path
 
-For body-motion identification the USB cable must not mechanically disturb the TriWhirl body. The existing native NimBLE firmware already exposes the same command/telemetry protocol used by UART, so the BLE tools record experiments while the unit runs from its battery.
+Host-side BLE control exposed 60--120 ms command delay around the upright crossing, while the measured passive upright e-folding time is only about 56 ms. The realtime identification path therefore no longer sends timing-critical motor decisions or samples through the PC.
 
-The BLE service is the same one used by the WebUI:
+The firmware records a fixed 32-byte state/actuation snapshot from the 1 kHz control cycle into SRAM. A low-priority writer transfers page-sized batches to a dedicated raw flash partition outside critical local windows. Near a vertex, flash programming can be paused completely while records continue accumulating in SRAM. After the run the frozen binary log is downloaded over BLE.
+
+The detailed binary contract is in `docs/logging/twlog-v1.md`.
+
+Firmware shell workflow:
+
+```text
+log status
+log prepare [seconds]
+log start
+log critical on|off
+log stop
+log dump
+```
+
+`log prepare` pre-erases the bounded flash region before recording. `log start` begins 1 kHz SRAM capture. `log critical on` marks a realtime-sensitive window and pauses flash programming; this command is infrastructure for commissioning and will be driven internally by the native autonomous swing state machine rather than by a PC during the final experiment. `log stop` drains SRAM and writes the versioned header/CRC.
+
+Post-run download and decode:
+
+```powershell
+python tools/parameter_id/download_log_ble.py `
+  -o artifacts/run-01.twlog
+
+python tools/parameter_id/decode_twlog.py `
+  artifacts/run-01.twlog `
+  -o artifacts/run-01.csv
+```
+
+The `.twlog` file is versioned binary data with exact firmware timestamps. The decoder verifies magic, structure sizes, total payload length, and CRC before generating CSV.
+
+## Untethered BLE diagnostic acquisition
+
+The native NimBLE service remains available for low-rate diagnostics and historical acquisition tools:
 
 ```text
 Device  TriWhirl
@@ -41,80 +73,31 @@ RX      54f10001-8f4d-4f3a-b691-54524957484c
 TX      54f10002-8f4d-4f3a-b691-54524957484c
 ```
 
-A zero-actuation free-body capture does not require a motor electrical configuration:
+`acquire_ble.py`, `body_free_ble.py`, `body_local_ble.py`, and `body_active_ble.py` are retained because their existing datasets remain useful evidence. They must not be treated as the final realtime timing path for rapid near-upright control.
 
-```powershell
-python tools/parameter_id/acquire_ble.py `
-  --segment=0:8 `
-  --pre-roll 0 `
-  --post-roll 0 `
-  -o artifacts/body-free-01.csv
-```
-
-For active near-upright identification, `body_active_ble.py` accepts all three legal vertices. By default `--vertex auto` classifies the first held vertex as A/B/C and locks the remainder of that run to the same vertex, so trials from different contact equilibria are not accidentally mixed. The Vq excitation is established and confirmed by firmware telemetry while the body is still held; the user releases only after `INPUT READY`, removing BLE command latency from the post-release response.
-
-Example using whichever legal vertex is held first:
-
-```powershell
-python tools/parameter_id/body_active_ble.py `
-  --trials 4 `
-  -o artifacts/body-active-A-or-B-or-C.csv
-```
-
-To request a specific vertex explicitly:
-
-```powershell
-python tools/parameter_id/body_active_ble.py `
-  --vertex B `
-  --trials 4 `
-  -o artifacts/body-active-B.csv
-```
-
-The corresponding fitter classifies old and new active logs by held reference angle, fits A/B/C separately, and never pools different vertices automatically:
-
-```powershell
-python tools/parameter_id/body_active_fit.py `
-  artifacts/body-active-B.csv `
-  -o artifacts/body-active-B-fit.json
-```
-
-A vertex is reported as a `candidate` only when it has enough usable samples, both positive and negative Vq coverage, and full-rank regression. Other fits are retained as `diagnostic_only` rather than discarded.
-
-The general BLE acquisition tool scans for `TriWhirl`, connects to its native GATT service, subscribes to telemetry, waits for valid attitude and wheel-rate state, records schema-v2 CSV, and always sends `motor stop` / `telemetry off` before disconnecting when the connection remains available.
-
-For nonzero-`Vq` BLE experiments, the tools automatically reapply `artifacts/motor-config.json` after a battery boot. The same commissioned motor configuration used by UART is therefore reused without another calibration. Negative segment values should be passed with `=` in PowerShell, for example `--segment=-0.25:0.8`.
+For nonzero-`Vq` BLE work, the tools automatically reapply `artifacts/motor-config.json` after a battery boot. The commissioned configuration is therefore reused without another calibration. Negative segment values should be passed with `=` in PowerShell, for example `--segment=-0.25:0.8`.
 
 Use `--address <BLE-address-or-device-id>` only if name-based discovery is ambiguous; otherwise the default `TriWhirl` scan is sufficient.
 
-## Autonomous swing identification
+## Autonomous swing identification history
 
-`auto_swing_id_ble.py` removes the repeated hand-hold/release step from local plant identification. It uses the measured body phase to drive coarse reaction-wheel pumping over BLE, watches all three legitimate upright vertices, pre-arms the signed local `Vq` probe before the body enters the local fit window, and then records the near-upright response. Coarse swing pumping may tolerate BLE latency; the local probe is required to be visible in firmware telemetry before the body enters the capture window.
+`auto_swing_id_ble.py` proved that the reaction wheel can pump the untethered body from a resting rocking motion through the neighborhood of the upright vertices without a hand release. It also established why the control decision must move on-device: when the host attempted to change `Vq` at a vertex, the requested input often appeared in firmware telemetry only after the useful local window had passed.
 
-Run it untethered on the normal high-friction mat:
+The host script is therefore retained as diagnostic/research history rather than the final experiment engine. The next autonomous path is the native 1 kHz firmware state machine:
 
-```powershell
-python tools/parameter_id/auto_swing_id_ble.py `
-  --probes 12 `
-  -o artifacts/auto-swing-id-01.csv
+```text
+pump -> approach -> critical local window -> probe/capture -> recover -> repeat
 ```
 
-No manual upright placement or release is required after the command starts. The default coarse pump is `0.25 V`; local probes use a balanced `+ - - +` sign sequence with independently configurable positive/negative magnitudes. The tool also has a bounded runtime and can reverse the coarse pump polarity if no upright capture is reached for the configured interval.
+Vertex detection, pump/probe `Vq` decisions, critical-window markers, and TWLG records all execute on the ESP32. BLE only configures/starts the run, reports coarse status, and downloads the completed log.
 
-Three artifacts are written:
+Historical host-side artifacts still have value:
 
-- `auto-swing-id-01.csv`: only local `armed` / `active` / `zero_vector` windows, intentionally compatible with `body_active_fit.py`;
-- `auto-swing-id-01-raw.csv`: complete rocking trajectory including coarse pump phases;
-- `auto-swing-id-01.csv.json`: exact experiment parameters and probe/vertex provenance.
+- `*-raw.csv` preserves global rocking trajectories;
+- local CSVs preserve prior A/B/C windows;
+- JSON sidecars preserve host experiment parameters/provenance.
 
-Fit the retained local windows directly with the existing per-vertex fitter:
-
-```powershell
-python tools/parameter_id/body_active_fit.py `
-  artifacts/auto-swing-id-01.csv `
-  -o artifacts/auto-swing-fit-01.json
-```
-
-This tool is identification infrastructure only. It does not close issue #20 or replace the final native ESP-IDF swing-up controller, which still requires the global rocking/contact model, explicit wheel-speed limits, capture supervision, and recovery behavior.
+This identification infrastructure does not by itself close the final swing-up-controller work. The production hybrid controller still requires the global rocking/contact model, explicit wheel-speed limits, capture supervision, and recovery behavior.
 
 ## UART acquisition
 
