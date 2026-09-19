@@ -24,6 +24,7 @@ from acquire_ble import (
     TX_UUID,
     BleLineTransport,
     capture_until,
+    parse_key_values,
 )
 
 
@@ -32,7 +33,7 @@ def parse_args() -> argparse.Namespace:
         description="Record a battery-powered free body response over BLE."
     )
     parser.add_argument("--duration", type=float, default=8.0)
-    parser.add_argument("--imu-samples", type=int, default=1000)
+    parser.add_argument("--imu-samples", type=int, default=500)
     parser.add_argument("--start-delay", type=float, default=3.0)
     parser.add_argument("--ready-timeout", type=float, default=10.0)
     parser.add_argument("--scan-timeout", type=float, default=10.0)
@@ -59,6 +60,65 @@ async def read_until_prefix(
     raise RuntimeError(f"timed out waiting for {prefix!r}")
 
 
+async def wait_for_gyro_calibration(
+    transport: BleLineTransport,
+    samples: int,
+) -> str:
+    # The firmware samples the IMU from the real-time loop, but the effective
+    # sample cadence can be slower than the nominal 1 kHz while BLE/console work
+    # is active. Also, a single completion notification can be lost without the
+    # calibration itself failing. Poll `imu status` as an authoritative fallback
+    # instead of treating one missing console line as a failed calibration.
+    timeout_s = max(15.0, samples * 0.03)
+    deadline = time.monotonic() + timeout_s
+    next_status_poll = time.monotonic() + 0.5
+    last_status: dict[str, str] | None = None
+
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        wait_s = min(0.25, max(0.001, deadline - now))
+        line = await transport.read_line(wait_s)
+        if line:
+            if line.startswith("FAULT,") or line.startswith("ERR"):
+                raise RuntimeError(line)
+            if line.startswith("OK imu gyro calibration bx="):
+                return line
+            if line.startswith("imu,"):
+                status = parse_key_values(line)
+                last_status = status
+                if (
+                    status.get("ready") == "1"
+                    and status.get("sample_ok") == "1"
+                    and status.get("bias_valid") == "1"
+                    and status.get("calibrating") == "0"
+                ):
+                    return (
+                        "OK imu gyro calibration status "
+                        f"bx={status.get('bx', '?')} "
+                        f"by={status.get('by', '?')} "
+                        f"bz={status.get('bz', '?')} rad_s"
+                    )
+
+        now = time.monotonic()
+        if now >= next_status_poll:
+            await transport.send("imu status")
+            next_status_poll = now + 0.5
+
+    if last_status is None:
+        detail = "no imu status received"
+    else:
+        detail = (
+            f"ready={last_status.get('ready')} "
+            f"sample_ok={last_status.get('sample_ok')} "
+            f"bias_valid={last_status.get('bias_valid')} "
+            f"calibrating={last_status.get('calibrating')} "
+            f"read_errors={last_status.get('read_errors')}"
+        )
+    raise RuntimeError(
+        f"gyro calibration did not complete within {timeout_s:.1f}s ({detail})"
+    )
+
+
 async def prepare_imu(
     transport: BleLineTransport,
     samples: int,
@@ -67,11 +127,7 @@ async def prepare_imu(
     print(f"keep the unit still: calibrating gyro with {samples} samples ...")
     await transport.send(f"imu calibrate {samples}")
     await read_until_prefix(transport, "OK imu gyro calibration started", 3.0)
-    result = await read_until_prefix(
-        transport,
-        "OK imu gyro calibration bx=",
-        max(5.0, samples * 0.003),
-    )
+    result = await wait_for_gyro_calibration(transport, samples)
     await transport.send("attitude reset")
     await read_until_prefix(
         transport, "OK attitude reset from accelerometer", 3.0
