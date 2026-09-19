@@ -21,6 +21,10 @@ jobs:
           python tools/twtool.py help log stop
           python tools/twtool.py help log session
           python tools/twtool.py help log inspect
+          python tools/twtool.py help diag timing
+          python tools/twtool.py help diag timing-reset
+          python tools/twtool.py help diag timing-test
+          python tools/twtool.py help diag imu
           python -m tools.triwhirl_tool help log decode
           python -m compileall -q tools/triwhirl_tool
       - name: Smoke-test native TWLG tools
@@ -34,8 +38,8 @@ jobs:
           record = struct.Struct("<IfffffIHH")
           payload = b"".join(
               (
-                  record.pack(1000, 0.1, 0.2, -0.3, 0.4, 1.0, 0, 1, 123),
-                  record.pack(2000, 0.2, 0.3, -0.4, -0.5, 0.9, 0, 2, 124),
+                  record.pack(1000, 0.1, 0.2, -0.3, 0.4, 1.0, 0, 0x000F, 123),
+                  record.pack(2050, 0.2, 0.3, -0.4, -0.5, 0.9, 0, 0x000F, 124),
               )
           )
           crc = zlib.crc32(payload) & 0xFFFFFFFF
@@ -47,6 +51,20 @@ jobs:
           Path("/tmp/twtool-smoke.twlog").write_bytes(blob)
           PY
           python tools/twtool.py log inspect /tmp/twtool-smoke.twlog --json
+          python - <<'PY'
+          from pathlib import Path
+          from tools.triwhirl_tool import twlog
+
+          _, payload = twlog.read(Path("/tmp/twtool-smoke.twlog"))
+          stats = twlog.summarize(payload)
+          assert stats.dt_min_us == 1050
+          assert stats.dt_max_us == 1050
+          assert stats.dt_mean_us == 1050.0
+          assert stats.encoder_valid_records == 2
+          assert stats.wheel_rate_valid_records == 2
+          assert stats.imu_valid_records == 2
+          assert stats.attitude_valid_records == 2
+          PY
           python -m tools.triwhirl_tool log decode /tmp/twtool-smoke.twlog -o /tmp/twtool-smoke.csv
           test -s /tmp/twtool-smoke.csv
       - name: Build with native ESP-IDF
