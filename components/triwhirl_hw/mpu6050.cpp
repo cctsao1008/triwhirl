@@ -1,6 +1,8 @@
 #include "triwhirl/drivers/mpu6050.hpp"
 
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace triwhirl {
 namespace drivers {
@@ -16,6 +18,8 @@ constexpr std::uint8_t kRegWhoAmI = 0x75U;
 
 constexpr std::uint8_t kExpectedWhoAmI = 0x68U;
 constexpr int kI2cTimeoutMs = 20;
+constexpr std::uint32_t kPowerOnSettleMs = 100U;
+constexpr std::uint32_t kWakeSettleMs = 30U;
 constexpr float kGravityMps2 = 9.80665F;
 constexpr float kAccelLsbPerG = 8192.0F;  // +/-4 g
 constexpr float kGyroLsbPerDps = 32.8F;  // +/-1000 deg/s
@@ -37,37 +41,66 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
     return false;
   }
 
-  i2c_device_config_t config{};
-  config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-  config.device_address = address;
-  config.scl_speed_hz = 400000U;
-  if (i2c_master_bus_add_device(bus, &config, &device_) != ESP_OK) {
-    return false;
+  // The MPU-60X0 may not accept register traffic immediately after power-on.
+  // app_main can run quickly after reset, so give the device a deterministic
+  // startup window before probing it.
+  vTaskDelay(pdMS_TO_TICKS(kPowerOnSettleMs));
+
+  const std::uint8_t alternate = address == 0x68U ? 0x69U : 0x68U;
+  const std::uint8_t candidates[2] = {address, alternate};
+
+  for (const std::uint8_t candidate : candidates) {
+    if (i2c_master_probe(bus, candidate, kI2cTimeoutMs) != ESP_OK) {
+      continue;
+    }
+
+    i2c_device_config_t config{};
+    config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    config.device_address = candidate;
+    config.scl_speed_hz = 400000U;
+    if (i2c_master_bus_add_device(bus, &config, &device_) != ESP_OK) {
+      device_ = nullptr;
+      continue;
+    }
+
+    auto discard_device = [this]() {
+      if (device_ != nullptr) {
+        i2c_master_bus_rm_device(device_);
+        device_ = nullptr;
+      }
+    };
+
+    std::uint8_t who_am_i = 0U;
+    if (!readWhoAmI(&who_am_i) || who_am_i != kExpectedWhoAmI) {
+      discard_device();
+      continue;
+    }
+
+    // Wake the device and use the X-axis gyro PLL as the clock source.
+    if (!writeRegister(kRegPowerManagement1, 0x01U)) {
+      discard_device();
+      continue;
+    }
+
+    // The gyro needs a short settling interval after wake before its output is
+    // used for bias calibration and attitude estimation.
+    vTaskDelay(pdMS_TO_TICKS(kWakeSettleMs));
+
+    // 1 kHz sample rate with DLPF enabled, DLPF_CFG=2.
+    if (!writeRegister(kRegSampleRateDivider, 0x00U) ||
+        !writeRegister(kRegConfig, 0x02U) ||
+        // GYRO_FS_SEL=2 => +/-1000 deg/s.
+        !writeRegister(kRegGyroConfig, 0x10U) ||
+        // ACCEL_FS_SEL=1 => +/-4 g.
+        !writeRegister(kRegAccelConfig, 0x08U)) {
+      discard_device();
+      continue;
+    }
+
+    return true;
   }
 
-  std::uint8_t who_am_i = 0U;
-  if (!readWhoAmI(&who_am_i) || who_am_i != kExpectedWhoAmI) {
-    return false;
-  }
-
-  // Wake the device and use the X-axis gyro PLL as the clock source.
-  if (!writeRegister(kRegPowerManagement1, 0x01U)) {
-    return false;
-  }
-
-  // 1 kHz sample rate with DLPF enabled, DLPF_CFG=2.
-  if (!writeRegister(kRegSampleRateDivider, 0x00U) ||
-      !writeRegister(kRegConfig, 0x02U)) {
-    return false;
-  }
-
-  // GYRO_FS_SEL=2 => +/-1000 deg/s. ACCEL_FS_SEL=1 => +/-4 g.
-  if (!writeRegister(kRegGyroConfig, 0x10U) ||
-      !writeRegister(kRegAccelConfig, 0x08U)) {
-    return false;
-  }
-
-  return true;
+  return false;
 }
 
 bool Mpu6050::writeRegister(const std::uint8_t reg,
