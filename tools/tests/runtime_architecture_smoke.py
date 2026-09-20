@@ -9,8 +9,8 @@ and five symbol-renaming shims in runtime_main.cpp. A2 is removing those pieces
 incrementally. Until they are gone, CI prevents new .cpp includes, new
 symbol-renaming interception, a second application-entry owner, queue/task
 mechanics from leaking back into realtime control, UART/BLE polling from
-returning to Core 1, or the migrated read-only diagnostics from falling back to
-live realtime formatting.
+returning to Core 1, migrated read-only diagnostics from falling back to live
+realtime formatting, or migrated mutating commands from regressing to strings.
 """
 
 from __future__ import annotations
@@ -52,6 +52,17 @@ SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS = (
     'std::strcmp(line, "attitude status")',
     'std::strcmp(line, "fault status")',
     "readLatestRuntimeSnapshot(",
+)
+
+SUPERVISOR_REQUIRED_TYPED_COMMANDS = (
+    'std::strcmp(line, "motor stop")',
+    "RuntimeCommandType::kMotorStop",
+    "SupervisorInputEventType::kRuntimeCommand",
+)
+
+CONTROL_REQUIRED_TYPED_COMMANDS = (
+    "executeRuntimeCommand(",
+    "RuntimeCommandType::kMotorStop",
 )
 
 CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.cpp)"', re.MULTILINE)
@@ -133,6 +144,24 @@ def main() -> None:
             f"{missing_snapshot_commands}"
         )
 
+    missing_typed_supervisor = [
+        token for token in SUPERVISOR_REQUIRED_TYPED_COMMANDS if token not in supervisor_text
+    ]
+    if missing_typed_supervisor:
+        fail(
+            "typed supervisor command parsing regressed: "
+            f"{missing_typed_supervisor}"
+        )
+
+    missing_typed_control = [
+        token for token in CONTROL_REQUIRED_TYPED_COMMANDS if token not in control_text
+    ]
+    if missing_typed_control:
+        fail(
+            "typed realtime command execution regressed: "
+            f"{missing_typed_control}"
+        )
+
     # Keep the known debt explicit. As A2 removes an item, delete it from the
     # allow-list in the same change; the test intentionally does not require all
     # allow-listed debt to remain present.
@@ -143,6 +172,7 @@ def main() -> None:
     print("  runtime_control_queue_mechanics=isolated")
     print("  runtime_control_uart_ble_polling=absent")
     print("  supervisor_snapshot_diagnostics=attitude,fault")
+    print("  typed_runtime_commands=motor_stop")
 
 
 if __name__ == "__main__":
