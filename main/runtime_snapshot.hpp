@@ -32,6 +32,52 @@ struct RuntimeSnapshot {
   std::uint64_t timing_overruns = 0U;
   std::uint64_t timing_late_periods = 0U;
   std::uint32_t uart_tx_drop_bytes = 0U;
+
+  // Realtime-owned state copied into the same bounded snapshot so Core 0 can
+  // answer aggregate status and IMU diagnostics without touching live state.
+  std::uint8_t motor_mode = 0U;
+  float motor_vq_v = 0.0F;
+  float motor_electrical_hz = 0.0F;
+  float motor_amplitude_v = 0.0F;
+  bool motor_config_valid = false;
+  int motor_pole_pairs = 0;
+  int motor_sensor_direction = 0;
+  float motor_offset_rad = 0.0F;
+  float motor_electrical_angle_rad = 0.0F;
+
+  bool encoder_sample_valid = false;
+  std::uint16_t encoder_raw_count = 0U;
+  std::int64_t encoder_unwrapped_count = 0;
+  float encoder_angle_rad = 0.0F;
+  float encoder_unwrapped_rad = 0.0F;
+  float encoder_velocity_rad_s = 0.0F;
+  float encoder_instantaneous_velocity_rad_s = 0.0F;
+  bool encoder_velocity_valid = false;
+  std::uint32_t encoder_read_errors = 0U;
+
+  bool imu_ready = false;
+  bool imu_sample_valid = false;
+  bool imu_identity_valid = false;
+  std::uint8_t imu_who_am_i = 0U;
+  bool imu_bias_valid = false;
+  bool imu_calibrating = false;
+  float imu_ax_mps2 = 0.0F;
+  float imu_ay_mps2 = 0.0F;
+  float imu_az_mps2 = 0.0F;
+  float imu_gx_rad_s = 0.0F;
+  float imu_gy_rad_s = 0.0F;
+  float imu_gz_rad_s = 0.0F;
+  float imu_temperature_c = 0.0F;
+  float imu_bias_x_rad_s = 0.0F;
+  float imu_bias_y_rad_s = 0.0F;
+  float imu_bias_z_rad_s = 0.0F;
+  int imu_map_sin_axis = 0;
+  int imu_map_cos_axis = 1;
+  int imu_map_gyro_axis = 2;
+  int imu_map_sin_sign = 1;
+  int imu_map_cos_sign = 1;
+  int imu_map_gyro_sign = 1;
+  std::uint32_t imu_read_errors = 0U;
 };
 
 // Single-writer (Core 1) bounded publication. The implementation keeps only
