@@ -1,8 +1,10 @@
 #include "runtime_command_parser.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 namespace triwhirl::runtime {
 namespace {
@@ -12,6 +14,8 @@ constexpr std::uint32_t kDefaultGyroCalibrationSamples = 500U;
 constexpr float kDefaultCalibrationAmplitudeV = 0.6F;
 constexpr float kDefaultCalibrationElectricalHz = 0.5F;
 constexpr float kDefaultCalibrationTurns = 4.0F;
+constexpr const char* kSwingConfigUsage =
+    "ERR usage: swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n";
 
 bool commandArguments(const char* const line, const char* const command,
                       const char** const arguments) {
@@ -85,8 +89,20 @@ RuntimeCommandParseResult parseRuntimeCommand(const char* const line) {
   if (std::strcmp(line, "swing abort") == 0) {
     return commandResult(RuntimeCommandType::kSwingAbort);
   }
+  if (std::strcmp(line, "swing start") == 0) {
+    return commandResult(RuntimeCommandType::kSwingStart);
+  }
   if (std::strcmp(line, "timing reset") == 0) {
     return commandResult(RuntimeCommandType::kTimingReset);
+  }
+  if (std::strcmp(line, "timing profile on") == 0) {
+    return commandResult(RuntimeCommandType::kTimingProfileOn);
+  }
+  if (std::strcmp(line, "timing profile off") == 0) {
+    return commandResult(RuntimeCommandType::kTimingProfileOff);
+  }
+  if (std::strcmp(line, "timing profile reset") == 0) {
+    return commandResult(RuntimeCommandType::kTimingProfileReset);
   }
   if (std::strcmp(line, "fault clear") == 0) {
     return commandResult(RuntimeCommandType::kFaultClear);
@@ -206,6 +222,58 @@ RuntimeCommandParseResult parseRuntimeCommand(const char* const line) {
     result.command.payload.imu_map.accel_sin_sign = std::atoi(sin_sign_token);
     result.command.payload.imu_map.accel_cos_sign = std::atoi(cos_sign_token);
     result.command.payload.imu_map.gyro_sign = std::atoi(gyro_sign_token);
+    return result;
+  }
+
+  if (commandArguments(line, "swing config", &arguments)) {
+    char copy[kCommandTextBytes]{};
+    std::snprintf(copy, sizeof(copy), "%s", arguments);
+    char* cursor = copy;
+    char* target = nextToken(&cursor);
+    char* pump_low = nextToken(&cursor);
+    char* pump_high = nextToken(&cursor);
+    char* capture = nextToken(&cursor);
+    char* probe_exit = nextToken(&cursor);
+    char* rearm = nextToken(&cursor);
+    char* probe_ms = nextToken(&cursor);
+    char* rate_switch = nextToken(&cursor);
+    char* polarity = nextToken(&cursor);
+    char* vertex_a = nextToken(&cursor);
+    char* max_s = nextToken(&cursor);
+    if (target == nullptr || pump_low == nullptr || pump_high == nullptr ||
+        capture == nullptr || probe_exit == nullptr || rearm == nullptr ||
+        probe_ms == nullptr || rate_switch == nullptr || polarity == nullptr ||
+        vertex_a == nullptr || max_s == nullptr || nextToken(&cursor) != nullptr) {
+      return usageError(kSwingConfigUsage);
+    }
+
+    const double probe_ms_value = std::strtod(probe_ms, nullptr);
+    const double max_s_value = std::strtod(max_s, nullptr);
+    if (!std::isfinite(probe_ms_value) || probe_ms_value <= 0.0 ||
+        probe_ms_value >
+            static_cast<double>(std::numeric_limits<std::uint32_t>::max()) * 1.0e-3 ||
+        !std::isfinite(max_s_value) || max_s_value <= 0.0 ||
+        max_s_value >
+            static_cast<double>(std::numeric_limits<std::uint32_t>::max()) * 1.0e-6) {
+      return usageError(kSwingConfigUsage);
+    }
+
+    auto result = commandResult(RuntimeCommandType::kSwingConfig);
+    auto& config = result.command.payload.swing_config;
+    config.target_captures =
+        static_cast<std::uint32_t>(std::strtoul(target, nullptr, 10));
+    config.pump_v_low = std::strtof(pump_low, nullptr);
+    config.pump_v_high = std::strtof(pump_high, nullptr);
+    config.capture_deg = std::strtof(capture, nullptr);
+    config.probe_exit_deg = std::strtof(probe_exit, nullptr);
+    config.rearm_deg = std::strtof(rearm, nullptr);
+    config.probe_duration_us =
+        static_cast<std::uint32_t>(std::llround(probe_ms_value * 1000.0));
+    config.rate_switch_rad_s = std::strtof(rate_switch, nullptr);
+    config.pump_polarity = std::atoi(polarity);
+    config.vertex_a_deg = std::strtof(vertex_a, nullptr);
+    config.max_duration_us =
+        static_cast<std::uint32_t>(std::llround(max_s_value * 1000000.0));
     return result;
   }
 
