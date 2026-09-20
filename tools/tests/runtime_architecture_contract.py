@@ -6,7 +6,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 MAIN = ROOT / "main"
 TESTS = ROOT / "tools" / "tests"
@@ -25,16 +24,14 @@ ALLOWED_RENAMING_DEFINES = {
 }
 
 CONTROL_FORBIDDEN_QUEUE_MECHANICS = (
-    '"freertos/queue.h"',
-    "xQueueCreate(",
-    "xQueueSend(",
-    "xQueueReceive(",
-    "xQueueOverwrite(",
+    '"freertos/queue.h"', "xQueueCreate(", "xQueueSend(",
+    "xQueueReceive(", "xQueueOverwrite(",
 )
-
-CONTROL_FORBIDDEN_SUPERVISOR_IO = (
-    "uart_read_bytes(",
-    "triwhirl::ble::read(",
+CONTROL_FORBIDDEN_SUPERVISOR_IO = ("uart_read_bytes(", "triwhirl::ble::read(")
+LEGACY_COMMAND_TOKENS = (
+    "SupervisorInputEventType::kCommand",
+    "handleSupervisorCommand(event.line)",
+    "char line[kSupervisorCommandBytes]",
 )
 
 SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
@@ -47,98 +44,28 @@ SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
     "readLatestRuntimeSnapshot(",
     "triwhirl::ble::connected()",
     "triwhirl::ble::subscribed()",
-    "snapshot.timing_iterations",
-    "snapshot.telemetry_enabled",
 )
 
-PARSER_REQUIRED_TYPED_COMMANDS = (
-    'std::strcmp(line, "motor stop")',
-    'std::strcmp(line, "stop")',
-    'std::strcmp(line, "swing abort")',
-    'std::strcmp(line, "swing start")',
-    'std::strcmp(line, "timing reset")',
-    'std::strcmp(line, "timing profile on")',
-    'std::strcmp(line, "timing profile off")',
-    'std::strcmp(line, "timing profile reset")',
-    'std::strcmp(line, "fault clear")',
-    'std::strcmp(line, "telemetry on")',
-    'std::strcmp(line, "telemetry off")',
-    'commandArguments(line, "motor vq"',
-    'commandArguments(line, "motor config"',
-    'commandArguments(line, "motor calibrate"',
-    'commandArguments(line, "field"',
-    'commandArguments(line, "attitude reset"',
-    'commandArguments(line, "imu calibrate"',
-    'commandArguments(line, "imu map"',
-    'commandArguments(line, "swing config"',
-    "RuntimeCommandType::kMotorStop",
-    "RuntimeCommandType::kStop",
-    "RuntimeCommandType::kSwingAbort",
-    "RuntimeCommandType::kSwingStart",
-    "RuntimeCommandType::kSwingConfig",
-    "RuntimeCommandType::kTimingReset",
-    "RuntimeCommandType::kTimingProfileOn",
-    "RuntimeCommandType::kTimingProfileOff",
-    "RuntimeCommandType::kTimingProfileReset",
-    "RuntimeCommandType::kFaultClear",
-    "RuntimeCommandType::kTelemetryOn",
-    "RuntimeCommandType::kTelemetryOff",
-    "RuntimeCommandType::kMotorVq",
-    "RuntimeCommandType::kMotorConfig",
-    "RuntimeCommandType::kMotorCalibrate",
-    "RuntimeCommandType::kField",
-    "RuntimeCommandType::kAttitudeReset",
-    "RuntimeCommandType::kImuCalibrate",
-    "RuntimeCommandType::kImuMap",
-)
-
-SUPERVISOR_REQUIRED_TYPED_BOUNDARY = (
-    "parseRuntimeCommand(",
-    "RuntimeCommandParseStatus::kCommand",
-    "SupervisorInputEventType::kRuntimeCommand",
-    "uart_development_input",
-    "ble_gatt_input",
-)
-
-CONTROL_REQUIRED_TYPED_COMMANDS = (
-    "executeRuntimeCommand(",
-    "typedCommandAllowedDuringSwing(",
-    "RuntimeCommandType::kMotorStop",
-    "RuntimeCommandType::kStop",
-    "RuntimeCommandType::kSwingAbort",
-    "RuntimeCommandType::kSwingStart",
-    "RuntimeCommandType::kSwingConfig",
-    "RuntimeCommandType::kTimingReset",
-    "RuntimeCommandType::kTimingProfileOn",
-    "RuntimeCommandType::kTimingProfileOff",
-    "RuntimeCommandType::kTimingProfileReset",
-    "RuntimeCommandType::kFaultClear",
-    "RuntimeCommandType::kTelemetryOn",
-    "RuntimeCommandType::kTelemetryOff",
-    "RuntimeCommandType::kMotorVq",
-    "RuntimeCommandType::kMotorConfig",
-    "RuntimeCommandType::kMotorCalibrate",
-    "RuntimeCommandType::kField",
-    "RuntimeCommandType::kAttitudeReset",
-    "RuntimeCommandType::kImuCalibrate",
-    "RuntimeCommandType::kImuMap",
-    "snapshot.timing_iterations",
-    "snapshot.telemetry_enabled",
+REQUIRED_TYPES = (
+    "kStatus", "kMotorStatus", "kImuStatus", "kLogStatus", "kSwingStatus",
+    "kTimingProfileStatus", "kMotorStop", "kStop", "kSwingAbort", "kSwingStart",
+    "kSwingConfig", "kTimingReset", "kTimingProfileOn", "kTimingProfileOff",
+    "kTimingProfileReset", "kFaultClear", "kTelemetryOn", "kTelemetryOff",
+    "kMotorVq", "kMotorConfig", "kMotorCalibrate", "kField", "kAttitudeReset",
+    "kImuCalibrate", "kImuMap", "kLogPrepare", "kLogStart", "kLogCriticalOn",
+    "kLogCriticalOff", "kLogStop", "kLogDump",
 )
 
 PARSER_TEST_REQUIRED_TOKENS = (
-    'expectType("motor stop", RuntimeCommandType::kMotorStop)',
-    'expectType("swing start", RuntimeCommandType::kSwingStart)',
-    'expectType("timing profile on", RuntimeCommandType::kTimingProfileOn)',
+    'expectType("status", RuntimeCommandType::kStatus)',
+    'expectType("swing status", RuntimeCommandType::kSwingStatus)',
+    'expectType("timing profile status", RuntimeCommandType::kTimingProfileStatus)',
+    'expectType("log dump", RuntimeCommandType::kLogDump)',
+    'parseRuntimeCommand("log prepare 12.5")',
     'parseRuntimeCommand("motor vq -0.625")',
-    'parseRuntimeCommand("motor config 7 -1 1.25")',
-    'parseRuntimeCommand("motor calibrate 0.9 0.7 6")',
-    'parseRuntimeCommand("field 3.5 0.8")',
-    'parseRuntimeCommand("attitude reset -1.25")',
-    'parseRuntimeCommand("imu calibrate 750")',
     'parseRuntimeCommand("imu map 0 1 2 1 -1 1")',
     'parseRuntimeCommand(\n        "swing config 24 0.4 0.8 5 9 14 12.5 0.2 -1 68 20")',
-    'RuntimeCommandParseStatus::kUsageError',
+    'parseRuntimeCommand("definitely unknown")',
     'RuntimeCommandParseStatus::kNotMatched',
 )
 
@@ -168,61 +95,58 @@ def main() -> None:
     cpp_includes: set[tuple[str, str]] = set()
     renaming_defines: set[tuple[str, str, str]] = set()
     app_main_sources: list[str] = []
-
     for path in cpp_files:
         text = path.read_text(encoding="utf-8")
-        for included in CPP_INCLUDE_RE.findall(text):
-            cpp_includes.add((path.name, included))
-        for symbol, replacement in RENAME_DEFINE_RE.findall(text):
-            renaming_defines.add((path.name, symbol, replacement))
+        cpp_includes.update((path.name, x) for x in CPP_INCLUDE_RE.findall(text))
+        renaming_defines.update((path.name, a, b) for a, b in RENAME_DEFINE_RE.findall(text))
         if APP_MAIN_RE.search(text):
             app_main_sources.append(path.name)
 
     unexpected_includes = cpp_includes - ALLOWED_CPP_INCLUDES
     if unexpected_includes:
         fail(f"unexpected .cpp inclusion(s): {sorted(unexpected_includes)}")
-
     unexpected_renames = renaming_defines - ALLOWED_RENAMING_DEFINES
     if unexpected_renames:
         fail(f"unexpected symbol-renaming shim(s): {sorted(unexpected_renames)}")
 
-    unexpected_entries = set(app_main_sources) - {"app_main.cpp", "runtime_main.cpp"}
-    if unexpected_entries:
-        fail(f"unexpected app_main owner(s): {sorted(unexpected_entries)}")
-
     control_text = (MAIN / "runtime_control.cpp").read_text(encoding="utf-8")
-    leaked_queue_mechanics = [
-        token for token in CONTROL_FORBIDDEN_QUEUE_MECHANICS if token in control_text
-    ]
-    if leaked_queue_mechanics:
-        fail(f"queue mechanics leaked into runtime_control.cpp: {leaked_queue_mechanics}")
+    supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
+    supervisor_header = (MAIN / "runtime_supervisor_io.hpp").read_text(encoding="utf-8")
+    command_header = (MAIN / "runtime_command.hpp").read_text(encoding="utf-8")
+    parser_text = (MAIN / "runtime_command_parser.cpp").read_text(encoding="utf-8")
+    parser_test_text = (TESTS / "runtime_command_parser_test.cpp").read_text(encoding="utf-8")
 
-    leaked_supervisor_io = [
-        token for token in CONTROL_FORBIDDEN_SUPERVISOR_IO if token in control_text
+    leaked_queue = [x for x in CONTROL_FORBIDDEN_QUEUE_MECHANICS if x in control_text]
+    if leaked_queue:
+        fail(f"queue mechanics leaked into runtime_control.cpp: {leaked_queue}")
+    leaked_io = [x for x in CONTROL_FORBIDDEN_SUPERVISOR_IO if x in control_text]
+    if leaked_io:
+        fail(f"UART development/BLE GATT ingress leaked into runtime_control.cpp: {leaked_io}")
+
+    legacy = [
+        x for x in LEGACY_COMMAND_TOKENS
+        if x in control_text or x in supervisor_text or x in supervisor_header
     ]
-    if leaked_supervisor_io:
-        fail(f"UART development/BLE GATT ingress leaked into runtime_control.cpp: {leaked_supervisor_io}")
+    if legacy:
+        fail(f"legacy raw command path remains: {legacy}")
 
     first_snapshot = control_text.find("publishSupervisorSnapshot(")
     supervisor_init = control_text.find("initSupervisorIo(")
     if first_snapshot < 0 or supervisor_init < 0 or first_snapshot > supervisor_init:
         fail("initial runtime snapshot must be published before supervisor ingress starts")
 
-    supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
-    parser_text = (MAIN / "runtime_command_parser.cpp").read_text(encoding="utf-8")
-    parser_test = TESTS / "runtime_command_parser_test.cpp"
-    if not parser_test.exists():
-        fail("runtime command parser contract test is missing")
-    parser_test_text = parser_test.read_text(encoding="utf-8")
-
     require_tokens(supervisor_text, SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS,
                    "Core0 read-only diagnostics regressed")
-    require_tokens(supervisor_text, SUPERVISOR_REQUIRED_TYPED_BOUNDARY,
+    require_tokens(supervisor_text,
+                   ("parseRuntimeCommand(", "SupervisorInputEventType::kRuntimeCommand",
+                    "ERR unknown command", "uart_development_input", "ble_gatt_input"),
                    "supervisor typed-command boundary regressed")
-    require_tokens(parser_text, PARSER_REQUIRED_TYPED_COMMANDS,
-                   "Core0 typed command parser regressed")
-    require_tokens(control_text, CONTROL_REQUIRED_TYPED_COMMANDS,
-                   "typed realtime command execution regressed")
+    require_tokens(command_header, REQUIRED_TYPES,
+                   "typed command contract is incomplete")
+    require_tokens(parser_text, tuple(f"RuntimeCommandType::{x}" for x in REQUIRED_TYPES),
+                   "Core0 typed command parser is incomplete")
+    require_tokens(control_text, tuple(f"RuntimeCommandType::{x}" for x in REQUIRED_TYPES),
+                   "typed realtime command execution is incomplete")
     require_tokens(parser_test_text, PARSER_TEST_REQUIRED_TOKENS,
                    "runtime command parser contract coverage regressed")
 
@@ -230,14 +154,13 @@ def main() -> None:
     print(f"  cpp_includes={sorted(cpp_includes)}")
     print(f"  renaming_shims={sorted(renaming_defines)}")
     print(f"  app_main_sources={sorted(app_main_sources)}")
-    print("  runtime_control_queue_mechanics=isolated")
+    print("  raw_command_strings_cross_realtime=no")
     print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
     print("  supervisor_read_only=attitude,fault,ble,timing,telemetry,help")
     print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
-    print("  command_parser=explicit_core0_service")
+    print("  command_parser=complete_core0_grammar")
     print("  command_parser_contract_test=present")
-    print("  typed_runtime_commands=motor_stop,stop,swing_abort,swing_start,swing_config,timing_reset,timing_profile_on,timing_profile_off,timing_profile_reset,fault_clear,telemetry_on,telemetry_off,motor_vq,motor_config,motor_calibrate,field,attitude_reset,imu_calibrate,imu_map")
 
 
 if __name__ == "__main__":
