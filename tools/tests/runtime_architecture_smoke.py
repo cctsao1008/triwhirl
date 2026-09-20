@@ -8,8 +8,9 @@ The active firmware still has one explicitly tolerated source-inclusion chain:
 and five symbol-renaming shims in runtime_main.cpp. A2 is removing those pieces
 incrementally. Until they are gone, CI prevents new .cpp includes, new
 symbol-renaming interception, a second application-entry owner, queue/task
-mechanics from leaking back into realtime control, or UART/BLE byte polling from
-returning to the realtime source.
+mechanics from leaking back into realtime control, UART/BLE polling from
+returning to Core 1, or the migrated read-only diagnostics from falling back to
+live realtime formatting.
 """
 
 from __future__ import annotations
@@ -42,9 +43,15 @@ CONTROL_FORBIDDEN_QUEUE_MECHANICS = (
     "xQueueOverwrite(",
 )
 
-CONTROL_FORBIDDEN_TRANSPORT_IO = (
+CONTROL_FORBIDDEN_SUPERVISOR_IO = (
     "uart_read_bytes(",
     "triwhirl::ble::read(",
+)
+
+SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS = (
+    'std::strcmp(line, "attitude status")',
+    'std::strcmp(line, "fault status")',
+    "readLatestRuntimeSnapshot(",
 )
 
 CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.cpp)"', re.MULTILINE)
@@ -101,26 +108,30 @@ def main() -> None:
     ]
     if leaked_queue_mechanics:
         fail(
-            "queue mechanics leaked into runtime_control.cpp: "
+            "encoder/supervisor queue mechanics leaked into runtime_control.cpp: "
             f"{leaked_queue_mechanics}"
         )
 
-    leaked_transport_io = [
-        token for token in CONTROL_FORBIDDEN_TRANSPORT_IO if token in control_text
+    leaked_supervisor_io = [
+        token for token in CONTROL_FORBIDDEN_SUPERVISOR_IO if token in control_text
     ]
-    if leaked_transport_io:
+    if leaked_supervisor_io:
         fail(
-            "UART/BLE input polling leaked into runtime_control.cpp: "
-            f"{leaked_transport_io}"
+            "UART/BLE polling leaked into runtime_control.cpp: "
+            f"{leaked_supervisor_io}"
         )
 
-    supervisor_io = MAIN / "runtime_supervisor_io.cpp"
-    if not supervisor_io.exists():
-        fail("runtime_supervisor_io.cpp is missing")
-    supervisor_text = supervisor_io.read_text(encoding="utf-8")
-    for required in ("uart_read_bytes(", "triwhirl::ble::read(", "xQueueCreate("):
-        if required not in supervisor_text:
-            fail(f"supervisor I/O boundary is missing expected primitive: {required}")
+    supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
+    missing_snapshot_commands = [
+        token
+        for token in SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS
+        if token not in supervisor_text
+    ]
+    if missing_snapshot_commands:
+        fail(
+            "snapshot-backed read-only diagnostics regressed: "
+            f"{missing_snapshot_commands}"
+        )
 
     # Keep the known debt explicit. As A2 removes an item, delete it from the
     # allow-list in the same change; the test intentionally does not require all
@@ -130,7 +141,8 @@ def main() -> None:
     print(f"  renaming_shims={sorted(renaming_defines)}")
     print(f"  app_main_sources={sorted(app_main_sources)}")
     print("  runtime_control_queue_mechanics=isolated")
-    print("  runtime_control_transport_io=isolated")
+    print("  runtime_control_uart_ble_polling=absent")
+    print("  supervisor_snapshot_diagnostics=attitude,fault")
 
 
 if __name__ == "__main__":
