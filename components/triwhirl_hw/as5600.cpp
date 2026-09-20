@@ -1,6 +1,9 @@
 #include "triwhirl/drivers/as5600.hpp"
 
+#include <algorithm>
+
 #include "esp_err.h"
+#include "esp_timer.h"
 
 namespace triwhirl {
 namespace drivers {
@@ -12,6 +15,26 @@ constexpr std::uint8_t kStatusMagnetTooWeak = 1U << 4;
 constexpr std::uint8_t kStatusMagnetTooStrong = 1U << 3;
 constexpr int kI2cTimeoutMs = 20;
 constexpr std::uint32_t kI2cClockHz = 1000000U;  // AS5600 Fast-mode Plus max.
+
+void recordTiming(std::uint64_t* const count,
+                  std::uint64_t* const total_us,
+                  std::uint32_t* const min_us,
+                  std::uint32_t* const max_us,
+                  const std::uint32_t elapsed_us) {
+  if (count == nullptr || total_us == nullptr || min_us == nullptr ||
+      max_us == nullptr) {
+    return;
+  }
+  ++(*count);
+  *total_us += elapsed_us;
+  if (*count == 1U) {
+    *min_us = elapsed_us;
+    *max_us = elapsed_us;
+    return;
+  }
+  *min_us = std::min(*min_us, elapsed_us);
+  *max_us = std::max(*max_us, elapsed_us);
+}
 }  // namespace
 
 bool As5600::init(const i2c_master_bus_handle_t bus, const std::uint8_t address) {
@@ -22,7 +45,16 @@ bool As5600::init(const i2c_master_bus_handle_t bus, const std::uint8_t address)
   config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
   config.device_address = address;
   config.scl_speed_hz = kI2cClockHz;
+  raw_angle_pointer_valid_ = false;
   return i2c_master_bus_add_device(bus, &config, &device_) == ESP_OK;
+}
+
+bool As5600::selectRegister(const std::uint8_t reg) {
+  if (device_ == nullptr) {
+    return false;
+  }
+  raw_angle_pointer_valid_ = false;
+  return i2c_master_transmit(device_, &reg, 1U, kI2cTimeoutMs) == ESP_OK;
 }
 
 bool As5600::readRegisters(const std::uint8_t first_register,
@@ -31,20 +63,49 @@ bool As5600::readRegisters(const std::uint8_t first_register,
   if (device_ == nullptr || data == nullptr || length == 0U) {
     return false;
   }
+  // Any addressed register transaction changes the AS5600 internal address
+  // pointer. The next fast RAW ANGLE read therefore has to seed 0x0C again.
+  raw_angle_pointer_valid_ = false;
   return i2c_master_transmit_receive(device_, &first_register, 1U, data, length,
                                      kI2cTimeoutMs) == ESP_OK;
 }
 
 bool As5600::readRawAngle(std::uint16_t* const raw_count) {
-  if (raw_count == nullptr) {
+  if (raw_count == nullptr || device_ == nullptr) {
     return false;
   }
+
+  const std::int64_t begin_us =
+      timing_profile_enabled_ ? esp_timer_get_time() : 0;
+
+  // The AS5600 RAW ANGLE high/low registers implement a special continuous
+  // read mode: after the address pointer is seeded to 0x0C, reading the low
+  // byte wraps the pointer back to 0x0C. Avoid re-transmitting the register
+  // address on every 1 kHz sample and use a receive-only transaction instead.
+  if (!raw_angle_pointer_valid_) {
+    if (!selectRegister(kRawAngleHighRegister)) {
+      if (timing_profile_enabled_) {
+        recordRawTiming(static_cast<std::uint32_t>(esp_timer_get_time() - begin_us));
+      }
+      return false;
+    }
+    raw_angle_pointer_valid_ = true;
+  }
+
   std::uint8_t data[2]{};
-  if (!readRegisters(kRawAngleHighRegister, data, sizeof(data))) {
+  if (i2c_master_receive(device_, data, sizeof(data), kI2cTimeoutMs) != ESP_OK) {
+    raw_angle_pointer_valid_ = false;
+    if (timing_profile_enabled_) {
+      recordRawTiming(static_cast<std::uint32_t>(esp_timer_get_time() - begin_us));
+    }
     return false;
   }
+
   *raw_count = static_cast<std::uint16_t>(
       (static_cast<std::uint16_t>(data[0] & 0x0FU) << 8U) | data[1]);
+  if (timing_profile_enabled_) {
+    recordRawTiming(static_cast<std::uint32_t>(esp_timer_get_time() - begin_us));
+  }
   return true;
 }
 
@@ -52,8 +113,15 @@ bool As5600::readStatus(As5600Status* const status) {
   if (status == nullptr) {
     return false;
   }
+  const std::int64_t begin_us =
+      timing_profile_enabled_ ? esp_timer_get_time() : 0;
   std::uint8_t raw = 0U;
-  if (!readRegisters(kStatusRegister, &raw, 1U)) {
+  const bool ok = readRegisters(kStatusRegister, &raw, 1U);
+  if (timing_profile_enabled_) {
+    recordStatusTiming(
+        static_cast<std::uint32_t>(esp_timer_get_time() - begin_us));
+  }
+  if (!ok) {
     return false;
   }
   status->raw = raw;
@@ -61,6 +129,30 @@ bool As5600::readStatus(As5600Status* const status) {
   status->magnet_too_weak = (raw & kStatusMagnetTooWeak) != 0U;
   status->magnet_too_strong = (raw & kStatusMagnetTooStrong) != 0U;
   return true;
+}
+
+void As5600::setTimingProfileEnabled(const bool enabled) {
+  timing_profile_enabled_ = enabled;
+}
+
+void As5600::resetTimingProfile() {
+  timing_stats_ = {};
+}
+
+As5600TimingStats As5600::timingProfile() const {
+  return timing_stats_;
+}
+
+void As5600::recordRawTiming(const std::uint32_t elapsed_us) {
+  recordTiming(&timing_stats_.raw_reads, &timing_stats_.raw_total_us,
+               &timing_stats_.raw_min_us, &timing_stats_.raw_max_us,
+               elapsed_us);
+}
+
+void As5600::recordStatusTiming(const std::uint32_t elapsed_us) {
+  recordTiming(&timing_stats_.status_reads, &timing_stats_.status_total_us,
+               &timing_stats_.status_min_us, &timing_stats_.status_max_us,
+               elapsed_us);
 }
 
 }  // namespace drivers
