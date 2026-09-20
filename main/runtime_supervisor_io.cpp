@@ -59,6 +59,10 @@ void publishSupervisorHandled() {
   publishEvent(event);
 }
 
+void writeRuntimeSnapshotUnavailable() {
+  writeText("ERR runtime snapshot unavailable\r\n");
+}
+
 bool handleSupervisorReadOnlyCommand(const char* const line) {
   if (line == nullptr) {
     return false;
@@ -85,13 +89,15 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
 
   const bool attitude_status = std::strcmp(line, "attitude status") == 0;
   const bool fault_status = std::strcmp(line, "fault status") == 0;
-  if (!attitude_status && !fault_status) {
+  const bool timing_status = std::strcmp(line, "timing status") == 0;
+  const bool telemetry_status = std::strcmp(line, "telemetry") == 0;
+  if (!attitude_status && !fault_status && !timing_status && !telemetry_status) {
     return false;
   }
 
   RuntimeSnapshot snapshot{};
   if (!readLatestRuntimeSnapshot(&snapshot)) {
-    writeText("ERR runtime snapshot unavailable\r\n");
+    writeRuntimeSnapshotUnavailable();
   } else if (attitude_status) {
     char buffer[320];
     const int length = std::snprintf(
@@ -111,7 +117,7 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
                                     : sizeof(buffer) - 1U;
       writeBytes(buffer, count);
     }
-  } else {
+  } else if (fault_status) {
     char buffer[128];
     const auto first_fault =
         static_cast<triwhirl::SafetyFault>(snapshot.safety_first_fault);
@@ -127,6 +133,32 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
                                     : sizeof(buffer) - 1U;
       writeBytes(buffer, count);
     }
+  } else if (timing_status) {
+    char buffer[384];
+    const int length = std::snprintf(
+        buffer, sizeof(buffer),
+        "timing,target_us=%lu,hard_period_us=%lu,iterations=%llu,last_exec_us=%lu,max_exec_us=%lu,min_period_us=%lu,max_period_us=%lu,overruns=%llu,late_periods=%llu,uart_tx_drop_bytes=%lu,ble_rx_drop_bytes=%lu,ble_tx_drop_bytes=%lu\r\n",
+        static_cast<unsigned long>(snapshot.timing_target_us),
+        static_cast<unsigned long>(snapshot.timing_hard_period_us),
+        static_cast<unsigned long long>(snapshot.timing_iterations),
+        static_cast<unsigned long>(snapshot.timing_last_exec_us),
+        static_cast<unsigned long>(snapshot.timing_max_exec_us),
+        static_cast<unsigned long>(snapshot.timing_min_period_us),
+        static_cast<unsigned long>(snapshot.timing_max_period_us),
+        static_cast<unsigned long long>(snapshot.timing_overruns),
+        static_cast<unsigned long long>(snapshot.timing_late_periods),
+        static_cast<unsigned long>(snapshot.uart_tx_drop_bytes),
+        static_cast<unsigned long>(triwhirl::ble::rxDroppedBytes()),
+        static_cast<unsigned long>(triwhirl::ble::txDroppedBytes()));
+    if (length > 0) {
+      const std::size_t count = static_cast<std::size_t>(length) < sizeof(buffer)
+                                    ? static_cast<std::size_t>(length)
+                                    : sizeof(buffer) - 1U;
+      writeBytes(buffer, count);
+    }
+  } else {
+    writeText(snapshot.telemetry_enabled ? "telemetry=on\r\n"
+                                         : "telemetry=off\r\n");
   }
 
   publishSupervisorHandled();
