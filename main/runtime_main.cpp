@@ -11,6 +11,7 @@
 #undef app_main
 
 #include "freertos/queue.h"
+#include "runtime_control.hpp"
 #include "triwhirl/swing_id.hpp"
 
 namespace {
@@ -622,74 +623,6 @@ void recordSwingRuntimeLog(const std::uint32_t now_us) {
   runtime_logger.record(record);
 }
 
-void swingControlTask(void*) {
-  TickType_t last_wake = xTaskGetTickCount();
-  while (true) {
-    const std::int64_t start_us = esp_timer_get_time();
-    const std::uint32_t loop_us = static_cast<std::uint32_t>(start_us);
-    const bool profile = runtime_timing_profile.enabled;
-    std::int64_t stage_us = start_us;
-
-    updateEncoder(loop_us);
-    if (profile) {
-      const std::int64_t now = esp_timer_get_time();
-      recordRuntimeTimingStage(RuntimeTimingStage::kEncoder, stage_us, now);
-      stage_us = now;
-    }
-
-    updateImu(loop_us);
-    if (profile) {
-      const std::int64_t now = esp_timer_get_time();
-      recordRuntimeTimingStage(RuntimeTimingStage::kImuAttitude, stage_us, now);
-      stage_us = now;
-    }
-
-    evaluateSafety(start_us);
-    updateSwingIdentification(loop_us);
-    if (profile) {
-      const std::int64_t now = esp_timer_get_time();
-      recordRuntimeTimingStage(RuntimeTimingStage::kSafetySwing, stage_us, now);
-      stage_us = now;
-    }
-
-    updateMotor(loop_us);
-    if (profile) {
-      const std::int64_t now = esp_timer_get_time();
-      recordRuntimeTimingStage(RuntimeTimingStage::kMotor, stage_us, now);
-      stage_us = now;
-    }
-
-    recordSwingRuntimeLog(loop_us);
-    finalizeSwingLogIfPending();
-    if (profile) {
-      const std::int64_t now = esp_timer_get_time();
-      recordRuntimeTimingStage(RuntimeTimingStage::kLog, stage_us, now);
-      stage_us = now;
-    }
-
-    if ((loop_us - last_supervisor_console_poll_us) >=
-        kSupervisorConsolePollPeriodUs) {
-      last_supervisor_console_poll_us = loop_us;
-      pollSupervisorConsole();
-    }
-    finalizeSwingLogIfPending();
-    if (profile) {
-      const std::int64_t now = esp_timer_get_time();
-      recordRuntimeTimingStage(RuntimeTimingStage::kConsole, stage_us, now);
-      stage_us = now;
-    }
-
-    emitTelemetry(loop_us);
-    const std::int64_t end_us = esp_timer_get_time();
-    if (profile) {
-      recordRuntimeTimingStage(RuntimeTimingStage::kTelemetry, stage_us, end_us);
-      recordRuntimeTimingStage(RuntimeTimingStage::kLoop, start_us, end_us);
-    }
-    updateTimingStats(start_us, end_us);
-    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1));
-  }
-}
-
 void printSwingHelp() {
   consoleWrite("  swing status\r\n");
   consoleWrite("  swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n");
@@ -782,7 +715,8 @@ extern "C" void app_main(void) {
   printSwingHelp();
   printPrompt();
 
-  if (xTaskCreatePinnedToCore(swingControlTask, "triwhirl_control", 8192, nullptr,
+  if (xTaskCreatePinnedToCore(triwhirl::runtime::realtimeControlTask,
+                              "triwhirl_control", 8192, nullptr,
                               configMAX_PRIORITIES - 2, nullptr, 1) != pdPASS) {
     safety_latch.trip(SafetyFault::kStartup);
     stopMotor();
