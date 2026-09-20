@@ -1,11 +1,9 @@
-// Parallel sensor-acquisition wrapper for the established runtime.
+// Parallel sensor-acquisition runtime for the established supervisor/swing path.
 //
-// Keep runtime_main.cpp as the single source of the supervisor/swing runtime,
-// but substitute the control task created by app_main. The replacement task
-// starts the AS5600 transaction on core 0 while core 1 performs the blocking
-// MPU6050 transaction and attitude update. The two sensors already live on
-// independent ESP32 I2C controllers, so their bus time can overlap without
-// moving realtime control authority off the ESP32.
+// The replacement control task starts the AS5600 transaction on core 0 while
+// core 1 performs the blocking MPU6050 transaction and attitude update. The two
+// sensors already live on independent ESP32 I2C controllers, so their bus time
+// can overlap without moving realtime control authority off the ESP32.
 
 #include <cstdint>
 #include <cstring>
@@ -17,6 +15,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "runtime_release.hpp"
 
 namespace {
 
@@ -48,8 +47,6 @@ void createI2cBusPinnedTask(void* opaque) {
   auto* context = static_cast<I2cBusCreateContext*>(opaque);
   if (context != nullptr && context->config != nullptr &&
       context->output != nullptr) {
-    // This call intentionally refers to the real ESP-IDF API. The preprocessor
-    // interception below is not active while this helper is compiled.
     context->result = i2c_new_master_bus(context->config, context->output);
   }
   if (context != nullptr && context->done != nullptr) {
@@ -98,14 +95,19 @@ esp_err_t triwhirlI2cNewMasterBusIntercept(
 
 }  // namespace
 
-// runtime_main.cpp creates several tasks and both I2C buses. Intercept only the
-// task named "triwhirl_control" and bind each I2C bus allocation to the core
-// which services that sensor in the parallel runtime.
+// runtime_main.cpp still owns the supervisor/swing runtime in this first
+// behavior-preserving refactor slice. Intercept only the task named
+// "triwhirl_control" and bind each I2C bus allocation to the core which services
+// that sensor. The GPTimer release path is now an explicit API call rather than
+// another source-inclusion/macro layer.
 #define xTaskCreatePinnedToCore triwhirlCreatePinnedTaskIntercept
 #define i2c_new_master_bus triwhirlI2cNewMasterBusIntercept
 #include "runtime_main.cpp"
 #undef i2c_new_master_bus
 #undef xTaskCreatePinnedToCore
+
+static_assert(triwhirl::runtime::kRealtimeReleasePeriodUs == kControlPeriodUs,
+              "GPTimer release period must match control period");
 
 namespace {
 
@@ -255,10 +257,6 @@ void noteEncoderMiss() {
         encoder_parallel_consecutive_misses;
   }
 
-  // A single scheduling miss keeps the last coherent wheel state for one
-  // control period. The next fresh sample naturally spans the longer dt in
-  // WheelKinematics. Two consecutive misses invalidate the encoder and let the
-  // existing motor safety path stop FOC instead of reacting to one transient.
   if (encoder_parallel_consecutive_misses >= kEncoderConsecutiveMissLimit) {
     encoder_sample_valid = false;
   }
@@ -274,10 +272,6 @@ void encoderAcquisitionTask(void*) {
     EncoderAcquisitionResult result{};
     result.sequence = request.sequence;
     result.ok = encoder.readRawAngle(&result.raw_count);
-
-    // The result queue has length one. Keep the newest completed transaction;
-    // the sequence number lets the control task reject a stale completion if
-    // core 0 was ever delayed long enough to cross a control iteration.
     xQueueOverwrite(encoder_result_queue, &result);
   }
 }
@@ -289,9 +283,6 @@ bool initParallelEncoderAcquisition() {
     return false;
   }
 
-  // The worker blocks on its queue or I2C transaction almost all the time, so
-  // give dispatch latency precedence over lower-priority BLE/logger work on
-  // core 0 without consuming CPU while idle.
   return xTaskCreatePinnedToCore(
              encoderAcquisitionTask, "triwhirl_encoder", 4096, nullptr,
              configMAX_PRIORITIES - 1, &encoder_acquisition_task, 0) == pdPASS;
@@ -381,9 +372,6 @@ void triwhirlParallelControlTask(void*) {
       recordParallelPeriod(start_us);
     }
 
-    // Kick AS5600 on core 0, then immediately spend core-1 wall time on the
-    // MPU6050 transaction and attitude estimator. The AS5600 result normally
-    // completes hundreds of microseconds before the MPU path finishes.
     std::uint32_t encoder_sequence = 0U;
     const bool encoder_dispatched =
         dispatchEncoderAcquisition(&encoder_sequence);
@@ -403,9 +391,6 @@ void triwhirlParallelControlTask(void*) {
       }
     }
 
-    // Reuse the existing "encoder" profiler stage for only the post-MPU join
-    // overhead. The actual AS5600 bus duration remains independently reported
-    // as encoder_i2c_raw by the driver profiler on core 0.
     const std::int64_t encoder_join_begin_us = imu_end_us;
     if (encoder_dispatched) {
       collectEncoderAcquisition(encoder_sequence, loop_us);
@@ -462,7 +447,13 @@ void triwhirlParallelControlTask(void*) {
       recordRuntimeTimingStage(RuntimeTimingStage::kLoop, start_us, end_us);
     }
     updateTimingStats(start_us, end_us);
-    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1));
+
+    if (!triwhirl::runtime::waitForNextRealtimeRelease()) {
+      // Preserve the previous scheduler fallback while this first refactor
+      // slice is behavior-only. A later #32 safety slice will make GPTimer
+      // availability an explicit Balance-mode admission condition.
+      vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1));
+    }
   }
 }
 
