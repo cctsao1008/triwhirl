@@ -13,13 +13,12 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "runtime_control.hpp"
+#include "runtime_platform.hpp"
 #include "runtime_release.hpp"
 
 namespace {
-
-void triwhirlParallelControlTask(void*);
 
 BaseType_t triwhirlCreatePinnedTaskIntercept(
     TaskFunction_t task_code,
@@ -30,29 +29,10 @@ BaseType_t triwhirlCreatePinnedTaskIntercept(
     TaskHandle_t* const created_task,
     const BaseType_t core_id) {
   if (name != nullptr && std::strcmp(name, "triwhirl_control") == 0) {
-    task_code = triwhirlParallelControlTask;
+    task_code = triwhirl::runtime::realtimeControlTask;
   }
   return xTaskCreatePinnedToCore(task_code, name, stack_depth, parameters,
                                  priority, created_task, core_id);
-}
-
-struct I2cBusCreateContext {
-  const i2c_master_bus_config_t* config = nullptr;
-  i2c_master_bus_handle_t* output = nullptr;
-  SemaphoreHandle_t done = nullptr;
-  esp_err_t result = ESP_FAIL;
-};
-
-void createI2cBusPinnedTask(void* opaque) {
-  auto* context = static_cast<I2cBusCreateContext*>(opaque);
-  if (context != nullptr && context->config != nullptr &&
-      context->output != nullptr) {
-    context->result = i2c_new_master_bus(context->config, context->output);
-  }
-  if (context != nullptr && context->done != nullptr) {
-    xSemaphoreGive(context->done);
-  }
-  vTaskDelete(nullptr);
 }
 
 esp_err_t triwhirlI2cNewMasterBusIntercept(
@@ -68,38 +48,16 @@ esp_err_t triwhirlI2cNewMasterBusIntercept(
   // do not both depend on core-0 ISR service while running in parallel.
   const BaseType_t target_core =
       config->i2c_port == I2C_NUM_1 ? 1 : 0;
-  if (xPortGetCoreID() == target_core) {
-    return i2c_new_master_bus(config, output);
-  }
-
-  I2cBusCreateContext context{};
-  context.config = config;
-  context.output = output;
-  context.done = xSemaphoreCreateBinary();
-  if (context.done == nullptr) {
-    return ESP_ERR_NO_MEM;
-  }
-
-  const BaseType_t created = xTaskCreatePinnedToCore(
-      createI2cBusPinnedTask, "triwhirl_i2c_init", 4096, &context,
-      configMAX_PRIORITIES - 1, nullptr, target_core);
-  if (created != pdPASS) {
-    vSemaphoreDelete(context.done);
-    return ESP_FAIL;
-  }
-
-  xSemaphoreTake(context.done, portMAX_DELAY);
-  vSemaphoreDelete(context.done);
-  return context.result;
+  return triwhirl::runtime::createI2cMasterBusOnCore(config, output,
+                                                     target_core);
 }
 
 }  // namespace
 
-// runtime_main.cpp still owns the supervisor/swing runtime in this first
-// behavior-preserving refactor slice. Intercept only the task named
-// "triwhirl_control" and bind each I2C bus allocation to the core which services
-// that sensor. The GPTimer release path is now an explicit API call rather than
-// another source-inclusion/macro layer.
+// runtime_main.cpp still owns the supervisor/swing runtime in this
+// behavior-preserving refactor slice. The remaining source-inclusion shim only
+// redirects the control-task creation and I2C bus creation call sites; the
+// implementations themselves now live behind explicit runtime interfaces.
 #define xTaskCreatePinnedToCore triwhirlCreatePinnedTaskIntercept
 #define i2c_new_master_bus triwhirlI2cNewMasterBusIntercept
 #include "runtime_main.cpp"
@@ -346,7 +304,7 @@ bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
   return false;
 }
 
-void triwhirlParallelControlTask(void*) {
+void realtimeControlTaskImpl(void*) {
   if (!initParallelEncoderAcquisition()) {
     safety_latch.trip(SafetyFault::kStartup);
     stopMotor();
@@ -449,12 +407,16 @@ void triwhirlParallelControlTask(void*) {
     updateTimingStats(start_us, end_us);
 
     if (!triwhirl::runtime::waitForNextRealtimeRelease()) {
-      // Preserve the previous scheduler fallback while this first refactor
-      // slice is behavior-only. A later #32 safety slice will make GPTimer
-      // availability an explicit Balance-mode admission condition.
+      // Preserve the previous scheduler fallback while this refactor remains
+      // behavior-only. A later #32 safety slice will make GPTimer availability
+      // an explicit Balance-mode admission condition.
       vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1));
     }
   }
 }
 
 }  // namespace
+
+void triwhirl::runtime::realtimeControlTask(void* opaque) {
+  realtimeControlTaskImpl(opaque);
+}
