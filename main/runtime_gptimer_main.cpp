@@ -2,25 +2,30 @@
 //
 // FreeRTOS tick-based vTaskDelayUntil() was adequate while the control path
 // overran 1 ms, but once stopped-motor execution dropped below 1 ms the measured
-// start-to-start period became strongly bimodal. Replace only the periodic wait
-// used by the established runtime with a 1 MHz GPTimer alarm that wakes the
-// pinned core-1 control task at the next absolute 1 ms release boundary.
+// start-to-start period became strongly bimodal. Use a hardware GPTimer as the
+// release clock while keeping the control work in the pinned core-1 task.
 //
-// Use one-shot alarms rather than an auto-reloading periodic alarm. A periodic
-// alarm continues to interrupt core 1 while the control iteration is still
-// running and can leave a task notification pending; consuming that pending
-// notification at the end of the loop creates catch-up releases and also adds
-// interrupt contention to the MPU/I2C critical path. With a one-shot alarm the
-// timer is armed only while the task is waiting.
+// The first GPTimer version allocated a periodic interrupt on core 1. Hardware
+// profiling showed that the 1 kHz timer ISR itself competed with the MPU6050
+// I2C completion path and inflated the control execution time. The following
+// one-shot version avoided active-loop interrupts, but it had to call
+// gptimer_get_raw_count() and gptimer_set_alarm_action() after every iteration;
+// with only a few tens of microseconds of headroom that scheduler bookkeeping
+// could itself cross the upcoming boundary and turn an otherwise sub-1-ms loop
+// into a skipped 2-ms release.
 //
-// If an iteration misses one or more release boundaries, skip every missed
-// release and wait for the first future boundary. ESP-IDF documents that setting
-// alarm_count behind the running counter triggers the alarm immediately, so the
-// code must advance the absolute schedule before arming rather than starting a
-// catch-up iteration immediately.
+// Final policy used here:
+//   * allocate one periodic 1 kHz GPTimer on core 0;
+//   * keep the timer ISR minimal: only notify the core-1 control task;
+//   * never execute control work in the ISR;
+//   * at the end of each control iteration, discard any notification that
+//     arrived while the iteration was still active, then wait for the next
+//     timer tick. Therefore missed releases are skipped, never caught up.
 //
-// The timer callback does no control work; ESP32 firmware remains the realtime
-// authority and the control task owns all state updates.
+// This removes per-iteration GPTimer API calls from the deadline path and keeps
+// the release interrupt away from the MPU6050/control core. Core 0 already owns
+// BLE/background work and the AS5600 worker, but GPTimer runs as a short level-3
+// interrupt and therefore has bounded precedence over those tasks.
 
 #include <cstdint>
 
@@ -28,16 +33,19 @@
 #include "esp_attr.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 namespace {
 
 constexpr std::uint64_t kRealtimeReleasePeriodUs = 1000U;
+constexpr int kRealtimeReleaseInterruptPriority = 3;
 
 gptimer_handle_t realtime_release_timer = nullptr;
 TaskHandle_t realtime_release_task = nullptr;
 bool realtime_release_init_failed = false;
-std::uint64_t realtime_next_release_count = 0U;
+SemaphoreHandle_t realtime_release_init_done = nullptr;
+esp_err_t realtime_release_init_result = ESP_FAIL;
 
 bool IRAM_ATTR realtimeReleaseAlarmCallback(
     gptimer_handle_t,
@@ -52,6 +60,55 @@ bool IRAM_ATTR realtimeReleaseAlarmCallback(
   return high_priority_task_woken == pdTRUE;
 }
 
+void createRealtimeReleaseTimerOnCore0(void*) {
+  gptimer_handle_t timer = nullptr;
+
+  gptimer_config_t timer_config{};
+  timer_config.clk_src = GPTIMER_CLK_SRC_DEFAULT;
+  timer_config.direction = GPTIMER_COUNT_UP;
+  timer_config.resolution_hz = 1000000U;
+  timer_config.intr_priority = kRealtimeReleaseInterruptPriority;
+
+  esp_err_t result = gptimer_new_timer(&timer_config, &timer);
+  if (result == ESP_OK) {
+    gptimer_event_callbacks_t callbacks{};
+    callbacks.on_alarm = realtimeReleaseAlarmCallback;
+    result = gptimer_register_event_callbacks(timer, &callbacks,
+                                              realtime_release_task);
+  }
+
+  if (result == ESP_OK) {
+    gptimer_alarm_config_t alarm{};
+    alarm.alarm_count = kRealtimeReleasePeriodUs;
+    alarm.reload_count = 0U;
+    alarm.flags.auto_reload_on_alarm = true;
+    result = gptimer_set_alarm_action(timer, &alarm);
+  }
+
+  if (result == ESP_OK) {
+    result = gptimer_enable(timer);
+  }
+  if (result == ESP_OK) {
+    result = gptimer_start(timer);
+  }
+
+  if (result != ESP_OK && timer != nullptr) {
+    // Stop/disable tolerate the state checks below poorly if the corresponding
+    // transition never succeeded, so only delete after best-effort cleanup.
+    (void)gptimer_stop(timer);
+    (void)gptimer_disable(timer);
+    (void)gptimer_del_timer(timer);
+    timer = nullptr;
+  }
+
+  realtime_release_timer = timer;
+  realtime_release_init_result = result;
+  if (realtime_release_init_done != nullptr) {
+    xSemaphoreGive(realtime_release_init_done);
+  }
+  vTaskDelete(nullptr);
+}
+
 bool initRealtimeReleaseTimer() {
   if (realtime_release_timer != nullptr) {
     return true;
@@ -61,46 +118,39 @@ bool initRealtimeReleaseTimer() {
   }
 
   realtime_release_task = xTaskGetCurrentTaskHandle();
-
-  gptimer_config_t timer_config{};
-  timer_config.clk_src = GPTIMER_CLK_SRC_DEFAULT;
-  timer_config.direction = GPTIMER_COUNT_UP;
-  timer_config.resolution_hz = 1000000U;
-  if (gptimer_new_timer(&timer_config, &realtime_release_timer) != ESP_OK) {
-    realtime_release_timer = nullptr;
+  realtime_release_init_done = xSemaphoreCreateBinary();
+  if (realtime_release_init_done == nullptr) {
     realtime_release_init_failed = true;
     return false;
   }
 
-  gptimer_event_callbacks_t callbacks{};
-  callbacks.on_alarm = realtimeReleaseAlarmCallback;
-  if (gptimer_register_event_callbacks(realtime_release_timer, &callbacks,
-                                       realtime_release_task) != ESP_OK) {
-    gptimer_del_timer(realtime_release_timer);
-    realtime_release_timer = nullptr;
+  // GPTimer peripheral interrupts are allocated on the core that creates the
+  // timer. Create it from a short-lived core-0 task so its periodic ISR never
+  // preempts the core-1 MPU6050/control critical path.
+  const BaseType_t created = xTaskCreatePinnedToCore(
+      createRealtimeReleaseTimerOnCore0, "triwhirl_release_init", 4096, nullptr,
+      configMAX_PRIORITIES - 1, nullptr, 0);
+  if (created != pdPASS) {
+    vSemaphoreDelete(realtime_release_init_done);
+    realtime_release_init_done = nullptr;
     realtime_release_init_failed = true;
     return false;
   }
 
-  if (gptimer_enable(realtime_release_timer) != ESP_OK ||
-      gptimer_start(realtime_release_timer) != ESP_OK) {
-    gptimer_disable(realtime_release_timer);
-    gptimer_del_timer(realtime_release_timer);
-    realtime_release_timer = nullptr;
+  xSemaphoreTake(realtime_release_init_done, portMAX_DELAY);
+  vSemaphoreDelete(realtime_release_init_done);
+  realtime_release_init_done = nullptr;
+
+  if (realtime_release_init_result != ESP_OK ||
+      realtime_release_timer == nullptr) {
     realtime_release_init_failed = true;
     return false;
   }
 
-  std::uint64_t now_count = 0U;
-  if (gptimer_get_raw_count(realtime_release_timer, &now_count) != ESP_OK) {
-    gptimer_stop(realtime_release_timer);
-    gptimer_disable(realtime_release_timer);
-    gptimer_del_timer(realtime_release_timer);
-    realtime_release_timer = nullptr;
-    realtime_release_init_failed = true;
-    return false;
-  }
-  realtime_next_release_count = now_count + kRealtimeReleasePeriodUs;
+  // Initialization itself can take longer than one period. Drop any timer
+  // notification accumulated while the control task waited for the helper so
+  // the first real release begins from a fresh hardware tick.
+  (void)ulTaskNotifyTake(pdTRUE, 0);
   return true;
 }
 
@@ -113,36 +163,11 @@ void triwhirlRealtimeDelayUntil(TickType_t* const previous_wake,
     return;
   }
 
-  std::uint64_t now_count = 0U;
-  if (gptimer_get_raw_count(realtime_release_timer, &now_count) != ESP_OK) {
-    vTaskDelayUntil(previous_wake, increment);
-    return;
-  }
-
-  // Skip every release boundary already missed by this iteration. Always arm
-  // and wait for the first future boundary; never begin an immediate catch-up
-  // iteration after an overrun.
-  while (now_count >= realtime_next_release_count) {
-    realtime_next_release_count += kRealtimeReleasePeriodUs;
-  }
-
-  gptimer_alarm_config_t alarm{};
-  alarm.alarm_count = realtime_next_release_count;
-  alarm.reload_count = 0U;
-  alarm.flags.auto_reload_on_alarm = false;
-
-  // The one-shot design should leave no stale notification. Drain defensively
-  // before arming so an earlier fallback/error path cannot create an immediate
-  // false release.
+  // If the 1 kHz tick arrived while this iteration was still active, the
+  // deadline was missed. Clear all accumulated ticks and wait for the next
+  // future hardware release rather than starting an immediate catch-up loop.
   (void)ulTaskNotifyTake(pdTRUE, 0);
-
-  if (gptimer_set_alarm_action(realtime_release_timer, &alarm) != ESP_OK) {
-    vTaskDelayUntil(previous_wake, increment);
-    return;
-  }
-
   (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-  realtime_next_release_count += kRealtimeReleasePeriodUs;
 }
 
 }  // namespace
