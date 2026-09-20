@@ -11,9 +11,13 @@
 // running and can leave a task notification pending; consuming that pending
 // notification at the end of the loop creates catch-up releases and also adds
 // interrupt contention to the MPU/I2C critical path. With a one-shot alarm the
-// timer is disarmed as soon as it wakes the task, so no GPTimer interrupt can
-// fire during the active control iteration. The next alarm is armed only when
-// the task reaches the release wait at the end of that iteration.
+// timer is armed only while the task is waiting.
+//
+// If an iteration misses one or more release boundaries, skip every missed
+// release and wait for the first future boundary. ESP-IDF documents that setting
+// alarm_count behind the running counter triggers the alarm immediately, so the
+// code must advance the absolute schedule before arming rather than starting a
+// catch-up iteration immediately.
 //
 // The timer callback does no control work; ESP32 firmware remains the realtime
 // authority and the control task owns all state updates.
@@ -115,20 +119,13 @@ void triwhirlRealtimeDelayUntil(TickType_t* const previous_wake,
     return;
   }
 
-  // If this iteration ran past its intended release boundary, start the next
-  // iteration immediately and re-phase to the first future 1 ms boundary. This
-  // avoids a burst of accumulated notifications while preserving the absolute
-  // periodic schedule for the following iteration.
-  if (now_count >= realtime_next_release_count) {
-    do {
-      realtime_next_release_count += kRealtimeReleasePeriodUs;
-    } while (now_count >= realtime_next_release_count);
-    return;
+  // Skip every release boundary already missed by this iteration. Always arm
+  // and wait for the first future boundary; never begin an immediate catch-up
+  // iteration after an overrun.
+  while (now_count >= realtime_next_release_count) {
+    realtime_next_release_count += kRealtimeReleasePeriodUs;
   }
 
-  // A one-shot alarm is armed only while the task is waiting. It fires once,
-  // disables itself naturally, and therefore cannot preempt the active control
-  // iteration that follows.
   gptimer_alarm_config_t alarm{};
   alarm.alarm_count = realtime_next_release_count;
   alarm.reload_count = 0U;
