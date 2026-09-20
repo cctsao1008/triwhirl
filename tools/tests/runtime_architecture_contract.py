@@ -96,6 +96,9 @@ def main() -> None:
         fail("obsolete runtime_control.cpp wrapper returned")
 
     runtime_main_text = (MAIN / "runtime_main.cpp").read_text(encoding="utf-8")
+    runtime_state_header = (MAIN / "runtime_state.hpp").read_text(encoding="utf-8")
+    runtime_state_text = (MAIN / "runtime_state.cpp").read_text(encoding="utf-8")
+    cmake_text = (MAIN / "CMakeLists.txt").read_text(encoding="utf-8")
     supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
     supervisor_header = (MAIN / "runtime_supervisor_io.hpp").read_text(encoding="utf-8")
     command_header = (MAIN / "runtime_command.hpp").read_text(encoding="utf-8")
@@ -106,8 +109,6 @@ def main() -> None:
     if leaked_io:
         fail(f"UART development/BLE GATT ingress leaked into realtime runtime: {leaked_io}")
 
-    # A supervisor-local line buffer is intentional for transport framing. What
-    # is forbidden is carrying raw line text across the supervisor/realtime API.
     if "SupervisorInputEventType::kCommand" in runtime_main_text or \
        "SupervisorInputEventType::kCommand" in supervisor_text or \
        "SupervisorInputEventType::kCommand" in supervisor_header:
@@ -135,6 +136,20 @@ def main() -> None:
                     "initEncoderAcquisition(", "waitForNextRealtimeRelease("),
                    "explicit realtime/startup ownership regressed")
 
+    require_tokens(runtime_state_header,
+                   ("namespace triwhirl::runtime::state", "extern As5600 encoder",
+                    "extern Mpu6050 imu", "extern SafetyLatch safety_latch",
+                    "extern RuntimeLogger runtime_logger", "void updateMotor(",
+                    "bool sampleImu(", "void consoleWriteBytes("),
+                   "runtime state contract is incomplete")
+    require_tokens(runtime_state_text,
+                   ("As5600 encoder;", "Mpu6050 imu;", "void updateMotor(",
+                    "void evaluateSafety(", "void emitTelemetry(",
+                    "bool initConsole("),
+                   "runtime state implementation is incomplete")
+    if '"runtime_state.cpp"' not in cmake_text:
+        fail("runtime_state.cpp is not compiled explicitly")
+
     first_snapshot = runtime_main_text.find("publishSupervisorSnapshot(")
     supervisor_init = runtime_main_text.find("initSupervisorIo(")
     if first_snapshot < 0 or supervisor_init < 0 or first_snapshot > supervisor_init:
@@ -160,6 +175,7 @@ def main() -> None:
     print(f"  renaming_shims={sorted(renaming_defines)}")
     print(f"  app_main_sources={sorted(app_main_sources)}")
     print("  runtime_control_wrapper=absent")
+    print("  runtime_state_service=explicit_compiled")
     print("  raw_command_strings_cross_realtime=no")
     print("  obsolete_runtime_string_bridge=absent")
     print("  runtime_i2c_startup=explicit_named_helpers")
