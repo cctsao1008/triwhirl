@@ -209,13 +209,31 @@ void publishSupervisorSnapshot(const std::uint32_t now_us) {
   triwhirl::runtime::publishRuntimeSnapshot(snapshot);
 }
 
+void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
+  switch (command.type) {
+    case triwhirl::runtime::RuntimeCommandType::kMotorStop:
+      if (swing_id_runner.active()) {
+        consoleWrite(
+            "ERR swing experiment owns realtime actuation; use 'swing abort' first\r\n");
+        return;
+      }
+      stopMotor();
+      consoleWrite("OK motor stop\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kNone:
+      return;
+  }
+}
+
 void processOneSupervisorInput() {
   triwhirl::runtime::SupervisorInputEvent event{};
   if (!triwhirl::runtime::tryReceiveSupervisorInput(&event)) {
     return;
   }
 
-  if (event.type == triwhirl::runtime::SupervisorInputEventType::kCommand) {
+  if (event.type == triwhirl::runtime::SupervisorInputEventType::kRuntimeCommand) {
+    executeRuntimeCommand(event.runtime_command);
+  } else if (event.type == triwhirl::runtime::SupervisorInputEventType::kCommand) {
     handleSupervisorCommand(event.line);
   }
 
