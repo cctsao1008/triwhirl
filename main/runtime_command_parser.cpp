@@ -14,6 +14,7 @@ constexpr std::uint32_t kDefaultGyroCalibrationSamples = 500U;
 constexpr float kDefaultCalibrationAmplitudeV = 0.6F;
 constexpr float kDefaultCalibrationElectricalHz = 0.5F;
 constexpr float kDefaultCalibrationTurns = 4.0F;
+constexpr float kDefaultLogSeconds = 45.0F;
 constexpr const char* kSwingConfigUsage =
     "ERR usage: swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n";
 
@@ -80,6 +81,24 @@ RuntimeCommandParseResult parseRuntimeCommand(const char* const line) {
     return {};
   }
 
+  if (std::strcmp(line, "status") == 0) {
+    return commandResult(RuntimeCommandType::kStatus);
+  }
+  if (std::strcmp(line, "motor status") == 0) {
+    return commandResult(RuntimeCommandType::kMotorStatus);
+  }
+  if (std::strcmp(line, "imu status") == 0) {
+    return commandResult(RuntimeCommandType::kImuStatus);
+  }
+  if (std::strcmp(line, "log status") == 0) {
+    return commandResult(RuntimeCommandType::kLogStatus);
+  }
+  if (std::strcmp(line, "swing status") == 0) {
+    return commandResult(RuntimeCommandType::kSwingStatus);
+  }
+  if (std::strcmp(line, "timing profile status") == 0) {
+    return commandResult(RuntimeCommandType::kTimingProfileStatus);
+  }
   if (std::strcmp(line, "motor stop") == 0) {
     return commandResult(RuntimeCommandType::kMotorStop);
   }
@@ -112,6 +131,21 @@ RuntimeCommandParseResult parseRuntimeCommand(const char* const line) {
   }
   if (std::strcmp(line, "telemetry off") == 0) {
     return commandResult(RuntimeCommandType::kTelemetryOff);
+  }
+  if (std::strcmp(line, "log start") == 0) {
+    return commandResult(RuntimeCommandType::kLogStart);
+  }
+  if (std::strcmp(line, "log critical on") == 0) {
+    return commandResult(RuntimeCommandType::kLogCriticalOn);
+  }
+  if (std::strcmp(line, "log critical off") == 0) {
+    return commandResult(RuntimeCommandType::kLogCriticalOff);
+  }
+  if (std::strcmp(line, "log stop") == 0) {
+    return commandResult(RuntimeCommandType::kLogStop);
+  }
+  if (std::strcmp(line, "log dump") == 0) {
+    return commandResult(RuntimeCommandType::kLogDump);
   }
 
   const char* arguments = nullptr;
@@ -275,6 +309,33 @@ RuntimeCommandParseResult parseRuntimeCommand(const char* const line) {
     config.max_duration_us =
         static_cast<std::uint32_t>(std::llround(max_s_value * 1000000.0));
     return result;
+  }
+
+  if (commandArguments(line, "log prepare", &arguments)) {
+    auto result = commandResult(RuntimeCommandType::kLogPrepare);
+    result.command.payload.log_prepare.seconds =
+        *arguments == '\0' ? kDefaultLogSeconds : std::strtof(arguments, nullptr);
+    return result;
+  }
+
+  if (commandArguments(line, "log critical", &arguments)) {
+    return usageError("ERR usage: log critical <on|off>\r\n");
+  }
+  if (commandArguments(line, "log", &arguments)) {
+    return usageError(
+        "ERR usage: log <status|prepare [seconds]|start|critical on|off|stop|dump>\r\n");
+  }
+  if (commandArguments(line, "motor", &arguments)) {
+    return usageError("ERR usage: motor <calibrate|config|vq|status|stop>\r\n");
+  }
+  if (commandArguments(line, "imu", &arguments)) {
+    return usageError("ERR usage: imu <status|calibrate [samples]|map ...>\r\n");
+  }
+  if (commandArguments(line, "swing", &arguments)) {
+    return usageError("ERR usage: swing <status|config ...|start|abort>\r\n");
+  }
+  if (commandArguments(line, "timing profile", &arguments)) {
+    return usageError("ERR usage: timing profile <status|on|off|reset>\r\n");
   }
 
   return {};
