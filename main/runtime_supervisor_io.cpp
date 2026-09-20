@@ -19,6 +19,7 @@ namespace {
 
 constexpr std::uint32_t kSupervisorPollPeriodMs = 5U;
 constexpr UBaseType_t kSupervisorQueueDepth = 4U;
+constexpr UBaseType_t kRuntimeReplyQueueDepth = 8U;
 
 struct CommandInputState {
   char line[kSupervisorCommandBytes]{};
@@ -26,11 +27,13 @@ struct CommandInputState {
 };
 
 QueueHandle_t input_queue = nullptr;
+QueueHandle_t reply_queue = nullptr;
 TaskHandle_t supervisor_task = nullptr;
 SupervisorWriteFn write_fn = nullptr;
 void* write_context = nullptr;
 CommandInputState uart_development_input{};
 CommandInputState ble_gatt_input{};
+std::uint32_t reply_dropped = 0U;
 
 void writeBytes(const char* data, const std::size_t length) {
   if (write_fn != nullptr && data != nullptr && length > 0U) {
@@ -55,7 +58,15 @@ void writeFormatted(const char* const buffer, const int length,
   writeBytes(buffer, count);
 }
 
-bool publishEvent(const SupervisorInputEvent& event) {
+void writePromptFromSnapshot() {
+  RuntimeSnapshot snapshot{};
+  if (readLatestRuntimeSnapshot(&snapshot) && !snapshot.telemetry_enabled &&
+      !snapshot.log_dump_active && !snapshot.swing_active) {
+    writeText("> ");
+  }
+}
+
+bool publishCommand(const SupervisorInputEvent& event) {
   if (input_queue == nullptr) {
     return false;
   }
@@ -64,12 +75,6 @@ bool publishEvent(const SupervisorInputEvent& event) {
     return false;
   }
   return true;
-}
-
-void publishSupervisorHandled() {
-  SupervisorInputEvent event{};
-  event.type = SupervisorInputEventType::kSupervisorHandled;
-  publishEvent(event);
 }
 
 void writeRuntimeSnapshotUnavailable() {
@@ -83,6 +88,97 @@ const char* motorModeName(const std::uint8_t mode) {
     case 2U: return "foc";
     case 3U: return "calibrating";
     default: return "unknown";
+  }
+}
+
+void formatRuntimeReply(const RuntimeReply& reply) {
+  char buffer[256];
+  int length = 0;
+  switch (reply.code) {
+    case RuntimeReplyCode::kNone:
+      break;
+    case RuntimeReplyCode::kSwingOwnsRealtime:
+      writeText("ERR swing experiment owns realtime actuation; use 'swing abort' first\r\n");
+      break;
+    case RuntimeReplyCode::kMotorStopOk:
+      writeText("OK motor stop\r\n");
+      break;
+    case RuntimeReplyCode::kStopOk:
+      writeText("OK stop\r\n");
+      break;
+    case RuntimeReplyCode::kSwingAlreadyInactive:
+      writeText("OK swing already inactive\r\n");
+      break;
+    case RuntimeReplyCode::kSwingAbortOk:
+      writeText("OK swing abort\r\n");
+      break;
+    case RuntimeReplyCode::kTimingResetOk:
+      writeText("OK timing reset\r\n");
+      break;
+    case RuntimeReplyCode::kTimingProfileResetOk:
+      writeText("OK timing profile reset\r\n");
+      break;
+    case RuntimeReplyCode::kFaultAlreadyClear:
+      writeText("OK fault already clear\r\n");
+      break;
+    case RuntimeReplyCode::kFaultClearRejected:
+      writeText("ERR fault clear rejected; fault cause is still present\r\n");
+      break;
+    case RuntimeReplyCode::kFaultClearOk:
+      writeText("OK fault clear\r\n");
+      break;
+    case RuntimeReplyCode::kTelemetryOnOk:
+      writeText("OK telemetry on\r\n");
+      break;
+    case RuntimeReplyCode::kTelemetryOffOk:
+      writeText("OK telemetry off\r\n");
+      break;
+    case RuntimeReplyCode::kInvalidMotorConfig:
+      writeText("ERR invalid motor config\r\n");
+      break;
+    case RuntimeReplyCode::kMotorConfigOk:
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "OK motor config pole_pairs=%d sensor_dir=%d offset_rad=%.6f\r\n",
+          reply.value0, reply.value1, reply.float0);
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kAttitudeResetFromAccelOk:
+      writeText("OK attitude reset from accelerometer\r\n");
+      break;
+    case RuntimeReplyCode::kInvalidAttitudeAngle:
+      writeText("ERR invalid attitude angle\r\n");
+      break;
+    case RuntimeReplyCode::kAttitudeResetAngleOk:
+      length = std::snprintf(buffer, sizeof(buffer),
+                             "OK attitude reset angle_rad=%.6f\r\n",
+                             reply.float0);
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kInvalidImuMap:
+      writeText("ERR invalid imu map\r\n");
+      break;
+    case RuntimeReplyCode::kImuMapOk:
+      length = std::snprintf(buffer, sizeof(buffer),
+                             "OK imu map %d %d %d %d %d %d\r\n",
+                             reply.value0, reply.value1, reply.value2,
+                             reply.value3, reply.value4, reply.value5);
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+  }
+
+  if (reply.prompt_after) {
+    writeText("> ");
+  }
+}
+
+void drainRuntimeReplies() {
+  if (reply_queue == nullptr) {
+    return;
+  }
+  RuntimeReply reply{};
+  while (xQueueReceive(reply_queue, &reply, 0) == pdTRUE) {
+    formatRuntimeReply(reply);
   }
 }
 
@@ -130,7 +226,7 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
 
   if (std::strcmp(line, "help") == 0) {
     writeHelp();
-    publishSupervisorHandled();
+    writePromptFromSnapshot();
     return true;
   }
 
@@ -146,7 +242,7 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         static_cast<unsigned long>(triwhirl::ble::rxDroppedBytes()),
         static_cast<unsigned long>(triwhirl::ble::txDroppedBytes()));
     writeFormatted(buffer, length, sizeof(buffer));
-    publishSupervisorHandled();
+    writePromptFromSnapshot();
     return true;
   }
 
@@ -171,7 +267,7 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
   RuntimeSnapshot snapshot{};
   if (!readLatestRuntimeSnapshot(&snapshot)) {
     writeRuntimeSnapshotUnavailable();
-    publishSupervisorHandled();
+    writePromptFromSnapshot();
     return true;
   }
 
@@ -292,7 +388,7 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
                                          : "telemetry=off\r\n");
   }
 
-  publishSupervisorHandled();
+  writePromptFromSnapshot();
   return true;
 }
 
@@ -303,13 +399,14 @@ bool handleTypedRuntimeCommand(const char* const line) {
       return false;
     case RuntimeCommandParseStatus::kUsageError:
       writeText(parsed.error);
-      publishSupervisorHandled();
+      writePromptFromSnapshot();
       return true;
     case RuntimeCommandParseStatus::kCommand: {
       SupervisorInputEvent event{};
-      event.type = SupervisorInputEventType::kRuntimeCommand;
       event.runtime_command = parsed.command;
-      publishEvent(event);
+      if (!publishCommand(event)) {
+        writePromptFromSnapshot();
+      }
       return true;
     }
   }
@@ -332,7 +429,7 @@ void consumeBytes(const std::uint8_t* input, const std::size_t received,
         if (!handleSupervisorReadOnlyCommand(state.line) &&
             !handleTypedRuntimeCommand(state.line)) {
           writeText("ERR unknown command\r\n");
-          publishSupervisorHandled();
+          writePromptFromSnapshot();
         }
         state.length = 0U;
       }
@@ -359,9 +456,7 @@ void consumeBytes(const std::uint8_t* input, const std::size_t received,
 
     state.length = 0U;
     writeText("\r\nERR command too long\r\n");
-    SupervisorInputEvent event{};
-    event.type = SupervisorInputEventType::kLineOverflow;
-    publishEvent(event);
+    writePromptFromSnapshot();
   }
 }
 
@@ -370,21 +465,20 @@ void supervisorIoTask(void*) {
   std::uint8_t input[64];
 
   while (true) {
-    // UART0 remains an explicit wired development/service CLI. It is not the
-    // product BLE transport and has no realtime authority.
+    drainRuntimeReplies();
+
     const int uart_received = uart_read_bytes(UART_NUM_0, input, sizeof(input), 0);
     if (uart_received > 0) {
       consumeBytes(input, static_cast<std::size_t>(uart_received),
                    uart_development_input);
     }
 
-    // ble::read() drains payload bytes previously accepted by the NimBLE GATT
-    // RX characteristic write callback. BLE command ingress is GATT, not UART.
     const std::size_t ble_received = triwhirl::ble::read(input, sizeof(input));
     if (ble_received > 0U) {
       consumeBytes(input, ble_received, ble_gatt_input);
     }
 
+    drainRuntimeReplies();
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(kSupervisorPollPeriodMs));
   }
 }
@@ -394,12 +488,14 @@ void supervisorIoTask(void*) {
 bool initSupervisorIo(const SupervisorWriteFn callback,
                       void* const callback_context, const int core_id,
                       const unsigned task_priority) {
-  if (callback == nullptr || input_queue != nullptr || supervisor_task != nullptr) {
+  if (callback == nullptr || input_queue != nullptr || reply_queue != nullptr ||
+      supervisor_task != nullptr) {
     return false;
   }
 
   input_queue = xQueueCreate(kSupervisorQueueDepth, sizeof(SupervisorInputEvent));
-  if (input_queue == nullptr) {
+  reply_queue = xQueueCreate(kRuntimeReplyQueueDepth, sizeof(RuntimeReply));
+  if (input_queue == nullptr || reply_queue == nullptr) {
     return false;
   }
 
@@ -414,6 +510,18 @@ bool initSupervisorIo(const SupervisorWriteFn callback,
 bool tryReceiveSupervisorInput(SupervisorInputEvent* const event) {
   return event != nullptr && input_queue != nullptr &&
          xQueueReceive(input_queue, event, 0) == pdTRUE;
+}
+
+bool publishRuntimeReply(const RuntimeReply& reply) {
+  if (reply_queue == nullptr || xQueueSend(reply_queue, &reply, 0) != pdTRUE) {
+    ++reply_dropped;
+    return false;
+  }
+  return true;
+}
+
+std::uint32_t runtimeReplyDroppedCount() {
+  return reply_dropped;
 }
 
 }  // namespace triwhirl::runtime
