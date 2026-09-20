@@ -80,7 +80,7 @@ and `strtoul` parsing remains entirely in `runtime_command_parser` on Core 0.
 Realtime still performs state-dependent validation, safety admission and mutation
 so actuator/sensor ownership does not move across cores.
 
-The parser now has a host-side contract test in
+The parser has a host-side contract test in
 `tools/tests/runtime_command_parser_test.cpp`. CI compiles the parser directly
 with the host compiler and verifies command type selection, payload conversion,
 default arguments, usage errors, and the legacy-not-matched boundary before the
