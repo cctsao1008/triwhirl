@@ -17,8 +17,6 @@ ALLOWED_CPP_INCLUDES = {
 
 ALLOWED_RENAMING_DEFINES = {
     ("runtime_main.cpp", "app_main", "triwhirl_legacy_app_main"),
-    ("runtime_main.cpp", "initEncoderBus", "triwhirl_legacy_initEncoderBus"),
-    ("runtime_main.cpp", "initImuBus", "triwhirl_legacy_initImuBus"),
 }
 
 CONTROL_FORBIDDEN_QUEUE_MECHANICS = (
@@ -135,11 +133,16 @@ def main() -> None:
         "pollSupervisorConsole(", "handleSwingCommand(",
         "parseSwingConfig(", "handleRuntimeTimingProfileCommand(",
         "commandAllowedDuringSwing(", "triwhirl_legacy_updateEncoder",
-        "triwhirl_legacy_updateImu",
+        "triwhirl_legacy_updateImu", "triwhirl_legacy_initEncoderBus",
+        "triwhirl_legacy_initImuBus",
     )
     leaked_bridge = [x for x in obsolete_runtime_bridge if x in runtime_main_text]
     if leaked_bridge:
-        fail(f"obsolete runtime string bridge remains: {leaked_bridge}")
+        fail(f"obsolete runtime string/startup bridge remains: {leaked_bridge}")
+
+    require_tokens(runtime_main_text,
+                   ("initRuntimeEncoderBus(", "initRuntimeImuBus("),
+                   "explicit runtime I2C startup ownership regressed")
 
     first_snapshot = control_text.find("publishSupervisorSnapshot(")
     supervisor_init = control_text.find("initSupervisorIo(")
@@ -167,6 +170,7 @@ def main() -> None:
     print(f"  app_main_sources={sorted(app_main_sources)}")
     print("  raw_command_strings_cross_realtime=no")
     print("  obsolete_runtime_string_bridge=absent")
+    print("  runtime_i2c_startup=explicit_named_helpers")
     print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
     print("  supervisor_read_only=attitude,fault,ble,timing,telemetry,help")
     print("  supervisor_snapshot_ready_before_ingress=yes")
