@@ -8,9 +8,10 @@ The active firmware still has one explicitly tolerated source-inclusion chain:
 and five symbol-renaming shims in runtime_main.cpp. A2 is removing those pieces
 incrementally. Until they are gone, CI prevents new .cpp includes, new
 symbol-renaming interception, a second application-entry owner, queue/task
-mechanics from leaking back into realtime control, UART/BLE polling from
-returning to Core 1, migrated read-only diagnostics from falling back to live
-realtime formatting, or migrated mutating commands from regressing to strings.
+mechanics from leaking back into realtime control, UART development ingress or
+BLE GATT payload draining from returning to Core 1, migrated read-only
+diagnostics from falling back to live realtime formatting, or migrated mutating
+commands from regressing to strings.
 """
 
 from __future__ import annotations
@@ -56,16 +57,34 @@ SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS = (
 
 SUPERVISOR_REQUIRED_TYPED_COMMANDS = (
     'std::strcmp(line, "motor stop")',
+    'std::strcmp(line, "stop")',
     'std::strcmp(line, "swing abort")',
+    'std::strcmp(line, "timing reset")',
+    'std::strcmp(line, "fault clear")',
+    'std::strcmp(line, "telemetry on")',
+    'std::strcmp(line, "telemetry off")',
     "RuntimeCommandType::kMotorStop",
+    "RuntimeCommandType::kStop",
     "RuntimeCommandType::kSwingAbort",
+    "RuntimeCommandType::kTimingReset",
+    "RuntimeCommandType::kFaultClear",
+    "RuntimeCommandType::kTelemetryOn",
+    "RuntimeCommandType::kTelemetryOff",
     "SupervisorInputEventType::kRuntimeCommand",
+    "uart_development_input",
+    "ble_gatt_input",
 )
 
 CONTROL_REQUIRED_TYPED_COMMANDS = (
     "executeRuntimeCommand(",
+    "typedCommandAllowedDuringSwing(",
     "RuntimeCommandType::kMotorStop",
+    "RuntimeCommandType::kStop",
     "RuntimeCommandType::kSwingAbort",
+    "RuntimeCommandType::kTimingReset",
+    "RuntimeCommandType::kFaultClear",
+    "RuntimeCommandType::kTelemetryOn",
+    "RuntimeCommandType::kTelemetryOff",
 )
 
 CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.cpp)"', re.MULTILINE)
@@ -128,7 +147,7 @@ def main() -> None:
     ]
     if leaked_supervisor_io:
         fail(
-            "UART/BLE polling leaked into runtime_control.cpp: "
+            "UART development/BLE GATT ingress leaked into runtime_control.cpp: "
             f"{leaked_supervisor_io}"
         )
 
@@ -167,9 +186,10 @@ def main() -> None:
     print(f"  renaming_shims={sorted(renaming_defines)}")
     print(f"  app_main_sources={sorted(app_main_sources)}")
     print("  runtime_control_queue_mechanics=isolated")
-    print("  runtime_control_uart_ble_polling=absent")
+    print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
     print("  supervisor_snapshot_diagnostics=attitude,fault")
-    print("  typed_runtime_commands=motor_stop,swing_abort")
+    print("  supervisor_transports=uart_dev,ble_gatt")
+    print("  typed_runtime_commands=motor_stop,stop,swing_abort,timing_reset,fault_clear,telemetry_on,telemetry_off")
 
 
 if __name__ == "__main__":
