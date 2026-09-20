@@ -3,10 +3,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+import time
 from typing import Sequence
 
 from ..ble import DEVICE_NAME
-from .log import _close_line_transport, _open_line_transport, _wait_console
+from .log import (
+    _close_line_transport,
+    _normalize_console_line,
+    _open_line_transport,
+    _wait_console,
+)
 
 
 def _add_ble_args(parser: argparse.ArgumentParser) -> None:
@@ -32,6 +38,20 @@ def _timing_test_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="measurement interval [s]",
+    )
+    return parser
+
+
+def _timing_profile_parser() -> argparse.ArgumentParser:
+    parser = _simple_parser(
+        "Measure per-stage realtime execution time inside the ESP32 control task"
+    )
+    parser.add_argument(
+        "seconds",
+        nargs="?",
+        type=float,
+        default=5.0,
+        help="profiling interval [s]",
     )
     return parser
 
@@ -106,6 +126,84 @@ def timing_test_main(argv: Sequence[str]) -> int:
     args = _timing_test_parser().parse_args(list(argv))
     try:
         return asyncio.run(_timing_test_run(args))
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
+async def _timing_profile_run(args: argparse.Namespace) -> int:
+    if not math.isfinite(args.seconds) or args.seconds <= 0.0:
+        raise RuntimeError("seconds must be finite and > 0")
+
+    client, transport = await _open_line_transport(args)
+    try:
+        await transport.send("timing reset")
+        print(
+            await _wait_console(
+                transport,
+                prefixes=("OK timing reset",),
+                timeout_s=args.timeout,
+            )
+        )
+
+        await transport.send("timing profile on")
+        print(
+            await _wait_console(
+                transport,
+                prefixes=("OK timing profile on",),
+                timeout_s=args.timeout,
+            )
+        )
+        print(f"profiling control stages for {args.seconds:.3f} seconds...")
+        await asyncio.sleep(args.seconds)
+
+        await transport.send("timing profile off")
+        print(
+            await _wait_console(
+                transport,
+                prefixes=("OK timing profile off",),
+                timeout_s=args.timeout,
+            )
+        )
+
+        deadline = time.monotonic() + max(args.timeout, 3.0)
+        saw_end = False
+        while time.monotonic() < deadline:
+            remaining = max(0.001, deadline - time.monotonic())
+            line = await transport.read_line(min(0.5, remaining))
+            if not line:
+                continue
+            normalized = _normalize_console_line(line)
+            if "timing_profile," in normalized:
+                print(normalized[normalized.find("timing_profile,") :])
+            elif "timing_profile_stage," in normalized:
+                print(normalized[normalized.find("timing_profile_stage,") :])
+            elif "timing_profile_end" in normalized:
+                print("timing_profile_end")
+                saw_end = True
+                break
+            err_index = normalized.find("ERR ")
+            if err_index >= 0:
+                raise RuntimeError(normalized[err_index:])
+        if not saw_end:
+            raise RuntimeError("timed out waiting for timing_profile_end")
+
+        await transport.send("timing status")
+        timing_line = await _wait_console(
+            transport,
+            prefixes=("timing,",),
+            timeout_s=args.timeout,
+        )
+        print(timing_line)
+        return 0
+    finally:
+        await _close_line_transport(client, transport)
+
+
+def timing_profile_main(argv: Sequence[str]) -> int:
+    args = _timing_profile_parser().parse_args(list(argv))
+    try:
+        return asyncio.run(_timing_profile_run(args))
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}")
         return 1
