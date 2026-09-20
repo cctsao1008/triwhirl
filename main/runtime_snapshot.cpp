@@ -2,6 +2,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "runtime_diagnostics.hpp"
 
 namespace triwhirl::runtime {
 namespace {
@@ -22,7 +23,9 @@ void publishRuntimeSnapshot(const RuntimeSnapshot& snapshot) {
   if (snapshot_queue == nullptr) {
     return;
   }
-  xQueueOverwrite(snapshot_queue, &snapshot);
+  RuntimeSnapshot complete = snapshot;
+  populateRuntimeDiagnosticSnapshot(&complete);
+  xQueueOverwrite(snapshot_queue, &complete);
 }
 
 bool readLatestRuntimeSnapshot(RuntimeSnapshot* const snapshot) {
