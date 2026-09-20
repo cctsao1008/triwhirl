@@ -37,6 +37,7 @@ runtime_command_parser                ->    runtime_control
 runtime_supervisor_io                 <-    runtime_snapshot
   read-only formatting                      latest complete snapshot
   attitude/fault status                      non-blocking overwrite publication
+  BLE GATT status direct from BLE transport
 ```
 
 BLE is a NimBLE GATT transport, not UART. The RX characteristic accepts GATT
@@ -45,7 +46,7 @@ buffer; `runtime_supervisor_io` drains that buffer. TX uses the GATT notify
 characteristic. UART0 remains intentionally separate as a wired development and
 service CLI during bring-up. Neither transport has realtime authority.
 
-Transport ownership and command grammar are now separate services:
+Transport ownership and command grammar are separate services:
 `runtime_supervisor_io` owns ingress/framing while `runtime_command_parser`
 owns migrated command text, numeric parsing, and usage validation. This keeps
 transport code from becoming the permanent command parser and gives the legacy
@@ -57,9 +58,9 @@ rather than blocking either domain.
 
 The snapshot channel is depth one and uses overwrite/peek semantics. Core 1
 publishes the latest complete snapshot without blocking; Core 0 reads a complete
-copy without consuming it. The first migrated read-only commands are
-`attitude status` and `fault status`, preserving their existing wire format while
-moving both formatting and live-state access out of the realtime task.
+copy without consuming it. `attitude status` and `fault status` are snapshot-backed
+on Core 0. `ble status` is also handled entirely on Core 0 because its authoritative
+state belongs to the BLE GATT transport itself, not realtime control.
 
 `runtime_command.hpp` defines the fixed-size supervisor/realtime mutation
 contract. Commands now parsed on Core 0 and executed on Core 1 without string
@@ -67,13 +68,23 @@ interpretation include:
 
 - no-payload commands: `motor stop`, `stop`, `swing abort`, `timing reset`,
   `fault clear`, `telemetry on`, `telemetry off`;
-- payload commands: `motor vq <volts>`, `field <electrical_hz> <amplitude_v>`,
-  `attitude reset [angle_rad]`, and `imu calibrate [samples]`.
+- payload commands: `motor vq <volts>`,
+  `motor config <pole_pairs> <sensor_dir> <offset_rad>`,
+  `motor calibrate [amplitude_v] [electrical_hz] [turns]`,
+  `field <electrical_hz> <amplitude_v>`, `attitude reset [angle_rad]`,
+  `imu calibrate [samples]`, and
+  `imu map <sin_axis> <cos_axis> <gyro_axis> <sin_sign> <cos_sign> <gyro_sign>`.
 
-The payload forms use fixed-size POD fields in `RuntimeCommand`; `strtof` /
-`strtoul` parsing remains entirely in `runtime_command_parser` on Core 0.
-Realtime still performs state-dependent admission and mutation so safety
-ownership does not move across cores.
+The payload forms use fixed-size POD fields in `RuntimeCommand`; `atoi`, `strtof`
+and `strtoul` parsing remains entirely in `runtime_command_parser` on Core 0.
+Realtime still performs state-dependent validation, safety admission and mutation
+so actuator/sensor ownership does not move across cores.
+
+The parser now has a host-side contract test in
+`tools/tests/runtime_command_parser_test.cpp`. CI compiles the parser directly
+with the host compiler and verifies command type selection, payload conversion,
+default arguments, usage errors, and the legacy-not-matched boundary before the
+ESP-IDF build begins.
 
 The original swing-ownership policy is preserved: while identification owns
 realtime actuation, only commands that were previously allowed retain that
@@ -83,7 +94,7 @@ This remains an incremental B2 slice. Commands that are not yet migrated still
 enter Core 1 through the legacy string event, so string parsing has not yet been
 fully removed from realtime. The legacy event is migration debt, not a target
 compatibility layer; it should disappear once the remaining command grammar has
-been represented as typed commands or snapshot-backed supervisor operations.
+been represented as typed commands or supervisor read-only operations.
 
 ## Target
 
@@ -120,8 +131,8 @@ runtime_snapshot.cpp/.hpp
   overflow;
 - migrated mutating commands cross as typed `RuntimeCommand` records;
 - string parsing/formatting is removed from realtime control before A2 closes;
-- read-only diagnostics consume a bounded runtime snapshot rather than live
-  cross-core state;
+- read-only diagnostics consume bounded snapshot/transport state rather than
+  live cross-core state;
 - command protocol and identification behavior preserved;
 - realtime ownership remains on ESP32;
 - CI and hardware timing validation remain green after each structural slice.
