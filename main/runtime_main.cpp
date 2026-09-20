@@ -1,19 +1,30 @@
-// Runtime integration for the firmware-owned swing-identification experiment.
-// The only remaining source-inclusion bridge is app_main.cpp, whose shared
-// bring-up state is still being extracted. Realtime control is owned directly
-// by this translation unit.
-#define app_main triwhirl_legacy_app_main
-#include "app_main.cpp"
-#undef app_main
+// Explicit TriWhirl application startup and Core-1 realtime runtime.
+// Shared bring-up state/helpers live in runtime_state.cpp; no source files are
+// textually included into this translation unit.
 
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+
+#include "driver/i2c_master.h"
+#include "esp_err.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "runtime_control.hpp"
 #include "runtime_encoder_acquisition.hpp"
 #include "runtime_platform.hpp"
 #include "runtime_release.hpp"
 #include "runtime_snapshot.hpp"
+#include "runtime_state.hpp"
 #include "runtime_supervisor_io.hpp"
+#include "triwhirl/ble_transport.hpp"
+#include "triwhirl/board.hpp"
 #include "triwhirl/swing_id.hpp"
+
+using namespace triwhirl::runtime::state;
 
 static_assert(triwhirl::runtime::kRealtimeReleasePeriodUs == kControlPeriodUs,
               "GPTimer release period must match control period");
@@ -120,24 +131,15 @@ void printSwingHelp();
 
 const char* runtimeTimingStageName(const RuntimeTimingStage stage) {
   switch (stage) {
-    case RuntimeTimingStage::kEncoder:
-      return "encoder";
-    case RuntimeTimingStage::kImuAttitude:
-      return "imu_attitude";
-    case RuntimeTimingStage::kSafetySwing:
-      return "safety_swing";
-    case RuntimeTimingStage::kMotor:
-      return "motor";
-    case RuntimeTimingStage::kLog:
-      return "log";
-    case RuntimeTimingStage::kConsole:
-      return "console";
-    case RuntimeTimingStage::kTelemetry:
-      return "telemetry";
-    case RuntimeTimingStage::kLoop:
-      return "loop";
-    case RuntimeTimingStage::kCount:
-      break;
+    case RuntimeTimingStage::kEncoder: return "encoder";
+    case RuntimeTimingStage::kImuAttitude: return "imu_attitude";
+    case RuntimeTimingStage::kSafetySwing: return "safety_swing";
+    case RuntimeTimingStage::kMotor: return "motor";
+    case RuntimeTimingStage::kLog: return "log";
+    case RuntimeTimingStage::kConsole: return "console";
+    case RuntimeTimingStage::kTelemetry: return "telemetry";
+    case RuntimeTimingStage::kLoop: return "loop";
+    case RuntimeTimingStage::kCount: break;
   }
   return "unknown";
 }
@@ -174,19 +176,16 @@ void recordRuntimeTimingStage(const RuntimeTimingStage stage,
     return;
   }
   const std::uint64_t elapsed64 = static_cast<std::uint64_t>(end_us - begin_us);
-  const std::uint32_t elapsed = elapsed64 > std::numeric_limits<std::uint32_t>::max()
-                                    ? std::numeric_limits<std::uint32_t>::max()
-                                    : static_cast<std::uint32_t>(elapsed64);
+  const std::uint32_t elapsed =
+      elapsed64 > std::numeric_limits<std::uint32_t>::max()
+          ? std::numeric_limits<std::uint32_t>::max()
+          : static_cast<std::uint32_t>(elapsed64);
   RuntimeTimingStageStats& stats =
       runtime_timing_profile.stages[static_cast<std::size_t>(stage)];
   ++stats.count;
   stats.total_us += elapsed;
-  if (elapsed < stats.min_us) {
-    stats.min_us = elapsed;
-  }
-  if (elapsed > stats.max_us) {
-    stats.max_us = elapsed;
-  }
+  if (elapsed < stats.min_us) stats.min_us = elapsed;
+  if (elapsed > stats.max_us) stats.max_us = elapsed;
 }
 
 void printRuntimeTimingProfile() {
@@ -230,24 +229,18 @@ bool swingTerminal(const SwingIdState state) {
 }
 
 void queueSwingEvent(const SwingIdOutput& output) {
-  if (!output.transition || swing_event_queue == nullptr) {
-    return;
-  }
+  if (!output.transition || swing_event_queue == nullptr) return;
   SwingEvent event{};
   event.output = output;
   event.target_captures = swing_id_runner.config().target_captures;
   event.fault_mask = safety_latch.mask();
-  if (xQueueSend(swing_event_queue, &event, 0) != pdTRUE) {
-    ++swing_event_drops;
-  }
+  if (xQueueSend(swing_event_queue, &event, 0) != pdTRUE) ++swing_event_drops;
 }
 
 void swingEventTask(void*) {
   SwingEvent event{};
   while (true) {
-    if (xQueueReceive(swing_event_queue, &event, portMAX_DELAY) != pdTRUE) {
-      continue;
-    }
+    if (xQueueReceive(swing_event_queue, &event, portMAX_DELAY) != pdTRUE) continue;
     const SwingIdOutput& output = event.output;
     consolePrintf(
         "event,swing_id,state=%s,captures=%lu,target=%lu,half_cycle=%lu,vertex=%s,error_deg=%.3f,vq_v=%.3f,reason=%s,fault_mask=0x%08lx\r\n",
@@ -262,9 +255,7 @@ void swingEventTask(void*) {
 }
 
 void setSwingCriticalWindow(const bool critical) {
-  if (log_critical_window == critical) {
-    return;
-  }
+  if (log_critical_window == critical) return;
   log_critical_window = critical;
   runtime_logger.setFlashWritesAllowed(!critical);
 }
@@ -300,17 +291,12 @@ SwingIdInput currentSwingInput(const std::uint32_t now_us) {
 }
 
 void updateSwingIdentification(const std::uint32_t now_us) {
-  if (!swing_id_runner.active()) {
-    return;
-  }
-  const SwingIdOutput output = swing_id_runner.update(currentSwingInput(now_us));
-  applySwingOutput(output);
+  if (!swing_id_runner.active()) return;
+  applySwingOutput(swing_id_runner.update(currentSwingInput(now_us)));
 }
 
 void finalizeSwingLogIfPending() {
-  if (!swing_log_finalize_pending) {
-    return;
-  }
+  if (!swing_log_finalize_pending) return;
   setSwingCriticalWindow(false);
   runtime_logger.stop();
   swing_log_finalize_pending = false;
@@ -339,26 +325,15 @@ void printSwingStatus() {
 std::uint16_t swingRuntimeLogFlags() {
   std::uint16_t flags = runtimeLogFlags();
   const SwingIdOutput& output = swing_id_runner.output();
-  if (!swing_id_runner.active()) {
-    return flags;
-  }
-  if (output.pump_active) {
-    flags |= triwhirl::log::kRecordPumpActive;
-  }
+  if (!swing_id_runner.active()) return flags;
+  if (output.pump_active) flags |= triwhirl::log::kRecordPumpActive;
   if (output.probe_active) {
     flags |= triwhirl::log::kRecordProbeActive;
     switch (output.vertex) {
-      case SwingIdVertex::kA:
-        flags |= triwhirl::log::kRecordVertexA;
-        break;
-      case SwingIdVertex::kB:
-        flags |= triwhirl::log::kRecordVertexB;
-        break;
-      case SwingIdVertex::kC:
-        flags |= triwhirl::log::kRecordVertexC;
-        break;
-      case SwingIdVertex::kNone:
-        break;
+      case SwingIdVertex::kA: flags |= triwhirl::log::kRecordVertexA; break;
+      case SwingIdVertex::kB: flags |= triwhirl::log::kRecordVertexB; break;
+      case SwingIdVertex::kC: flags |= triwhirl::log::kRecordVertexC; break;
+      case SwingIdVertex::kNone: break;
     }
   }
   return flags;
@@ -399,18 +374,12 @@ void resetControlProfileStats() {
 void recordLocalTiming(LocalTimingStats* const stats,
                        const std::int64_t begin_us,
                        const std::int64_t end_us) {
-  if (stats == nullptr || end_us < begin_us) {
-    return;
-  }
+  if (stats == nullptr || end_us < begin_us) return;
   const std::uint32_t elapsed = static_cast<std::uint32_t>(end_us - begin_us);
   ++stats->count;
   stats->total_us += elapsed;
-  if (stats->count == 1U || elapsed < stats->min_us) {
-    stats->min_us = elapsed;
-  }
-  if (elapsed > stats->max_us) {
-    stats->max_us = elapsed;
-  }
+  if (stats->count == 1U || elapsed < stats->min_us) stats->min_us = elapsed;
+  if (elapsed > stats->max_us) stats->max_us = elapsed;
 }
 
 void recordControlPeriod(const std::int64_t start_us) {
@@ -421,23 +390,14 @@ void recordControlPeriod(const std::int64_t start_us) {
   const std::uint32_t period_us =
       static_cast<std::uint32_t>(start_us - control_previous_start_us);
   control_previous_start_us = start_us;
-  if (period_us < 900U) {
-    ++control_period_histogram.lt_900;
-  } else if (period_us < 950U) {
-    ++control_period_histogram.us_900_949;
-  } else if (period_us < 1000U) {
-    ++control_period_histogram.us_950_999;
-  } else if (period_us < 1050U) {
-    ++control_period_histogram.us_1000_1049;
-  } else if (period_us < 1100U) {
-    ++control_period_histogram.us_1050_1099;
-  } else if (period_us < 1250U) {
-    ++control_period_histogram.us_1100_1249;
-  } else if (period_us < 1500U) {
-    ++control_period_histogram.us_1250_1499;
-  } else {
-    ++control_period_histogram.ge_1500;
-  }
+  if (period_us < 900U) ++control_period_histogram.lt_900;
+  else if (period_us < 950U) ++control_period_histogram.us_900_949;
+  else if (period_us < 1000U) ++control_period_histogram.us_950_999;
+  else if (period_us < 1050U) ++control_period_histogram.us_1000_1049;
+  else if (period_us < 1100U) ++control_period_histogram.us_1050_1099;
+  else if (period_us < 1250U) ++control_period_histogram.us_1100_1249;
+  else if (period_us < 1500U) ++control_period_histogram.us_1250_1499;
+  else ++control_period_histogram.ge_1500;
 }
 
 void printControlProfileSummary() {
@@ -546,9 +506,7 @@ void publishSupervisorSnapshot(const std::uint32_t now_us) {
 
 bool typedCommandAllowedDuringSwing(
     const triwhirl::runtime::RuntimeCommandType type) {
-  if (!swing_id_runner.active()) {
-    return true;
-  }
+  if (!swing_id_runner.active()) return true;
   return type == triwhirl::runtime::RuntimeCommandType::kStatus ||
          type == triwhirl::runtime::RuntimeCommandType::kImuStatus ||
          type == triwhirl::runtime::RuntimeCommandType::kLogStatus ||
@@ -601,8 +559,7 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
         return;
       }
       consoleWrite("OK swing abort\r\n");
-      finishSwingRun(
-          swing_id_runner.abort(SwingIdStopReason::kExternalAbort));
+      finishSwingRun(swing_id_runner.abort(SwingIdStopReason::kExternalAbort));
       return;
     case triwhirl::runtime::RuntimeCommandType::kSwingStart: {
       if (swing_id_runner.active()) {
@@ -726,9 +683,7 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
         consoleWrite("OK motor stop\r\n");
         return;
       }
-      if (!motorStartAllowed()) {
-        return;
-      }
+      if (!motorStartAllowed()) return;
       if (!motor_config_valid) {
         consoleWrite("ERR motor is not calibrated/configured\r\n");
         return;
@@ -758,9 +713,7 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       return;
     }
     case triwhirl::runtime::RuntimeCommandType::kMotorCalibrate:
-      if (!motorStartAllowed()) {
-        return;
-      }
+      if (!motorStartAllowed()) return;
       stopMotor();
       if (!encoder_sample_valid) {
         consoleWrite("ERR motor calibrate: encoder read unavailable\r\n");
@@ -796,9 +749,7 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
         consoleWrite("OK field stopped\r\n");
         return;
       }
-      if (!motorStartAllowed()) {
-        return;
-      }
+      if (!motorStartAllowed()) return;
       stopMotor();
       open_loop_hz = requested_hz;
       open_loop_amplitude_v = requested_amplitude;
@@ -937,15 +888,11 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
 
 void processOneSupervisorInput() {
   triwhirl::runtime::SupervisorInputEvent event{};
-  if (!triwhirl::runtime::tryReceiveSupervisorInput(&event)) {
-    return;
-  }
+  if (!triwhirl::runtime::tryReceiveSupervisorInput(&event)) return;
   if (event.type == triwhirl::runtime::SupervisorInputEventType::kRuntimeCommand) {
     executeRuntimeCommand(event.runtime_command);
   }
-  if (!swing_id_runner.active()) {
-    printPrompt();
-  }
+  if (!swing_id_runner.active()) printPrompt();
 }
 
 void realtimeControlTaskImpl(void*) {
@@ -988,9 +935,7 @@ void realtimeControlTaskImpl(void*) {
       control_profile_active = false;
       printControlProfileSummary();
     }
-    if (profile) {
-      recordControlPeriod(start_us);
-    }
+    if (profile) recordControlPeriod(start_us);
 
     std::uint32_t encoder_sequence = 0U;
     const bool encoder_dispatched =
@@ -999,9 +944,7 @@ void realtimeControlTaskImpl(void*) {
     const std::int64_t imu_begin_us = esp_timer_get_time();
     const bool imu_sampled = sampleImu();
     const std::int64_t attitude_begin_us = esp_timer_get_time();
-    if (imu_sampled) {
-      updateAttitude(loop_us);
-    }
+    if (imu_sampled) updateAttitude(loop_us);
     const std::int64_t imu_end_us = esp_timer_get_time();
     if (profile) {
       recordRuntimeTimingStage(RuntimeTimingStage::kImuAttitude, imu_begin_us,
@@ -1012,11 +955,8 @@ void realtimeControlTaskImpl(void*) {
     }
 
     const std::int64_t encoder_join_begin_us = imu_end_us;
-    if (encoder_dispatched) {
-      collectAndCommitEncoder(encoder_sequence, loop_us);
-    } else {
-      noteEncoderMiss();
-    }
+    if (encoder_dispatched) collectAndCommitEncoder(encoder_sequence, loop_us);
+    else noteEncoderMiss();
     const std::int64_t encoder_join_end_us = esp_timer_get_time();
     if (profile) {
       recordRuntimeTimingStage(RuntimeTimingStage::kEncoder,
@@ -1065,9 +1005,6 @@ void realtimeControlTaskImpl(void*) {
     updateTimingStats(start_us, end_us);
 
     if (!triwhirl::runtime::waitForNextRealtimeRelease()) {
-      // Preserve the previous scheduler fallback while this refactor remains
-      // behavior-only. A later #32 safety slice will make GPTimer availability
-      // an explicit Balance-mode admission condition.
       vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1));
     }
   }
@@ -1144,9 +1081,6 @@ extern "C" void app_main(void) {
     startGyroCalibration(kDefaultGyroCalibrationSamples);
   }
   last_motor_update_us = now_us;
-  last_encoder_sample_us = now_us;
-  last_encoder_health_us = now_us;
-  last_imu_sample_us = now_us;
   last_telemetry_us = now_us;
 
   consoleWrite("TriWhirl deterministic motor + IMU + attitude runtime ready\r\n");
