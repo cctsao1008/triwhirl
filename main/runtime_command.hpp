@@ -4,11 +4,16 @@
 
 namespace triwhirl::runtime {
 
-// Commands that have crossed the supervisor/realtime ownership boundary.
 // UART development CLI and BLE GATT ingress are parsed/validated in the
-// supervisor domain; realtime receives only this fixed-size record.
+// supervisor domain. Realtime receives only this fixed-size typed record.
 enum class RuntimeCommandType : std::uint8_t {
   kNone = 0,
+  kStatus,
+  kMotorStatus,
+  kImuStatus,
+  kLogStatus,
+  kSwingStatus,
+  kTimingProfileStatus,
   kMotorStop,
   kStop,
   kSwingAbort,
@@ -28,6 +33,12 @@ enum class RuntimeCommandType : std::uint8_t {
   kAttitudeReset,
   kImuCalibrate,
   kImuMap,
+  kLogPrepare,
+  kLogStart,
+  kLogCriticalOn,
+  kLogCriticalOff,
+  kLogStop,
+  kLogDump,
 };
 
 struct MotorVqPayload {
@@ -83,6 +94,10 @@ struct SwingConfigPayload {
   std::uint32_t max_duration_us = 0U;
 };
 
+struct LogPreparePayload {
+  float seconds = 0.0F;
+};
+
 union RuntimeCommandPayload {
   MotorVqPayload motor_vq;
   MotorConfigPayload motor_config;
@@ -92,6 +107,7 @@ union RuntimeCommandPayload {
   ImuCalibratePayload imu_calibrate;
   ImuMapPayload imu_map;
   SwingConfigPayload swing_config;
+  LogPreparePayload log_prepare;
 
   constexpr RuntimeCommandPayload() : motor_vq{} {}
 };
