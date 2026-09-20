@@ -41,6 +41,15 @@ REQUIRED_TYPES = (
     "kLogCriticalOff", "kLogStop", "kLogDump",
 )
 
+REQUIRED_REPLY_CODES = (
+    "kSwingOwnsRealtime", "kMotorStopOk", "kStopOk", "kSwingAlreadyInactive",
+    "kSwingAbortOk", "kTimingResetOk", "kTimingProfileResetOk",
+    "kFaultAlreadyClear", "kFaultClearRejected", "kFaultClearOk",
+    "kTelemetryOnOk", "kTelemetryOffOk", "kInvalidMotorConfig",
+    "kMotorConfigOk", "kAttitudeResetFromAccelOk", "kInvalidAttitudeAngle",
+    "kAttitudeResetAngleOk", "kInvalidImuMap", "kImuMapOk",
+)
+
 PARSER_TEST_REQUIRED_TOKENS = (
     'expectType("status", RuntimeCommandType::kStatus)',
     'expectType("swing status", RuntimeCommandType::kSwingStatus)',
@@ -109,6 +118,7 @@ def main() -> None:
     supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
     supervisor_header = (MAIN / "runtime_supervisor_io.hpp").read_text(encoding="utf-8")
     command_header = (MAIN / "runtime_command.hpp").read_text(encoding="utf-8")
+    reply_header = (MAIN / "runtime_reply.hpp").read_text(encoding="utf-8")
     parser_text = (MAIN / "runtime_command_parser.cpp").read_text(encoding="utf-8")
     parser_test_text = (TESTS / "runtime_command_parser_test.cpp").read_text(encoding="utf-8")
     mpu_header = (HW / "include" / "triwhirl" / "drivers" / "mpu6050.hpp").read_text(encoding="utf-8")
@@ -118,10 +128,10 @@ def main() -> None:
     if leaked_io:
         fail(f"UART development/BLE GATT ingress leaked into realtime runtime: {leaked_io}")
 
-    if "SupervisorInputEventType::kCommand" in runtime_main_text or \
-       "SupervisorInputEventType::kCommand" in supervisor_text or \
-       "SupervisorInputEventType::kCommand" in supervisor_header:
-        fail("legacy raw command event remains")
+    if "SupervisorInputEventType" in runtime_main_text or \
+       "SupervisorInputEventType" in supervisor_text or \
+       "SupervisorInputEventType" in supervisor_header:
+        fail("obsolete supervisor bookkeeping event enum remains")
     if "handleSupervisorCommand(event.line)" in runtime_main_text:
         fail("realtime still dispatches raw command strings")
     if "char line[kSupervisorCommandBytes]" in supervisor_header:
@@ -174,7 +184,7 @@ def main() -> None:
     require_tokens(runtime_snapshot_header,
                    ("motor_vq_v", "encoder_unwrapped_count", "imu_who_am_i",
                     "imu_map_gyro_sign", "log_partition_bytes",
-                    "log_dump_active"),
+                    "log_dump_active", "swing_active"),
                    "runtime diagnostic snapshot is incomplete")
     require_tokens(runtime_snapshot_text,
                    ("populateRuntimeDiagnosticSnapshot(&complete)",
@@ -200,9 +210,30 @@ def main() -> None:
     if "imu.readWhoAmI(" in supervisor_text or "encoder.readStatus(" in supervisor_text:
         fail("supervisor bypassed the diagnostic boundary")
     require_tokens(supervisor_text,
-                   ("parseRuntimeCommand(", "SupervisorInputEventType::kRuntimeCommand",
-                    "ERR unknown command", "uart_development_input", "ble_gatt_input"),
-                   "supervisor typed-command boundary regressed")
+                   ("parseRuntimeCommand(", "SupervisorInputEvent",
+                    "ERR unknown command", "uart_development_input", "ble_gatt_input",
+                    "kRuntimeReplyQueueDepth", "formatRuntimeReply(",
+                    "drainRuntimeReplies(", "writePromptFromSnapshot("),
+                   "supervisor typed-command/reply boundary regressed")
+    require_tokens(supervisor_header,
+                   ("publishRuntimeReply(", "runtimeReplyDroppedCount(",
+                    '#include "runtime_reply.hpp"'),
+                   "runtime reply API is incomplete")
+    require_tokens(reply_header, REQUIRED_REPLY_CODES,
+                   "structured runtime reply contract is incomplete")
+    require_tokens(reply_header,
+                   ("std::is_trivially_copyable_v<RuntimeReply>",
+                    "sizeof(RuntimeReply) <= 40U"),
+                   "runtime reply mailbox bounds regressed")
+    require_tokens(runtime_main_text,
+                   ("deferRuntimeReply(", "publishRuntimeReply(",
+                    "command_reply_deferred", "snapshot.swing_active",
+                    "RuntimeReplyCode::kMotorStopOk",
+                    "RuntimeReplyCode::kMotorConfigOk",
+                    "RuntimeReplyCode::kAttitudeResetAngleOk",
+                    "RuntimeReplyCode::kImuMapOk"),
+                   "realtime structured reply migration regressed")
+
     require_tokens(command_header, REQUIRED_TYPES,
                    "typed command contract is incomplete")
     require_tokens(parser_text, tuple(f"RuntimeCommandType::{x}" for x in REQUIRED_TYPES),
@@ -230,6 +261,8 @@ def main() -> None:
     print("  logger_status=20ms_snapshot_cache")
     print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
+    print("  runtime_reply_egress=bounded_structured_core1_to_core0")
+    print("  supervisor_prompt_bookkeeping=core0")
     print("  command_parser=complete_core0_grammar")
     print("  command_parser_contract_test=present")
 
