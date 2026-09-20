@@ -1,13 +1,13 @@
 #include "runtime_supervisor_io.hpp"
 
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "runtime_command_parser.hpp"
 #include "runtime_snapshot.hpp"
 #include "triwhirl/ble_transport.hpp"
 #include "triwhirl/safety.hpp"
@@ -17,7 +17,6 @@ namespace {
 
 constexpr std::uint32_t kSupervisorPollPeriodMs = 5U;
 constexpr UBaseType_t kSupervisorQueueDepth = 4U;
-constexpr std::uint32_t kDefaultGyroCalibrationSamples = 500U;
 
 struct CommandInputState {
   char line[kSupervisorCommandBytes]{};
@@ -58,48 +57,6 @@ void publishSupervisorHandled() {
   SupervisorInputEvent event{};
   event.type = SupervisorInputEventType::kSupervisorHandled;
   publishEvent(event);
-}
-
-bool commandArguments(const char* const line, const char* const command,
-                      const char** const arguments) {
-  if (line == nullptr || command == nullptr || arguments == nullptr) {
-    return false;
-  }
-  const std::size_t length = std::strlen(command);
-  if (std::strncmp(line, command, length) != 0) {
-    return false;
-  }
-  const char next = line[length];
-  if (next != '\0' && next != ' ' && next != '\t') {
-    return false;
-  }
-  const char* cursor = line + length;
-  while (*cursor == ' ' || *cursor == '\t') {
-    ++cursor;
-  }
-  *arguments = cursor;
-  return true;
-}
-
-char* nextToken(char** const cursor) {
-  if (cursor == nullptr || *cursor == nullptr) {
-    return nullptr;
-  }
-  while (**cursor == ' ' || **cursor == '\t') {
-    ++(*cursor);
-  }
-  if (**cursor == '\0') {
-    return nullptr;
-  }
-  char* token = *cursor;
-  while (**cursor != '\0' && **cursor != ' ' && **cursor != '\t') {
-    ++(*cursor);
-  }
-  if (**cursor != '\0') {
-    **cursor = '\0';
-    ++(*cursor);
-  }
-  return token;
 }
 
 bool handleReadOnlySnapshotCommand(const char* const line) {
@@ -157,98 +114,23 @@ bool handleReadOnlySnapshotCommand(const char* const line) {
   return true;
 }
 
-bool publishRuntimeCommand(const RuntimeCommand& command) {
-  SupervisorInputEvent event{};
-  event.type = SupervisorInputEventType::kRuntimeCommand;
-  event.runtime_command = command;
-  publishEvent(event);
-  return true;
-}
-
 bool handleTypedRuntimeCommand(const char* const line) {
-  if (line == nullptr) {
-    return false;
-  }
-
-  RuntimeCommand command{};
-  if (std::strcmp(line, "motor stop") == 0) {
-    command.type = RuntimeCommandType::kMotorStop;
-    return publishRuntimeCommand(command);
-  }
-  if (std::strcmp(line, "stop") == 0) {
-    command.type = RuntimeCommandType::kStop;
-    return publishRuntimeCommand(command);
-  }
-  if (std::strcmp(line, "swing abort") == 0) {
-    command.type = RuntimeCommandType::kSwingAbort;
-    return publishRuntimeCommand(command);
-  }
-  if (std::strcmp(line, "timing reset") == 0) {
-    command.type = RuntimeCommandType::kTimingReset;
-    return publishRuntimeCommand(command);
-  }
-  if (std::strcmp(line, "fault clear") == 0) {
-    command.type = RuntimeCommandType::kFaultClear;
-    return publishRuntimeCommand(command);
-  }
-  if (std::strcmp(line, "telemetry on") == 0) {
-    command.type = RuntimeCommandType::kTelemetryOn;
-    return publishRuntimeCommand(command);
-  }
-  if (std::strcmp(line, "telemetry off") == 0) {
-    command.type = RuntimeCommandType::kTelemetryOff;
-    return publishRuntimeCommand(command);
-  }
-
-  const char* arguments = nullptr;
-  if (commandArguments(line, "motor vq", &arguments)) {
-    if (*arguments == '\0') {
-      writeText("ERR usage: motor vq <volts>\r\n");
+  const RuntimeCommandParseResult parsed = parseRuntimeCommand(line);
+  switch (parsed.status) {
+    case RuntimeCommandParseStatus::kNotMatched:
+      return false;
+    case RuntimeCommandParseStatus::kUsageError:
+      writeText(parsed.error);
       publishSupervisorHandled();
       return true;
-    }
-    command.type = RuntimeCommandType::kMotorVq;
-    command.payload.motor_vq.volts = std::strtof(arguments, nullptr);
-    return publishRuntimeCommand(command);
-  }
-
-  if (commandArguments(line, "field", &arguments)) {
-    char copy[kSupervisorCommandBytes]{};
-    std::snprintf(copy, sizeof(copy), "%s", arguments);
-    char* cursor = copy;
-    char* hz_token = nextToken(&cursor);
-    char* amplitude_token = nextToken(&cursor);
-    if (hz_token == nullptr || amplitude_token == nullptr) {
-      writeText("ERR usage: field <electrical_hz> <amplitude_v>\r\n");
-      publishSupervisorHandled();
+    case RuntimeCommandParseStatus::kCommand: {
+      SupervisorInputEvent event{};
+      event.type = SupervisorInputEventType::kRuntimeCommand;
+      event.runtime_command = parsed.command;
+      publishEvent(event);
       return true;
     }
-    command.type = RuntimeCommandType::kField;
-    command.payload.field.electrical_hz = std::strtof(hz_token, nullptr);
-    command.payload.field.amplitude_v = std::strtof(amplitude_token, nullptr);
-    return publishRuntimeCommand(command);
   }
-
-  if (commandArguments(line, "attitude reset", &arguments)) {
-    command.type = RuntimeCommandType::kAttitudeReset;
-    if (*arguments == '\0') {
-      command.payload.attitude_reset.use_accelerometer = true;
-    } else {
-      command.payload.attitude_reset.use_accelerometer = false;
-      command.payload.attitude_reset.angle_rad = std::strtof(arguments, nullptr);
-    }
-    return publishRuntimeCommand(command);
-  }
-
-  if (commandArguments(line, "imu calibrate", &arguments)) {
-    command.type = RuntimeCommandType::kImuCalibrate;
-    command.payload.imu_calibrate.samples =
-        *arguments == '\0'
-            ? kDefaultGyroCalibrationSamples
-            : static_cast<std::uint32_t>(std::strtoul(arguments, nullptr, 10));
-    return publishRuntimeCommand(command);
-  }
-
   return false;
 }
 
