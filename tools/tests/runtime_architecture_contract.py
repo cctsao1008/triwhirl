@@ -135,6 +135,10 @@ def main() -> None:
     supervisor_header = (MAIN / "runtime_supervisor_io.hpp").read_text(encoding="utf-8")
     command_header = (MAIN / "runtime_command.hpp").read_text(encoding="utf-8")
     reply_header = (MAIN / "runtime_reply.hpp").read_text(encoding="utf-8")
+    egress_header = (MAIN / "runtime_egress.hpp").read_text(encoding="utf-8")
+    state_event_header = (MAIN / "runtime_state_event.hpp").read_text(encoding="utf-8")
+    telemetry_header = (MAIN / "runtime_telemetry.hpp").read_text(encoding="utf-8")
+    profile_header = (MAIN / "runtime_profile_report.hpp").read_text(encoding="utf-8")
     parser_text = (MAIN / "runtime_command_parser.cpp").read_text(encoding="utf-8")
     parser_test_text = (TESTS / "runtime_command_parser_test.cpp").read_text(encoding="utf-8")
     mpu_header = (HW / "include" / "triwhirl" / "drivers" / "mpu6050.hpp").read_text(encoding="utf-8")
@@ -185,7 +189,8 @@ def main() -> None:
                    ("As5600 encoder;", "Mpu6050 imu;", "void updateMotor(",
                     "void evaluateSafety(", "void emitTelemetry(",
                     "MotorStartFailure motorStartFailure(",
-                    "std::uint32_t startGyroCalibration(", "bool initConsole("),
+                    "std::uint32_t startGyroCalibration(", "bool initConsole(",
+                    "publishRuntimeStateEvent(", "publishRuntimeTelemetry("),
                    "runtime state implementation is incomplete")
     if "motorStartAllowed(" in runtime_state_header or "motorStartAllowed(" in runtime_state_text:
         fail("text-producing motor command admission helper returned")
@@ -233,14 +238,23 @@ def main() -> None:
     require_tokens(supervisor_text,
                    ("parseRuntimeCommand(", "SupervisorInputEvent",
                     "ERR unknown command", "uart_development_input", "ble_gatt_input",
-                    "kRuntimeReplyQueueDepth = 24U", "formatRuntimeReply(",
+                    "kRuntimeEgressQueueDepth = 32U", "RuntimeEgressRecord",
+                    "formatRuntimeReply(", "formatRuntimeStateEvent(",
+                    "formatRuntimeTelemetry(", "formatRuntimeProfileReport(",
                     "formatSwingStatusPayload(", "timingProfileStageName(",
-                    "drainRuntimeReplies(", "writePromptFromSnapshot("),
-                   "supervisor typed-command/reply boundary regressed")
+                    "drainRuntimeEgress(", "writePromptFromSnapshot("),
+                   "supervisor typed-command/egress boundary regressed")
+    if "kRuntimeReplyQueueDepth" in supervisor_text or "reply_queue" in supervisor_text:
+        fail("obsolete reply-only egress queue returned")
+
     require_tokens(supervisor_header,
-                   ("publishRuntimeReply(", "runtimeReplyDroppedCount(",
-                    '#include "runtime_reply.hpp"'),
-                   "runtime reply API is incomplete")
+                   ('#include "runtime_egress.hpp"', "RuntimeCommand runtime_command"),
+                   "supervisor boundary header is incomplete")
+    require_tokens(egress_header,
+                   ("publishRuntimeReply(", "publishRuntimeStateEvent(",
+                    "publishRuntimeTelemetry(", "publishRuntimeProfileReport(",
+                    "runtimeEgressDroppedCount("),
+                   "unified runtime egress API is incomplete")
     require_tokens(reply_header, REQUIRED_REPLY_CODES,
                    "structured runtime reply contract is incomplete")
     require_tokens(reply_header,
@@ -248,11 +262,30 @@ def main() -> None:
                     "sizeof(RuntimeReply) <= 104U",
                     "RuntimeTimingProfileStageId"),
                    "runtime reply mailbox bounds regressed")
+    require_tokens(state_event_header,
+                   ("RuntimeStateEventType", "kFaultLatched",
+                    "kMotorCalibrationComplete", "kImuCalibrationComplete",
+                    "std::is_trivially_copyable_v<RuntimeStateEvent>",
+                    "sizeof(RuntimeStateEvent) <= 32U"),
+                   "runtime asynchronous state-event contract regressed")
+    require_tokens(telemetry_header,
+                   ("RuntimeTelemetryFrame", "encoder_unwrapped_count",
+                    "attitude_accel_weight",
+                    "std::is_trivially_copyable_v<RuntimeTelemetryFrame>",
+                    "sizeof(RuntimeTelemetryFrame) <= 128U"),
+                   "runtime telemetry contract regressed")
+    require_tokens(profile_header,
+                   ("RuntimeProfileReport", "attitude_total_us", "period_ge1500",
+                    "std::is_trivially_copyable_v<RuntimeProfileReport>",
+                    "sizeof(RuntimeProfileReport) <= 152U"),
+                   "runtime profile-report contract regressed")
 
     require_tokens(runtime_main_text,
                    ("deferRuntimeReply(", "publishRuntimeReply(",
                     "command_reply_deferred", "snapshot.swing_active",
                     "makeSwingStatusReply(", "publishRuntimeTimingProfile(",
+                    "publishControlProfileSummary(",
+                    "publishRuntimeProfileReport(",
                     "RuntimeReplyCode::kSwingTransitionEvent",
                     "RuntimeReplyCode::kMotorFocOk",
                     "RuntimeReplyCode::kMotorCalibrationStarted",
@@ -261,7 +294,7 @@ def main() -> None:
                     "RuntimeReplyCode::kLogPrepareOk",
                     "RuntimeReplyCode::kLogStartOk",
                     "RuntimeReplyCode::kLogStopOk"),
-                   "realtime structured reply migration regressed")
+                   "realtime structured egress migration regressed")
 
     obsolete_swing_output = (
         "struct SwingEvent", "swing_event_queue", "swingEventTask(",
@@ -271,8 +304,28 @@ def main() -> None:
     if leaked_swing_output:
         fail(f"obsolete separate swing output path remains: {leaked_swing_output}")
 
-    # Synchronous command responses should be represented as structured codes,
-    # not constructed as protocol text in the realtime command executor.
+    # Active realtime paths publish fixed-size records; Core 0 owns wire text.
+    realtime_state_wire_text = (
+        '"FAULT,code=%s',
+        '"ERR motor calibration:',
+        '"OK motor calibrated ',
+        '"ERR FOC stopped:',
+        '"OK imu gyro calibration bx=',
+        '"telemetry,%lu',
+    )
+    leaked_state_text = [x for x in realtime_state_wire_text if x in runtime_state_text]
+    if leaked_state_text:
+        fail(f"asynchronous protocol formatting leaked into runtime state: {leaked_state_text}")
+    if '"parallel_profile,requests=' in runtime_main_text:
+        fail("parallel profile protocol formatting leaked into realtime orchestration")
+
+    require_tokens(supervisor_text,
+                   ('"FAULT,code=%s', '"ERR motor calibration:',
+                    '"OK motor calibrated ', '"ERR FOC stopped:',
+                    '"OK imu gyro calibration bx=', '"telemetry,%lu',
+                    '"parallel_profile,requests='),
+                   "Core0 asynchronous protocol formatting is incomplete")
+
     realtime_sync_text = (
         'consoleWrite("OK swing start',
         'consoleWrite("OK timing profile on',
@@ -315,8 +368,11 @@ def main() -> None:
     print("  logger_status=20ms_snapshot_cache")
     print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
-    print("  runtime_reply_egress=bounded_structured_core1_to_core0")
+    print("  runtime_egress=unified_bounded_core1_to_core0")
     print("  synchronous_command_formatting=core0")
+    print("  asynchronous_state_event_formatting=core0")
+    print("  telemetry_formatting=core0")
+    print("  parallel_profile_formatting=core0")
     print("  swing_transition_formatting=core0")
     print("  timing_profile_status_formatting=core0")
     print("  supervisor_prompt_bookkeeping=core0")
