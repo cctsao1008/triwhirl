@@ -101,6 +101,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
     ),
     ToolCommand(
         group="diag",
+        name="timing-profile",
+        handler="commands.diag:timing_profile_main",
+        description="Measure per-stage execution time inside the ESP32 control task.",
+    ),
+    ToolCommand(
+        group="diag",
         name="imu",
         handler="commands.diag:imu_main",
         description="Read IMU and attitude-estimator health over BLE.",
