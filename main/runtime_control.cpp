@@ -270,6 +270,70 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       telemetry_enabled = false;
       consoleWrite("OK telemetry off\r\n");
       return;
+    case triwhirl::runtime::RuntimeCommandType::kMotorVq: {
+      const float requested_vq = clampFinite(
+          command.payload.motor_vq.volts, -kMotorVectorLimitV,
+          kMotorVectorLimitV);
+      if (std::fabs(requested_vq) < 1.0e-4F) {
+        stopMotor();
+        consoleWrite("OK motor stop\r\n");
+        return;
+      }
+      if (!motorStartAllowed()) {
+        return;
+      }
+      if (!motor_config_valid) {
+        consoleWrite("ERR motor is not calibrated/configured\r\n");
+        return;
+      }
+      vq_command_v = requested_vq;
+      motor_mode = MotorMode::kFoc;
+      consolePrintf("OK motor FOC vq_v=%.6f\r\n", vq_command_v);
+      return;
+    }
+    case triwhirl::runtime::RuntimeCommandType::kField: {
+      const float requested_hz = clampFinite(
+          command.payload.field.electrical_hz, -kMaxElectricalHz,
+          kMaxElectricalHz);
+      const float requested_amplitude = clampFinite(
+          command.payload.field.amplitude_v, 0.0F, kMotorVectorLimitV);
+      if (requested_amplitude <= 0.0F || requested_hz == 0.0F) {
+        stopMotor();
+        consoleWrite("OK field stopped\r\n");
+        return;
+      }
+      if (!motorStartAllowed()) {
+        return;
+      }
+      stopMotor();
+      open_loop_hz = requested_hz;
+      open_loop_amplitude_v = requested_amplitude;
+      open_loop_angle_rad = 0.0F;
+      motor_mode = MotorMode::kOpenLoop;
+      consolePrintf("OK field e_hz=%.6f amp_v=%.6f\r\n", open_loop_hz,
+                    open_loop_amplitude_v);
+      return;
+    }
+    case triwhirl::runtime::RuntimeCommandType::kAttitudeReset:
+      if (command.payload.attitude_reset.use_accelerometer) {
+        resetAttitudeFromAccel();
+        consoleWrite("OK attitude reset from accelerometer\r\n");
+        return;
+      }
+      if (!std::isfinite(command.payload.attitude_reset.angle_rad)) {
+        consoleWrite("ERR invalid attitude angle\r\n");
+        return;
+      }
+      attitude_estimator.reset(command.payload.attitude_reset.angle_rad, 0.0F);
+      attitude_state = attitude_estimator.state();
+      attitude_initialized = true;
+      last_attitude_update_us = static_cast<std::uint32_t>(esp_timer_get_time());
+      consolePrintf("OK attitude reset angle_rad=%.6f\r\n",
+                    command.payload.attitude_reset.angle_rad);
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kImuCalibrate:
+      startGyroCalibration(command.payload.imu_calibrate.samples);
+      return;
     case triwhirl::runtime::RuntimeCommandType::kNone:
       return;
   }
