@@ -5,17 +5,31 @@
 namespace triwhirl {
 namespace {
 
+constexpr float kPi = 3.14159265358979323846F;
 constexpr float kTwoPi = 6.28318530717958647692F;
 
 float wrapAngle(float angle_rad) {
   if (!std::isfinite(angle_rad)) {
     return 0.0F;
   }
-  angle_rad = std::fmod(angle_rad + 3.14159265358979323846F, kTwoPi);
-  if (angle_rad < 0.0F) {
+
+  // Normal estimator updates move by only a small fraction of one revolution.
+  // Keep that hot path out of fmod(), which is comparatively expensive on the
+  // ESP32 LX6. Retain a general fallback for explicit resets with large angles.
+  if (angle_rad > 3.0F * kTwoPi || angle_rad < -3.0F * kTwoPi) {
+    angle_rad = std::fmod(angle_rad + kPi, kTwoPi);
+    if (angle_rad < 0.0F) {
+      angle_rad += kTwoPi;
+    }
+    return angle_rad - kPi;
+  }
+  while (angle_rad >= kPi) {
+    angle_rad -= kTwoPi;
+  }
+  while (angle_rad < -kPi) {
     angle_rad += kTwoPi;
   }
-  return angle_rad - 3.14159265358979323846F;
+  return angle_rad;
 }
 
 float clamp01(const float value) {
@@ -50,7 +64,12 @@ AttitudeEstimate PlanarAttitudeEstimator::update(
     return state_;
   }
 
-  const float accel_norm = std::hypot(body_accel_x_mps2, body_accel_z_mps2);
+  // Only a two-axis Euclidean norm is needed here. sqrt(x*x+z*z) avoids the
+  // extra generality/edge-case machinery in hypot() on every control sample.
+  const float accel_norm_sq =
+      body_accel_x_mps2 * body_accel_x_mps2 +
+      body_accel_z_mps2 * body_accel_z_mps2;
+  const float accel_norm = accel_norm_sq > 0.0F ? std::sqrt(accel_norm_sq) : 0.0F;
   float accel_weight = 0.0F;
   float innovation = 0.0F;
 
