@@ -8,9 +8,13 @@ namespace {
 
 using namespace triwhirl::runtime::state;
 
+constexpr std::uint32_t kLoggerSnapshotPeriodUs = 20000U;
+
 bool imu_identity_checked = false;
 bool imu_identity_valid = false;
 std::uint8_t imu_identity = 0U;
+LoggerStatus cached_logger_status{};
+std::uint32_t last_logger_snapshot_us = 0U;
 
 }  // namespace
 
@@ -68,6 +72,23 @@ void populateRuntimeDiagnosticSnapshot(RuntimeSnapshot* const snapshot) {
   snapshot->imu_map_cos_sign = imu_map.accel_cos_sign;
   snapshot->imu_map_gyro_sign = imu_map.gyro_sign;
   snapshot->imu_read_errors = imu_read_errors;
+
+  if (last_logger_snapshot_us == 0U ||
+      (snapshot->t_us - last_logger_snapshot_us) >= kLoggerSnapshotPeriodUs) {
+    cached_logger_status = runtime_logger.status();
+    last_logger_snapshot_us = snapshot->t_us;
+  }
+  snapshot->log_state = static_cast<std::uint8_t>(cached_logger_status.state);
+  snapshot->log_partition_bytes = cached_logger_status.partition_bytes;
+  snapshot->log_prepared_bytes = cached_logger_status.prepared_bytes;
+  snapshot->log_max_records = cached_logger_status.max_records;
+  snapshot->log_buffered_bytes = cached_logger_status.buffered_bytes;
+  snapshot->log_records_written = cached_logger_status.records_written;
+  snapshot->log_dropped_records = cached_logger_status.dropped_records;
+  snapshot->log_logical_bytes = cached_logger_status.logical_bytes;
+  snapshot->log_flash_writes_allowed = cached_logger_status.flash_writes_allowed;
+  snapshot->log_critical_window = log_critical_window;
+  snapshot->log_dump_active = binary_dump_active;
 }
 
 bool readEncoderDiagnosticStatus(EncoderDiagnosticStatus* const status) {
