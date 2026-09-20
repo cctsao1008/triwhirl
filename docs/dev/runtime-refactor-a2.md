@@ -29,7 +29,7 @@ runtime_supervisor_io                 ->    runtime_control
   bounded command queue
 
 runtime_supervisor_io                 <-    runtime_snapshot
-  read-only formatting                       latest complete snapshot
+  read-only formatting                      latest complete snapshot
   attitude/fault status                      non-blocking overwrite publication
 ```
 
@@ -50,16 +50,18 @@ copy without consuming it. The first migrated read-only commands are
 moving both formatting and live-state access out of the realtime task.
 
 `runtime_command.hpp` defines the fixed-size supervisor/realtime mutation
-contract. The following commands are now parsed on Core 0 and executed on Core 1
-without string interpretation:
+contract. Commands now parsed on Core 0 and executed on Core 1 without string
+interpretation include:
 
-- `motor stop`
-- `stop`
-- `swing abort`
-- `timing reset`
-- `fault clear`
-- `telemetry on`
-- `telemetry off`
+- no-payload commands: `motor stop`, `stop`, `swing abort`, `timing reset`,
+  `fault clear`, `telemetry on`, `telemetry off`;
+- payload commands: `motor vq <volts>`, `field <electrical_hz> <amplitude_v>`,
+  `attitude reset [angle_rad]`, and `imu calibrate [samples]`.
+
+The payload forms use fixed-size POD fields in `RuntimeCommand`; `strtof` /
+`strtoul` parsing remains entirely in the Core-0 supervisor domain. Realtime
+still performs state-dependent admission and mutation so safety ownership does
+not move across cores.
 
 The original swing-ownership policy is preserved: while identification owns
 realtime actuation, only commands that were previously allowed retain that
