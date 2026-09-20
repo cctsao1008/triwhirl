@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build vertex-normalized continuous-time state-space plants from active-fit JSON.
 
-The controller state is always local to the currently selected upright vertex:
+The controller state is always expressed in the shared 120-degree-periodic
+upright coordinate:
     x = [theta_error, theta_rate, wheel_rate]^T
     u = Vq
 
@@ -180,8 +181,9 @@ def main() -> int:
         "input": "Vq_v",
         "selected_vertices": vertices,
         "coordinate_contract": (
-            "At runtime choose the nearest upright A/B/C, compute wrapped theta_error "
-            "relative to that vertex, and apply one shared controller in these local coordinates."
+            "At runtime compute theta_error with 120-degree periodic wrapping around the "
+            "upright reference and apply one shared controller. A/B/C labels are optional "
+            "for control and remain useful for logging and identification provenance."
         ),
         "identification_contract": (
             "One, two, or three physical vertices may be used as plant samples.  Vertex labels "
