@@ -1,12 +1,15 @@
 #include "runtime_supervisor_io.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "runtime_snapshot.hpp"
 #include "triwhirl/ble_transport.hpp"
+#include "triwhirl/safety.hpp"
 
 namespace triwhirl::runtime {
 namespace {
@@ -32,13 +35,80 @@ void writeBytes(const char* data, const std::size_t length) {
   }
 }
 
+void writeText(const char* text) {
+  if (text != nullptr) {
+    writeBytes(text, std::strlen(text));
+  }
+}
+
 bool publishEvent(const SupervisorInputEvent& event) {
   if (input_queue == nullptr) {
     return false;
   }
   // Command traffic is supervisory. If the bounded mailbox is full, reject the
   // newest event rather than ever blocking this task or the realtime consumer.
-  return xQueueSend(input_queue, &event, 0) == pdTRUE;
+  if (xQueueSend(input_queue, &event, 0) != pdTRUE) {
+    writeText("ERR command mailbox full\r\n");
+    return false;
+  }
+  return true;
+}
+
+bool handleReadOnlySnapshotCommand(const char* const line) {
+  if (line == nullptr) {
+    return false;
+  }
+
+  const bool attitude_status = std::strcmp(line, "attitude status") == 0;
+  const bool fault_status = std::strcmp(line, "fault status") == 0;
+  if (!attitude_status && !fault_status) {
+    return false;
+  }
+
+  RuntimeSnapshot snapshot{};
+  if (!readLatestRuntimeSnapshot(&snapshot)) {
+    writeText("ERR runtime snapshot unavailable\r\n");
+  } else if (attitude_status) {
+    char buffer[320];
+    const int length = std::snprintf(
+        buffer, sizeof(buffer),
+        "attitude,initialized=%d,valid=%d,theta_rad=%.6f,rate_rad_s=%.6f,residual_bias_rad_s=%.6f,innovation=%.6f,accel_weight=%.6f,wheel_rate_rad_s=%.6f\r\n",
+        snapshot.attitude_initialized ? 1 : 0,
+        snapshot.attitude_valid ? 1 : 0,
+        snapshot.attitude_angle_rad,
+        snapshot.attitude_rate_rad_s,
+        snapshot.attitude_residual_bias_rad_s,
+        snapshot.attitude_innovation,
+        snapshot.attitude_accel_weight,
+        snapshot.wheel_rate_rad_s);
+    if (length > 0) {
+      const std::size_t count = static_cast<std::size_t>(length) < sizeof(buffer)
+                                    ? static_cast<std::size_t>(length)
+                                    : sizeof(buffer) - 1U;
+      writeBytes(buffer, count);
+    }
+  } else {
+    char buffer[128];
+    const auto first_fault =
+        static_cast<triwhirl::SafetyFault>(snapshot.safety_first_fault);
+    const int length = std::snprintf(
+        buffer, sizeof(buffer),
+        "fault,latched=%d,mask=0x%08lx,first=%s\r\n",
+        snapshot.safety_faulted ? 1 : 0,
+        static_cast<unsigned long>(snapshot.safety_fault_mask),
+        triwhirl::safetyFaultName(first_fault));
+    if (length > 0) {
+      const std::size_t count = static_cast<std::size_t>(length) < sizeof(buffer)
+                                    ? static_cast<std::size_t>(length)
+                                    : sizeof(buffer) - 1U;
+      writeBytes(buffer, count);
+    }
+  }
+
+  SupervisorInputEvent event{};
+  event.type = SupervisorInputEventType::kReadOnlyHandled;
+  publishEvent(event);
+  return true;
 }
 
 void consumeBytes(const std::uint8_t* input, const std::size_t received,
@@ -53,12 +123,12 @@ void consumeBytes(const std::uint8_t* input, const std::size_t received,
     if (c == '\r' || c == '\n') {
       if (state.length > 0U) {
         writeBytes("\r\n", 2U);
-        SupervisorInputEvent event{};
-        event.type = SupervisorInputEventType::kCommand;
-        std::memcpy(event.line, state.line, state.length);
-        event.line[state.length] = '\0';
-        if (!publishEvent(event)) {
-          writeBytes("ERR command mailbox full\r\n", 26U);
+        state.line[state.length] = '\0';
+        if (!handleReadOnlySnapshotCommand(state.line)) {
+          SupervisorInputEvent event{};
+          event.type = SupervisorInputEventType::kCommand;
+          std::memcpy(event.line, state.line, state.length + 1U);
+          publishEvent(event);
         }
         state.length = 0U;
       }
@@ -84,12 +154,10 @@ void consumeBytes(const std::uint8_t* input, const std::size_t received,
     }
 
     state.length = 0U;
-    writeBytes("\r\nERR command too long\r\n", 24U);
+    writeText("\r\nERR command too long\r\n");
     SupervisorInputEvent event{};
     event.type = SupervisorInputEventType::kLineOverflow;
-    if (!publishEvent(event)) {
-      writeBytes("ERR command mailbox full\r\n", 26U);
-    }
+    publishEvent(event);
   }
 }
 
