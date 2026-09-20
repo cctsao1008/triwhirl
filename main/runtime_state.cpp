@@ -364,10 +364,9 @@ void updateAttitude(const std::uint32_t now_us) {
       static_cast<float>(elapsed_us) * 1.0e-6F, true);
 }
 
-void startGyroCalibration(std::uint32_t samples) {
+std::uint32_t startGyroCalibration(std::uint32_t samples) {
   if (!imu_ready) {
-    consoleWrite("ERR imu unavailable\r\n");
-    return;
+    return 0U;
   }
   samples = std::max<std::uint32_t>(50U, std::min<std::uint32_t>(5000U, samples));
   gyro_calibration = {};
@@ -376,8 +375,7 @@ void startGyroCalibration(std::uint32_t samples) {
   gyro_bias_valid = false;
   attitude_initialized = false;
   attitude_state = {};
-  consolePrintf("OK imu gyro calibration started samples=%lu\r\n",
-                static_cast<unsigned long>(samples));
+  return samples;
 }
 
 bool sampleImu() {
@@ -425,22 +423,17 @@ void stopMotor() {
 
 bool motorActive() { return motor_mode != MotorMode::kStopped; }
 
-bool motorStartAllowed() {
+MotorStartFailure motorStartFailure() {
   if (safety_latch.faulted()) {
-    consolePrintf("ERR safety fault latched first=%s mask=0x%08lx; use 'fault status'\r\n",
-                  triwhirl::safetyFaultName(safety_latch.firstFault()),
-                  static_cast<unsigned long>(safety_latch.mask()));
-    return false;
+    return MotorStartFailure::kSafetyFault;
   }
   if (!encoder_sample_valid) {
-    consoleWrite("ERR encoder read unavailable\r\n");
-    return false;
+    return MotorStartFailure::kEncoderUnavailable;
   }
   if (!motorNumericsHealthy()) {
-    consoleWrite("ERR invalid runtime numeric state\r\n");
-    return false;
+    return MotorStartFailure::kInvalidNumeric;
   }
-  return true;
+  return MotorStartFailure::kNone;
 }
 
 bool faultClearReady() {
