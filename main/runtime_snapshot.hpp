@@ -19,6 +19,19 @@ struct RuntimeSnapshot {
   bool safety_faulted = false;
   std::uint32_t safety_fault_mask = 0U;
   std::uint32_t safety_first_fault = 0U;
+
+  bool telemetry_enabled = false;
+
+  std::uint32_t timing_target_us = 0U;
+  std::uint32_t timing_hard_period_us = 0U;
+  std::uint64_t timing_iterations = 0U;
+  std::uint32_t timing_last_exec_us = 0U;
+  std::uint32_t timing_max_exec_us = 0U;
+  std::uint32_t timing_min_period_us = 0U;
+  std::uint32_t timing_max_period_us = 0U;
+  std::uint64_t timing_overruns = 0U;
+  std::uint64_t timing_late_periods = 0U;
+  std::uint32_t uart_tx_drop_bytes = 0U;
 };
 
 // Single-writer (Core 1) bounded publication. The implementation keeps only
