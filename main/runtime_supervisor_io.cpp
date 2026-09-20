@@ -8,6 +8,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "runtime_command_parser.hpp"
+#include "runtime_diagnostics.hpp"
 #include "runtime_snapshot.hpp"
 #include "triwhirl/ble_transport.hpp"
 #include "triwhirl/safety.hpp"
@@ -42,6 +43,17 @@ void writeText(const char* text) {
   }
 }
 
+void writeFormatted(const char* const buffer, const int length,
+                    const std::size_t capacity) {
+  if (buffer == nullptr || length <= 0 || capacity == 0U) {
+    return;
+  }
+  const std::size_t count = static_cast<std::size_t>(length) < capacity
+                                ? static_cast<std::size_t>(length)
+                                : capacity - 1U;
+  writeBytes(buffer, count);
+}
+
 bool publishEvent(const SupervisorInputEvent& event) {
   if (input_queue == nullptr) {
     return false;
@@ -61,6 +73,21 @@ void publishSupervisorHandled() {
 
 void writeRuntimeSnapshotUnavailable() {
   writeText("ERR runtime snapshot unavailable\r\n");
+}
+
+const char* motorModeName(const std::uint8_t mode) {
+  switch (mode) {
+    case 0U:
+      return "stopped";
+    case 1U:
+      return "open_loop";
+    case 2U:
+      return "foc";
+    case 3U:
+      return "calibrating";
+    default:
+      return "unknown";
+  }
 }
 
 void writeHelp() {
@@ -122,16 +149,15 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         triwhirl::ble::subscribed() ? 1 : 0,
         static_cast<unsigned long>(triwhirl::ble::rxDroppedBytes()),
         static_cast<unsigned long>(triwhirl::ble::txDroppedBytes()));
-    if (length > 0) {
-      const std::size_t count = static_cast<std::size_t>(length) < sizeof(buffer)
-                                    ? static_cast<std::size_t>(length)
-                                    : sizeof(buffer) - 1U;
-      writeBytes(buffer, count);
-    }
+    writeFormatted(buffer, length, sizeof(buffer));
     publishSupervisorHandled();
     return true;
   }
 
+  const bool aggregate_status = std::strcmp(line, "status") == 0 ||
+                                std::strcmp(line, "motor status") == 0;
+  const bool imu_status = std::strcmp(line, "imu") == 0 ||
+                          std::strcmp(line, "imu status") == 0;
   const bool attitude_status = std::strcmp(line, "attitude") == 0 ||
                                std::strcmp(line, "attitude status") == 0;
   const bool fault_status = std::strcmp(line, "fault") == 0 ||
@@ -139,13 +165,69 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
   const bool timing_status = std::strcmp(line, "timing") == 0 ||
                              std::strcmp(line, "timing status") == 0;
   const bool telemetry_status = std::strcmp(line, "telemetry") == 0;
-  if (!attitude_status && !fault_status && !timing_status && !telemetry_status) {
+  if (!aggregate_status && !imu_status && !attitude_status && !fault_status &&
+      !timing_status && !telemetry_status) {
     return false;
   }
 
   RuntimeSnapshot snapshot{};
   if (!readLatestRuntimeSnapshot(&snapshot)) {
     writeRuntimeSnapshotUnavailable();
+    publishSupervisorHandled();
+    return true;
+  }
+
+  if (aggregate_status) {
+    EncoderDiagnosticStatus encoder_health{};
+    readEncoderDiagnosticStatus(&encoder_health);
+    char buffer[1024];
+    const auto first_fault =
+        static_cast<triwhirl::SafetyFault>(snapshot.safety_first_fault);
+    const int length = std::snprintf(
+        buffer, sizeof(buffer),
+        "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu,imu_ok=%d,attitude_ok=%d,theta_rad=%.6f,theta_rate_rad_s=%.6f,ble_connected=%d,ble_subscribed=%d,fault_mask=0x%08lx,fault_first=%s\r\n",
+        motorModeName(snapshot.motor_mode), snapshot.telemetry_enabled ? 1 : 0,
+        snapshot.motor_vq_v, snapshot.motor_electrical_hz,
+        snapshot.motor_amplitude_v, snapshot.motor_config_valid ? 1 : 0,
+        snapshot.motor_pole_pairs, snapshot.motor_sensor_direction,
+        snapshot.motor_offset_rad, snapshot.motor_electrical_angle_rad,
+        encoder_health.status_ok ? 1 : 0,
+        snapshot.encoder_sample_valid ? 1 : 0,
+        encoder_health.magnet_detected ? 1 : 0,
+        encoder_health.magnet_too_weak ? 1 : 0,
+        encoder_health.magnet_too_strong ? 1 : 0,
+        static_cast<unsigned>(snapshot.encoder_raw_count),
+        static_cast<long long>(snapshot.encoder_unwrapped_count),
+        snapshot.encoder_angle_rad, snapshot.encoder_unwrapped_rad,
+        snapshot.encoder_velocity_rad_s,
+        snapshot.encoder_instantaneous_velocity_rad_s,
+        snapshot.encoder_velocity_valid ? 1 : 0,
+        static_cast<unsigned long>(snapshot.encoder_read_errors),
+        snapshot.imu_sample_valid ? 1 : 0,
+        snapshot.attitude_valid ? 1 : 0, snapshot.attitude_angle_rad,
+        snapshot.attitude_rate_rad_s, triwhirl::ble::connected() ? 1 : 0,
+        triwhirl::ble::subscribed() ? 1 : 0,
+        static_cast<unsigned long>(snapshot.safety_fault_mask),
+        triwhirl::safetyFaultName(first_fault));
+    writeFormatted(buffer, length, sizeof(buffer));
+  } else if (imu_status) {
+    char buffer[640];
+    const int length = std::snprintf(
+        buffer, sizeof(buffer),
+        "imu,ready=%d,sample_ok=%d,who_ok=%d,who=0x%02x,bias_valid=%d,calibrating=%d,ax=%.6f,ay=%.6f,az=%.6f,gx=%.6f,gy=%.6f,gz=%.6f,temp_c=%.3f,bx=%.6f,by=%.6f,bz=%.6f,map=%d:%d:%d:%d:%d:%d,read_errors=%lu\r\n",
+        snapshot.imu_ready ? 1 : 0, snapshot.imu_sample_valid ? 1 : 0,
+        snapshot.imu_identity_valid ? 1 : 0,
+        static_cast<unsigned>(snapshot.imu_who_am_i),
+        snapshot.imu_bias_valid ? 1 : 0, snapshot.imu_calibrating ? 1 : 0,
+        snapshot.imu_ax_mps2, snapshot.imu_ay_mps2, snapshot.imu_az_mps2,
+        snapshot.imu_gx_rad_s, snapshot.imu_gy_rad_s, snapshot.imu_gz_rad_s,
+        snapshot.imu_temperature_c, snapshot.imu_bias_x_rad_s,
+        snapshot.imu_bias_y_rad_s, snapshot.imu_bias_z_rad_s,
+        snapshot.imu_map_sin_axis, snapshot.imu_map_cos_axis,
+        snapshot.imu_map_gyro_axis, snapshot.imu_map_sin_sign,
+        snapshot.imu_map_cos_sign, snapshot.imu_map_gyro_sign,
+        static_cast<unsigned long>(snapshot.imu_read_errors));
+    writeFormatted(buffer, length, sizeof(buffer));
   } else if (attitude_status) {
     char buffer[320];
     const int length = std::snprintf(
@@ -159,12 +241,7 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         snapshot.attitude_innovation,
         snapshot.attitude_accel_weight,
         snapshot.wheel_rate_rad_s);
-    if (length > 0) {
-      const std::size_t count = static_cast<std::size_t>(length) < sizeof(buffer)
-                                    ? static_cast<std::size_t>(length)
-                                    : sizeof(buffer) - 1U;
-      writeBytes(buffer, count);
-    }
+    writeFormatted(buffer, length, sizeof(buffer));
   } else if (fault_status) {
     char buffer[128];
     const auto first_fault =
@@ -175,12 +252,7 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         snapshot.safety_faulted ? 1 : 0,
         static_cast<unsigned long>(snapshot.safety_fault_mask),
         triwhirl::safetyFaultName(first_fault));
-    if (length > 0) {
-      const std::size_t count = static_cast<std::size_t>(length) < sizeof(buffer)
-                                    ? static_cast<std::size_t>(length)
-                                    : sizeof(buffer) - 1U;
-      writeBytes(buffer, count);
-    }
+    writeFormatted(buffer, length, sizeof(buffer));
   } else if (timing_status) {
     char buffer[384];
     const int length = std::snprintf(
@@ -198,12 +270,7 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         static_cast<unsigned long>(snapshot.uart_tx_drop_bytes),
         static_cast<unsigned long>(triwhirl::ble::rxDroppedBytes()),
         static_cast<unsigned long>(triwhirl::ble::txDroppedBytes()));
-    if (length > 0) {
-      const std::size_t count = static_cast<std::size_t>(length) < sizeof(buffer)
-                                    ? static_cast<std::size_t>(length)
-                                    : sizeof(buffer) - 1U;
-      writeBytes(buffer, count);
-    }
+    writeFormatted(buffer, length, sizeof(buffer));
   } else {
     writeText(snapshot.telemetry_enabled ? "telemetry=on\r\n"
                                          : "telemetry=off\r\n");
