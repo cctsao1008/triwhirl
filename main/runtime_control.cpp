@@ -220,6 +220,15 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       stopMotor();
       consoleWrite("OK motor stop\r\n");
       return;
+    case triwhirl::runtime::RuntimeCommandType::kSwingAbort:
+      if (!swing_id_runner.active()) {
+        consoleWrite("OK swing already inactive\r\n");
+        return;
+      }
+      consoleWrite("OK swing abort\r\n");
+      finishSwingRun(
+          swing_id_runner.abort(SwingIdStopReason::kExternalAbort));
+      return;
     case triwhirl::runtime::RuntimeCommandType::kNone:
       return;
   }
