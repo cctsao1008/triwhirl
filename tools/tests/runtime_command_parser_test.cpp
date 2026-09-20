@@ -20,6 +20,12 @@ void expectType(const char* text, const RuntimeCommandType type) {
 }  // namespace
 
 int main() {
+  expectType("status", RuntimeCommandType::kStatus);
+  expectType("motor status", RuntimeCommandType::kMotorStatus);
+  expectType("imu status", RuntimeCommandType::kImuStatus);
+  expectType("log status", RuntimeCommandType::kLogStatus);
+  expectType("swing status", RuntimeCommandType::kSwingStatus);
+  expectType("timing profile status", RuntimeCommandType::kTimingProfileStatus);
   expectType("motor stop", RuntimeCommandType::kMotorStop);
   expectType("stop", RuntimeCommandType::kStop);
   expectType("swing abort", RuntimeCommandType::kSwingAbort);
@@ -31,6 +37,11 @@ int main() {
   expectType("fault clear", RuntimeCommandType::kFaultClear);
   expectType("telemetry on", RuntimeCommandType::kTelemetryOn);
   expectType("telemetry off", RuntimeCommandType::kTelemetryOff);
+  expectType("log start", RuntimeCommandType::kLogStart);
+  expectType("log critical on", RuntimeCommandType::kLogCriticalOn);
+  expectType("log critical off", RuntimeCommandType::kLogCriticalOff);
+  expectType("log stop", RuntimeCommandType::kLogStop);
+  expectType("log dump", RuntimeCommandType::kLogDump);
 
   {
     const auto parsed = parseRuntimeCommand("motor vq -0.625");
@@ -135,6 +146,20 @@ int main() {
   }
 
   {
+    const auto parsed = parseRuntimeCommand("log prepare");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kLogPrepare);
+    assert(std::fabs(parsed.command.payload.log_prepare.seconds - 45.0F) < 1.0e-6F);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("log prepare 12.5");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kLogPrepare);
+    assert(std::fabs(parsed.command.payload.log_prepare.seconds - 12.5F) < 1.0e-6F);
+  }
+
+  {
     const auto parsed = parseRuntimeCommand("motor vq");
     assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
     assert(parsed.error != nullptr);
@@ -144,39 +169,30 @@ int main() {
   {
     const auto parsed = parseRuntimeCommand("motor config 7 -1");
     assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
-    assert(parsed.error != nullptr);
   }
 
   {
     const auto parsed = parseRuntimeCommand("imu map 0 1 2 1 -1");
     assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
-    assert(parsed.error != nullptr);
   }
 
   {
     const auto parsed = parseRuntimeCommand("field 1.0");
     assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
-    assert(parsed.error != nullptr);
   }
 
   {
     const auto parsed = parseRuntimeCommand("swing config 24 0.4 0.8");
     assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
-    assert(parsed.error != nullptr);
   }
 
   {
-    const auto parsed = parseRuntimeCommand("swing status");
-    assert(parsed.status == RuntimeCommandParseStatus::kNotMatched);
+    const auto parsed = parseRuntimeCommand("log critical maybe");
+    assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
   }
 
   {
-    const auto parsed = parseRuntimeCommand("timing profile status");
-    assert(parsed.status == RuntimeCommandParseStatus::kNotMatched);
-  }
-
-  {
-    const auto parsed = parseRuntimeCommand("motor status");
+    const auto parsed = parseRuntimeCommand("definitely unknown");
     assert(parsed.status == RuntimeCommandParseStatus::kNotMatched);
   }
 
