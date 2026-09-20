@@ -207,6 +207,18 @@ void publishSupervisorSnapshot(const std::uint32_t now_us) {
   snapshot.safety_fault_mask = safety_latch.mask();
   snapshot.safety_first_fault =
       static_cast<std::uint32_t>(safety_latch.firstFault());
+  snapshot.telemetry_enabled = telemetry_enabled;
+  snapshot.timing_target_us = kControlPeriodUs;
+  snapshot.timing_hard_period_us = kHardControlPeriodUs;
+  snapshot.timing_iterations = timing_stats.iterations;
+  snapshot.timing_last_exec_us = timing_stats.last_exec_us;
+  snapshot.timing_max_exec_us = timing_stats.max_exec_us;
+  snapshot.timing_min_period_us =
+      timing_stats.iterations > 1U ? timing_stats.min_period_us : 0U;
+  snapshot.timing_max_period_us = timing_stats.max_period_us;
+  snapshot.timing_overruns = timing_stats.overruns;
+  snapshot.timing_late_periods = timing_stats.late_periods;
+  snapshot.uart_tx_drop_bytes = console_tx_dropped_bytes;
   triwhirl::runtime::publishRuntimeSnapshot(snapshot);
 }
 
@@ -442,6 +454,8 @@ void realtimeControlTaskImpl(void*) {
     return;
   }
 
+  publishSupervisorSnapshot(static_cast<std::uint32_t>(esp_timer_get_time()));
+
   if (!triwhirl::runtime::initSupervisorIo(supervisorWrite, nullptr, 0,
                                             kSupervisorTaskPriority)) {
     safety_latch.trip(SafetyFault::kStartup);
@@ -450,8 +464,6 @@ void realtimeControlTaskImpl(void*) {
     vTaskDelete(nullptr);
     return;
   }
-
-  publishSupervisorSnapshot(static_cast<std::uint32_t>(esp_timer_get_time()));
 
   TickType_t last_wake = xTaskGetTickCount();
   while (true) {
