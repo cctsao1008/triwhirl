@@ -59,9 +59,28 @@ void publishSupervisorHandled() {
   publishEvent(event);
 }
 
-bool handleReadOnlySnapshotCommand(const char* const line) {
+bool handleSupervisorReadOnlyCommand(const char* const line) {
   if (line == nullptr) {
     return false;
+  }
+
+  if (std::strcmp(line, "ble status") == 0) {
+    char buffer[160];
+    const int length = std::snprintf(
+        buffer, sizeof(buffer),
+        "ble,connected=%d,subscribed=%d,rx_drop_bytes=%lu,tx_drop_bytes=%lu\r\n",
+        triwhirl::ble::connected() ? 1 : 0,
+        triwhirl::ble::subscribed() ? 1 : 0,
+        static_cast<unsigned long>(triwhirl::ble::rxDroppedBytes()),
+        static_cast<unsigned long>(triwhirl::ble::txDroppedBytes()));
+    if (length > 0) {
+      const std::size_t count = static_cast<std::size_t>(length) < sizeof(buffer)
+                                    ? static_cast<std::size_t>(length)
+                                    : sizeof(buffer) - 1U;
+      writeBytes(buffer, count);
+    }
+    publishSupervisorHandled();
+    return true;
   }
 
   const bool attitude_status = std::strcmp(line, "attitude status") == 0;
@@ -147,7 +166,7 @@ void consumeBytes(const std::uint8_t* input, const std::size_t received,
       if (state.length > 0U) {
         writeBytes("\r\n", 2U);
         state.line[state.length] = '\0';
-        if (!handleReadOnlySnapshotCommand(state.line) &&
+        if (!handleSupervisorReadOnlyCommand(state.line) &&
             !handleTypedRuntimeCommand(state.line)) {
           SupervisorInputEvent event{};
           event.type = SupervisorInputEventType::kCommand;
