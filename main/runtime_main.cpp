@@ -2,11 +2,7 @@
 // experiment. The remaining bridge exposes the established bring-up state to
 // runtime_control while startup/state ownership is extracted explicitly.
 #define app_main triwhirl_legacy_app_main
-#define initEncoderBus triwhirl_legacy_initEncoderBus
-#define initImuBus triwhirl_legacy_initImuBus
 #include "app_main.cpp"
-#undef initImuBus
-#undef initEncoderBus
 #undef app_main
 
 #include "freertos/queue.h"
@@ -24,7 +20,7 @@ using triwhirl::SwingIdState;
 using triwhirl::SwingIdStopReason;
 using triwhirl::SwingIdVertex;
 
-bool initEncoderBus(i2c_master_bus_handle_t* bus) {
+bool initRuntimeEncoderBus(i2c_master_bus_handle_t* bus) {
   i2c_master_bus_config_t config{};
   config.i2c_port = I2C_NUM_0;
   config.sda_io_num = static_cast<gpio_num_t>(triwhirl::board::kAs5600SdaGpio);
@@ -35,7 +31,7 @@ bool initEncoderBus(i2c_master_bus_handle_t* bus) {
   return triwhirl::runtime::createI2cMasterBusOnCore(&config, bus, 0) == ESP_OK;
 }
 
-bool initImuBus(i2c_master_bus_handle_t* bus) {
+bool initRuntimeImuBus(i2c_master_bus_handle_t* bus) {
   i2c_master_bus_config_t config{};
   config.i2c_port = I2C_NUM_1;
   config.sda_io_num = static_cast<gpio_num_t>(triwhirl::board::kMpu6050SdaGpio);
@@ -387,7 +383,7 @@ extern "C" void app_main(void) {
   }
 
   i2c_master_bus_handle_t encoder_bus = nullptr;
-  if (!initEncoderBus(&encoder_bus) ||
+  if (!initRuntimeEncoderBus(&encoder_bus) ||
       !encoder.init(encoder_bus, triwhirl::board::kAs5600I2cAddress)) {
     safety_latch.trip(SafetyFault::kStartup);
     consoleWrite("FATAL fault=startup AS5600 I2C init failed\r\n");
@@ -395,7 +391,7 @@ extern "C" void app_main(void) {
   }
 
   i2c_master_bus_handle_t imu_bus = nullptr;
-  imu_ready = initImuBus(&imu_bus) &&
+  imu_ready = initRuntimeImuBus(&imu_bus) &&
               imu.init(imu_bus, triwhirl::board::kMpu6050I2cAddress);
   if (!imu_ready) {
     consoleWrite("WARN MPU6050 init failed; IMU functions unavailable\r\n");
