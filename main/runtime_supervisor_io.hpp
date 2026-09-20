@@ -25,11 +25,13 @@ struct SupervisorInputEvent {
 using SupervisorWriteFn = void (*)(void* context, const char* data,
                                    std::size_t length);
 
-// Starts the non-realtime UART/BLE input task. The task owns byte polling and
-// line assembly. Selected read-only commands are answered from the latest
-// bounded runtime snapshot without entering the realtime domain. Migrated
-// mutating commands are parsed into RuntimeCommand records; not-yet-migrated
-// commands remain temporarily available through the legacy string event.
+// Starts the non-realtime supervisor ingress task. UART0 is retained as a wired
+// development/service CLI. BLE ingress is NimBLE GATT RX-characteristic data
+// drained through the BLE component's internal stream buffer; it is not UART.
+// Selected read-only commands are answered from the latest bounded runtime
+// snapshot. Migrated mutating commands are parsed into RuntimeCommand records;
+// not-yet-migrated commands remain temporarily available through the legacy
+// string event until that path is deleted.
 bool initSupervisorIo(SupervisorWriteFn write_fn, void* write_context,
                       int core_id, unsigned task_priority);
 
