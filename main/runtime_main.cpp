@@ -11,7 +11,6 @@
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "runtime_control.hpp"
 #include "runtime_encoder_acquisition.hpp"
@@ -61,12 +60,6 @@ bool initRuntimeImuBus(i2c_master_bus_handle_t* bus) {
   return triwhirl::runtime::createI2cMasterBusOnCore(&config, bus, 1) == ESP_OK;
 }
 
-struct SwingEvent {
-  SwingIdOutput output{};
-  std::uint32_t target_captures = 0U;
-  std::uint32_t fault_mask = 0U;
-};
-
 enum class RuntimeTimingStage : std::uint8_t {
   kEncoder = 0,
   kImuAttitude,
@@ -114,7 +107,6 @@ constexpr std::uint32_t kEncoderConsecutiveMissLimit = 2U;
 constexpr unsigned kSupervisorTaskPriority = 2U;
 
 SwingIdRunner swing_id_runner{};
-QueueHandle_t swing_event_queue = nullptr;
 std::uint32_t swing_event_drops = 0U;
 bool swing_log_finalize_pending = false;
 RuntimeTimingProfile runtime_timing_profile{};
@@ -129,37 +121,6 @@ bool control_profile_active = false;
 bool command_reply_deferred = false;
 
 void printSwingHelp();
-
-const char* runtimeTimingStageName(const RuntimeTimingStage stage) {
-  switch (stage) {
-    case RuntimeTimingStage::kEncoder: return "encoder";
-    case RuntimeTimingStage::kImuAttitude: return "imu_attitude";
-    case RuntimeTimingStage::kSafetySwing: return "safety_swing";
-    case RuntimeTimingStage::kMotor: return "motor";
-    case RuntimeTimingStage::kLog: return "log";
-    case RuntimeTimingStage::kConsole: return "console";
-    case RuntimeTimingStage::kTelemetry: return "telemetry";
-    case RuntimeTimingStage::kLoop: return "loop";
-    case RuntimeTimingStage::kCount: break;
-  }
-  return "unknown";
-}
-
-void printTimingProfileStage(const char* const name,
-                             const std::uint64_t count,
-                             const std::uint64_t total_us,
-                             const std::uint32_t min_us,
-                             const std::uint32_t max_us) {
-  const double mean_us = count > 0U
-                             ? static_cast<double>(total_us) /
-                                   static_cast<double>(count)
-                             : 0.0;
-  consolePrintf(
-      "timing_profile_stage,name=%s,count=%llu,mean_us=%.3f,min_us=%lu,max_us=%lu\r\n",
-      name, static_cast<unsigned long long>(count), mean_us,
-      static_cast<unsigned long>(count > 0U ? min_us : 0U),
-      static_cast<unsigned long>(count > 0U ? max_us : 0U));
-}
 
 void resetRuntimeTimingProfile() {
   const bool enabled = runtime_timing_profile.enabled;
@@ -189,69 +150,134 @@ void recordRuntimeTimingStage(const RuntimeTimingStage stage,
   if (elapsed > stats.max_us) stats.max_us = elapsed;
 }
 
-void printRuntimeTimingProfile() {
+bool promptAllowedNow() {
+  return !swing_id_runner.active() && !telemetry_enabled && !binary_dump_active;
+}
+
+void publishReplyRecord(triwhirl::runtime::RuntimeReply reply,
+                        const bool prompt_after) {
+  reply.prompt_after = prompt_after;
+  command_reply_deferred = true;
+  triwhirl::runtime::publishRuntimeReply(reply);
+}
+
+void deferRuntimeReply(const triwhirl::runtime::RuntimeReplyCode code) {
+  triwhirl::runtime::RuntimeReply reply{};
+  reply.code = code;
+  publishReplyRecord(reply, promptAllowedNow());
+}
+
+void deferRuntimeReply(const triwhirl::runtime::RuntimeReply& reply) {
+  publishReplyRecord(reply, promptAllowedNow());
+}
+
+void publishTimingProfileStage(
+    const triwhirl::runtime::RuntimeTimingProfileStageId stage,
+    const std::uint64_t count, const std::uint64_t total_us,
+    const std::uint32_t min_us, const std::uint32_t max_us) {
+  triwhirl::runtime::RuntimeReply reply{};
+  reply.code = triwhirl::runtime::RuntimeReplyCode::kTimingProfileStage;
+  reply.value0 = static_cast<std::int32_t>(stage);
+  reply.wide0 = count;
+  reply.wide1 = total_us;
+  reply.u32_0 = min_us;
+  reply.u32_1 = max_us;
+  publishReplyRecord(reply, false);
+}
+
+void publishRuntimeTimingProfile(const bool prompt_after) {
   const RuntimeTimingStageStats& loop =
       runtime_timing_profile.stages[static_cast<std::size_t>(RuntimeTimingStage::kLoop)];
-  consolePrintf("timing_profile,enabled=%d,samples=%llu,clock=esp_timer_us\r\n",
-                runtime_timing_profile.enabled ? 1 : 0,
-                static_cast<unsigned long long>(loop.count));
+
+  triwhirl::runtime::RuntimeReply header{};
+  header.code = triwhirl::runtime::RuntimeReplyCode::kTimingProfileHeader;
+  header.value0 = runtime_timing_profile.enabled ? 1 : 0;
+  header.wide0 = loop.count;
+  publishReplyRecord(header, false);
+
   for (std::size_t index = 0U;
        index < static_cast<std::size_t>(RuntimeTimingStage::kCount); ++index) {
-    const RuntimeTimingStage stage = static_cast<RuntimeTimingStage>(index);
     const RuntimeTimingStageStats& stats = runtime_timing_profile.stages[index];
-    printTimingProfileStage(runtimeTimingStageName(stage), stats.count,
-                            stats.total_us, stats.min_us, stats.max_us);
+    publishTimingProfileStage(
+        static_cast<triwhirl::runtime::RuntimeTimingProfileStageId>(index),
+        stats.count, stats.total_us, stats.min_us, stats.max_us);
   }
 
   const auto encoder_timing = encoder.timingProfile();
-  printTimingProfileStage("encoder_i2c_raw", encoder_timing.raw_reads,
-                          encoder_timing.raw_total_us,
-                          encoder_timing.raw_min_us,
-                          encoder_timing.raw_max_us);
-  printTimingProfileStage("encoder_i2c_status", encoder_timing.status_reads,
-                          encoder_timing.status_total_us,
-                          encoder_timing.status_min_us,
-                          encoder_timing.status_max_us);
+  publishTimingProfileStage(
+      triwhirl::runtime::RuntimeTimingProfileStageId::kEncoderI2cRaw,
+      encoder_timing.raw_reads, encoder_timing.raw_total_us,
+      encoder_timing.raw_min_us, encoder_timing.raw_max_us);
+  publishTimingProfileStage(
+      triwhirl::runtime::RuntimeTimingProfileStageId::kEncoderI2cStatus,
+      encoder_timing.status_reads, encoder_timing.status_total_us,
+      encoder_timing.status_min_us, encoder_timing.status_max_us);
 
   const auto imu_timing = imu.timingProfile();
-  printTimingProfileStage("mpu_i2c", imu_timing.sample_reads,
-                          imu_timing.transfer_total_us,
-                          imu_timing.transfer_min_us,
-                          imu_timing.transfer_max_us);
-  printTimingProfileStage("mpu_decode", imu_timing.sample_reads,
-                          imu_timing.decode_total_us,
-                          imu_timing.decode_min_us,
-                          imu_timing.decode_max_us);
-  consoleWrite("timing_profile_end\r\n");
+  publishTimingProfileStage(
+      triwhirl::runtime::RuntimeTimingProfileStageId::kMpuI2c,
+      imu_timing.sample_reads, imu_timing.transfer_total_us,
+      imu_timing.transfer_min_us, imu_timing.transfer_max_us);
+  publishTimingProfileStage(
+      triwhirl::runtime::RuntimeTimingProfileStageId::kMpuDecode,
+      imu_timing.sample_reads, imu_timing.decode_total_us,
+      imu_timing.decode_min_us, imu_timing.decode_max_us);
+
+  triwhirl::runtime::RuntimeReply end{};
+  end.code = triwhirl::runtime::RuntimeReplyCode::kTimingProfileEnd;
+  publishReplyRecord(end, prompt_after);
 }
 
 bool swingTerminal(const SwingIdState state) {
   return state == SwingIdState::kComplete || state == SwingIdState::kAborted;
 }
 
-void queueSwingEvent(const SwingIdOutput& output) {
-  if (!output.transition || swing_event_queue == nullptr) return;
-  SwingEvent event{};
-  event.output = output;
-  event.target_captures = swing_id_runner.config().target_captures;
-  event.fault_mask = safety_latch.mask();
-  if (xQueueSend(swing_event_queue, &event, 0) != pdTRUE) ++swing_event_drops;
+triwhirl::runtime::RuntimeReply makeSwingStatusReply(
+    const triwhirl::runtime::RuntimeReplyCode code) {
+  const SwingIdOutput& output = swing_id_runner.output();
+  const SwingIdConfig& config = swing_id_runner.config();
+  triwhirl::runtime::RuntimeReply reply{};
+  reply.code = code;
+  reply.value0 = static_cast<std::int32_t>(output.state);
+  reply.value1 = static_cast<std::int32_t>(output.stop_reason);
+  reply.value2 = static_cast<std::int32_t>(output.capture_count);
+  reply.value3 = static_cast<std::int32_t>(config.target_captures);
+  reply.value4 = static_cast<std::int32_t>(output.half_cycle_index);
+  reply.value5 = static_cast<std::int32_t>(output.vertex);
+  reply.value6 = (output.pump_active ? 0x01 : 0) |
+                 (output.probe_active ? 0x02 : 0) |
+                 (output.critical_window ? 0x04 : 0);
+  reply.value7 = static_cast<std::int32_t>(swing_event_drops);
+  reply.value8 = config.pump_polarity;
+  reply.u32_0 = config.probe_duration_us;
+  reply.u32_1 = config.max_duration_us;
+  reply.float0 = output.vertex_error_deg;
+  reply.float1 = output.desired_vq_v;
+  reply.float2 = config.pump_v_low;
+  reply.float3 = config.pump_v_high;
+  reply.float4 = config.capture_deg;
+  reply.float5 = config.probe_exit_deg;
+  reply.float6 = config.rearm_deg;
+  reply.float7 = config.rate_switch_rad_s;
+  reply.float8 = config.vertex_a_deg;
+  return reply;
 }
 
-void swingEventTask(void*) {
-  SwingEvent event{};
-  while (true) {
-    if (xQueueReceive(swing_event_queue, &event, portMAX_DELAY) != pdTRUE) continue;
-    const SwingIdOutput& output = event.output;
-    consolePrintf(
-        "event,swing_id,state=%s,captures=%lu,target=%lu,half_cycle=%lu,vertex=%s,error_deg=%.3f,vq_v=%.3f,reason=%s,fault_mask=0x%08lx\r\n",
-        triwhirl::swingIdStateName(output.state),
-        static_cast<unsigned long>(output.capture_count),
-        static_cast<unsigned long>(event.target_captures),
-        static_cast<unsigned long>(output.half_cycle_index),
-        triwhirl::swingIdVertexName(output.vertex), output.vertex_error_deg,
-        output.desired_vq_v, triwhirl::swingIdStopReasonName(output.stop_reason),
-        static_cast<unsigned long>(event.fault_mask));
+void queueSwingEvent(const SwingIdOutput& output) {
+  if (!output.transition) return;
+  triwhirl::runtime::RuntimeReply reply{};
+  reply.code = triwhirl::runtime::RuntimeReplyCode::kSwingTransitionEvent;
+  reply.value0 = static_cast<std::int32_t>(output.state);
+  reply.value1 = static_cast<std::int32_t>(output.capture_count);
+  reply.value2 = static_cast<std::int32_t>(swing_id_runner.config().target_captures);
+  reply.value3 = static_cast<std::int32_t>(output.half_cycle_index);
+  reply.value4 = static_cast<std::int32_t>(output.vertex);
+  reply.value5 = static_cast<std::int32_t>(output.stop_reason);
+  reply.u32_0 = safety_latch.mask();
+  reply.float0 = output.vertex_error_deg;
+  reply.float1 = output.desired_vq_v;
+  if (!triwhirl::runtime::publishRuntimeReply(reply)) {
+    ++swing_event_drops;
   }
 }
 
@@ -303,6 +329,8 @@ void finalizeSwingLogIfPending() {
   swing_log_finalize_pending = false;
 }
 
+// Startup-only formatter. Runtime command/status egress uses RuntimeReply and is
+// formatted by the Core-0 supervisor.
 void printSwingStatus() {
   const SwingIdOutput& output = swing_id_runner.output();
   const SwingIdConfig& config = swing_id_runner.config();
@@ -506,23 +534,29 @@ void publishSupervisorSnapshot(const std::uint32_t now_us) {
   triwhirl::runtime::publishRuntimeSnapshot(snapshot);
 }
 
-bool promptAllowedNow() {
-  return !swing_id_runner.active() && !telemetry_enabled && !binary_dump_active;
-}
-
-void deferRuntimeReply(const triwhirl::runtime::RuntimeReplyCode code) {
+bool deferMotorStartFailure() {
+  const MotorStartFailure failure = motorStartFailure();
+  if (failure == MotorStartFailure::kNone) {
+    return false;
+  }
   triwhirl::runtime::RuntimeReply reply{};
-  reply.code = code;
-  reply.prompt_after = promptAllowedNow();
-  command_reply_deferred = true;
-  triwhirl::runtime::publishRuntimeReply(reply);
-}
-
-void deferRuntimeReply(const triwhirl::runtime::RuntimeReply& reply_value) {
-  triwhirl::runtime::RuntimeReply reply = reply_value;
-  reply.prompt_after = promptAllowedNow();
-  command_reply_deferred = true;
-  triwhirl::runtime::publishRuntimeReply(reply);
+  switch (failure) {
+    case MotorStartFailure::kNone:
+      return false;
+    case MotorStartFailure::kSafetyFault:
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kSafetyFaultLatched;
+      reply.value0 = static_cast<std::int32_t>(safety_latch.firstFault());
+      reply.u32_0 = safety_latch.mask();
+      break;
+    case MotorStartFailure::kEncoderUnavailable:
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kEncoderUnavailable;
+      break;
+    case MotorStartFailure::kInvalidNumeric:
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kInvalidRuntimeNumeric;
+      break;
+  }
+  deferRuntimeReply(reply);
+  return true;
 }
 
 bool typedCommandAllowedDuringSwing(
@@ -560,10 +594,11 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       printLogStatus();
       return;
     case triwhirl::runtime::RuntimeCommandType::kSwingStatus:
-      printSwingStatus();
+      deferRuntimeReply(makeSwingStatusReply(
+          triwhirl::runtime::RuntimeReplyCode::kSwingStatus));
       return;
     case triwhirl::runtime::RuntimeCommandType::kTimingProfileStatus:
-      printRuntimeTimingProfile();
+      publishRuntimeTimingProfile(promptAllowedNow());
       return;
     case triwhirl::runtime::RuntimeCommandType::kMotorStop:
       stopMotor();
@@ -582,26 +617,25 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       {
         triwhirl::runtime::RuntimeReply reply{};
         reply.code = triwhirl::runtime::RuntimeReplyCode::kSwingAbortOk;
-        reply.prompt_after = !telemetry_enabled && !binary_dump_active;
-        command_reply_deferred = true;
-        triwhirl::runtime::publishRuntimeReply(reply);
+        publishReplyRecord(reply, !telemetry_enabled && !binary_dump_active);
       }
       finishSwingRun(swing_id_runner.abort(SwingIdStopReason::kExternalAbort));
       return;
     case triwhirl::runtime::RuntimeCommandType::kSwingStart: {
       if (swing_id_runner.active()) {
-        consoleWrite("ERR swing already active\r\n");
+        deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kSwingAlreadyActive);
         return;
       }
       if (motorActive()) {
-        consoleWrite("ERR swing start requires motor stopped\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kSwingStartRequiresMotorStopped);
         return;
       }
       if (!motor_config_valid || !encoder_sample_valid ||
           !wheel_state.velocity_valid || !imu_sample_valid || !gyro_bias_valid ||
           !attitude_state.valid || safety_latch.faulted()) {
-        consoleWrite(
-            "ERR swing start requires motor config, encoder/wheel, calibrated IMU, valid attitude, and clear safety\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kSwingStartRequiresReadyState);
         return;
       }
       const LoggerStatus log_status = runtime_logger.status();
@@ -611,21 +645,22 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
           triwhirl::log::kTwLogSamplePeriodUs;
       if (log_status.state != triwhirl::log::LoggerState::kRecording ||
           log_status.max_records < needed_records) {
-        consoleWrite(
-            "ERR swing start requires active TWLG recording with capacity for max duration\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kSwingStartRequiresLogCapacity);
         return;
       }
       const std::uint32_t now_us =
           static_cast<std::uint32_t>(esp_timer_get_time());
       if (!swing_id_runner.start(currentSwingInput(now_us))) {
-        consoleWrite("ERR swing start rejected\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kSwingStartRejected);
         return;
       }
       setSwingCriticalWindow(false);
       vq_command_v = clampFinite(swing_id_runner.output().desired_vq_v,
                                  -kMotorVectorLimitV, kMotorVectorLimitV);
       motor_mode = MotorMode::kFoc;
-      consoleWrite("OK swing start\r\n");
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kSwingStartOk);
       queueSwingEvent(swing_id_runner.output());
       return;
     }
@@ -646,12 +681,12 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       if (config.pump_v_high > kMotorVectorLimitV ||
           config.pump_v_low > kMotorVectorLimitV ||
           !swing_id_runner.configure(config)) {
-        consoleWrite(
-            "ERR usage: swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kSwingConfigUsageError);
         return;
       }
-      consoleWrite("OK swing config\r\n");
-      printSwingStatus();
+      deferRuntimeReply(makeSwingStatusReply(
+          triwhirl::runtime::RuntimeReplyCode::kSwingConfigOk));
       return;
     }
     case triwhirl::runtime::RuntimeCommandType::kTimingReset:
@@ -666,15 +701,19 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       encoder.setTimingProfileEnabled(true);
       imu.setTimingProfileEnabled(true);
       runtime_timing_profile.enabled = true;
-      consoleWrite("OK timing profile on\r\n");
+      deferRuntimeReply(
+          triwhirl::runtime::RuntimeReplyCode::kTimingProfileOnOk);
       return;
-    case triwhirl::runtime::RuntimeCommandType::kTimingProfileOff:
+    case triwhirl::runtime::RuntimeCommandType::kTimingProfileOff: {
       runtime_timing_profile.enabled = false;
       encoder.setTimingProfileEnabled(false);
       imu.setTimingProfileEnabled(false);
-      consoleWrite("OK timing profile off\r\n");
-      printRuntimeTimingProfile();
+      triwhirl::runtime::RuntimeReply reply{};
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kTimingProfileOffOk;
+      publishReplyRecord(reply, false);
+      publishRuntimeTimingProfile(promptAllowedNow());
       return;
+    }
     case triwhirl::runtime::RuntimeCommandType::kTimingProfileReset:
       resetRuntimeTimingProfile();
       deferRuntimeReply(
@@ -710,17 +749,21 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
           kMotorVectorLimitV);
       if (std::fabs(requested_vq) < 1.0e-4F) {
         stopMotor();
-        consoleWrite("OK motor stop\r\n");
+        deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kMotorStopOk);
         return;
       }
-      if (!motorStartAllowed()) return;
+      if (deferMotorStartFailure()) return;
       if (!motor_config_valid) {
-        consoleWrite("ERR motor is not calibrated/configured\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kMotorNotConfigured);
         return;
       }
       vq_command_v = requested_vq;
       motor_mode = MotorMode::kFoc;
-      consolePrintf("OK motor FOC vq_v=%.6f\r\n", vq_command_v);
+      triwhirl::runtime::RuntimeReply reply{};
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kMotorFocOk;
+      reply.float0 = vq_command_v;
+      deferRuntimeReply(reply);
       return;
     }
     case triwhirl::runtime::RuntimeCommandType::kMotorConfig: {
@@ -745,11 +788,12 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       deferRuntimeReply(reply);
       return;
     }
-    case triwhirl::runtime::RuntimeCommandType::kMotorCalibrate:
-      if (!motorStartAllowed()) return;
+    case triwhirl::runtime::RuntimeCommandType::kMotorCalibrate: {
+      if (deferMotorStartFailure()) return;
       stopMotor();
       if (!encoder_sample_valid) {
-        consoleWrite("ERR motor calibrate: encoder read unavailable\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kMotorCalibrationEncoderUnavailable);
         return;
       }
       calibration.amplitude_v = clampFinite(
@@ -766,11 +810,14 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
           static_cast<std::uint32_t>(esp_timer_get_time());
       motor_mode = MotorMode::kCalibrating;
       vq_command_v = 0.0F;
-      consolePrintf(
-          "OK motor calibration started amp_v=%.3f e_hz=%.3f turns=%.3f\r\n",
-          calibration.amplitude_v, calibration.electrical_hz,
-          calibration.electrical_turns);
+      triwhirl::runtime::RuntimeReply reply{};
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kMotorCalibrationStarted;
+      reply.float0 = calibration.amplitude_v;
+      reply.float1 = calibration.electrical_hz;
+      reply.float2 = calibration.electrical_turns;
+      deferRuntimeReply(reply);
       return;
+    }
     case triwhirl::runtime::RuntimeCommandType::kField: {
       const float requested_hz = clampFinite(
           command.payload.field.electrical_hz, -kMaxElectricalHz,
@@ -779,17 +826,20 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
           command.payload.field.amplitude_v, 0.0F, kMotorVectorLimitV);
       if (requested_amplitude <= 0.0F || requested_hz == 0.0F) {
         stopMotor();
-        consoleWrite("OK field stopped\r\n");
+        deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kFieldStopped);
         return;
       }
-      if (!motorStartAllowed()) return;
+      if (deferMotorStartFailure()) return;
       stopMotor();
       open_loop_hz = requested_hz;
       open_loop_amplitude_v = requested_amplitude;
       open_loop_angle_rad = 0.0F;
       motor_mode = MotorMode::kOpenLoop;
-      consolePrintf("OK field e_hz=%.6f amp_v=%.6f\r\n", open_loop_hz,
-                    open_loop_amplitude_v);
+      triwhirl::runtime::RuntimeReply reply{};
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kFieldOk;
+      reply.float0 = open_loop_hz;
+      reply.float1 = open_loop_amplitude_v;
+      deferRuntimeReply(reply);
       return;
     }
     case triwhirl::runtime::RuntimeCommandType::kAttitudeReset:
@@ -815,9 +865,19 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
         deferRuntimeReply(reply);
       }
       return;
-    case triwhirl::runtime::RuntimeCommandType::kImuCalibrate:
-      startGyroCalibration(command.payload.imu_calibrate.samples);
+    case triwhirl::runtime::RuntimeCommandType::kImuCalibrate: {
+      const std::uint32_t samples =
+          startGyroCalibration(command.payload.imu_calibrate.samples);
+      if (samples == 0U) {
+        deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kImuUnavailable);
+        return;
+      }
+      triwhirl::runtime::RuntimeReply reply{};
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kImuCalibrationStarted;
+      reply.u32_0 = samples;
+      deferRuntimeReply(reply);
       return;
+    }
     case triwhirl::runtime::RuntimeCommandType::kImuMap: {
       ImuPlanarMap map{};
       map.accel_sin_axis = command.payload.imu_map.accel_sin_axis;
@@ -846,11 +906,13 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
     case triwhirl::runtime::RuntimeCommandType::kLogPrepare: {
       const float seconds = command.payload.log_prepare.seconds;
       if (motorActive()) {
-        consoleWrite("ERR log prepare requires motor stopped\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogPrepareRequiresMotorStopped);
         return;
       }
       if (!std::isfinite(seconds) || seconds <= 0.0F) {
-        consoleWrite("ERR log prepare seconds must be > 0\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogPrepareSecondsInvalid);
         return;
       }
       const double records_d = std::ceil(
@@ -858,71 +920,84 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
           static_cast<double>(triwhirl::log::kTwLogSamplePeriodUs));
       if (records_d < 1.0 ||
           records_d > static_cast<double>(std::numeric_limits<std::uint32_t>::max())) {
-        consoleWrite("ERR log prepare duration out of range\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogPrepareDurationOutOfRange);
         return;
       }
       const std::uint32_t records = static_cast<std::uint32_t>(records_d);
       if (!runtime_logger.prepare(records)) {
-        consoleWrite("ERR log prepare rejected; check log status/capacity\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogPrepareRejected);
         return;
       }
       log_critical_window = false;
-      consolePrintf(
-          "OK log prepare records=%lu seconds=%.3f; erase in background\r\n",
-          static_cast<unsigned long>(records), seconds);
+      triwhirl::runtime::RuntimeReply reply{};
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kLogPrepareOk;
+      reply.u32_0 = records;
+      reply.float0 = seconds;
+      deferRuntimeReply(reply);
       return;
     }
     case triwhirl::runtime::RuntimeCommandType::kLogStart:
       if (!runtime_logger.start()) {
-        consoleWrite("ERR log start requires state=ready\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogStartRequiresReady);
         return;
       }
       log_critical_window = false;
-      consoleWrite("OK log start sample_us=1000 record_bytes=32\r\n");
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kLogStartOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kLogCriticalOn:
       log_critical_window = true;
       runtime_logger.setFlashWritesAllowed(false);
-      consoleWrite("OK log critical on; flash programming paused\r\n");
+      deferRuntimeReply(
+          triwhirl::runtime::RuntimeReplyCode::kLogCriticalOnOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kLogCriticalOff:
       log_critical_window = false;
       runtime_logger.setFlashWritesAllowed(true);
-      consoleWrite("OK log critical off; flash programming resumed\r\n");
+      deferRuntimeReply(
+          triwhirl::runtime::RuntimeReplyCode::kLogCriticalOffOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kLogStop:
       log_critical_window = false;
       runtime_logger.setFlashWritesAllowed(true);
       if (!runtime_logger.stop()) {
-        consoleWrite("ERR log stop rejected; check log status\r\n");
+        deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kLogStopRejected);
         return;
       }
-      consoleWrite("OK log stopping; SRAM is draining and header will finalize\r\n");
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kLogStopOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kLogDump:
       if (binary_dump_active || log_dump_task != nullptr) {
-        consoleWrite("ERR log dump already active\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogDumpAlreadyActive);
         return;
       }
       if (!runtime_logger.complete()) {
-        consoleWrite("ERR log dump requires state=complete\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogDumpRequiresComplete);
         return;
       }
       if (motorActive()) {
-        consoleWrite("ERR log dump requires motor stopped\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogDumpRequiresMotorStopped);
         return;
       }
       if (!triwhirl::ble::connected() || !triwhirl::ble::subscribed()) {
-        consoleWrite("ERR log dump requires BLE notify subscription\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogDumpRequiresBleSubscription);
         return;
       }
       telemetry_enabled = false;
       binary_dump_active = true;
+      command_reply_deferred = true;
       if (xTaskCreatePinnedToCore(logDumpTask, "triwhirl_log_dump", 4096, nullptr,
                                   1, &log_dump_task, 0) != pdPASS) {
         binary_dump_active = false;
         log_dump_task = nullptr;
-        consoleWrite("ERR log dump task creation failed\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kLogDumpTaskFailed);
       }
       return;
     case triwhirl::runtime::RuntimeCommandType::kNone:
@@ -1076,14 +1151,6 @@ extern "C" void app_main(void) {
     return;
   }
 
-  swing_event_queue = xQueueCreate(8U, sizeof(SwingEvent));
-  if (swing_event_queue == nullptr ||
-      xTaskCreatePinnedToCore(swingEventTask, "triwhirl_swing_evt", 4096, nullptr,
-                              2, nullptr, 0) != pdPASS) {
-    safety_latch.trip(SafetyFault::kStartup);
-    return;
-  }
-
   if (!triwhirl::ble::init()) {
     consoleWrite("WARN BLE init failed; Web Bluetooth unavailable\r\n");
   }
@@ -1121,7 +1188,12 @@ extern "C" void app_main(void) {
   refreshEncoderHealth();
   if (imu_ready) {
     sampleImu();
-    startGyroCalibration(kDefaultGyroCalibrationSamples);
+    const std::uint32_t calibration_samples =
+        startGyroCalibration(kDefaultGyroCalibrationSamples);
+    if (calibration_samples > 0U) {
+      consolePrintf("OK imu gyro calibration started samples=%lu\r\n",
+                    static_cast<unsigned long>(calibration_samples));
+    }
   }
   last_motor_update_us = now_us;
   last_telemetry_us = now_us;
