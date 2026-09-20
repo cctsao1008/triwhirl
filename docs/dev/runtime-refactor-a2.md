@@ -36,8 +36,9 @@ runtime_command_parser                ->    runtime_control
 
 runtime_supervisor_io                 <-    runtime_snapshot
   read-only formatting                      latest complete snapshot
-  attitude/fault status                      non-blocking overwrite publication
+  attitude/fault/timing/telemetry status    non-blocking overwrite publication
   BLE GATT status direct from BLE transport
+  static help text
 ```
 
 BLE is a NimBLE GATT transport, not UART. The RX characteristic accepts GATT
@@ -58,9 +59,12 @@ rather than blocking either domain.
 
 The snapshot channel is depth one and uses overwrite/peek semantics. Core 1
 publishes the latest complete snapshot without blocking; Core 0 reads a complete
-copy without consuming it. `attitude status` and `fault status` are snapshot-backed
-on Core 0. `ble status` is also handled entirely on Core 0 because its authoritative
-state belongs to the BLE GATT transport itself, not realtime control.
+copy without consuming it. `attitude status`, `fault status`, `timing status`,
+and the read-only `telemetry` query are snapshot-backed on Core 0. `ble status`
+is also handled entirely on Core 0 because its authoritative state belongs to
+the BLE GATT transport itself. Static `help` formatting is supervisor-owned as
+well. The initial snapshot is published before supervisor ingress starts, so
+these commands do not race the first snapshot publication at startup.
 
 `runtime_command.hpp` defines the fixed-size supervisor/realtime mutation
 contract. Commands now parsed on Core 0 and executed on Core 1 without string
