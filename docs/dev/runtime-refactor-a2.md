@@ -85,8 +85,8 @@ The payload forms use fixed-size POD fields in `RuntimeCommand`; `atoi`, `strtof
 `strtod` and `strtoul` parsing remains entirely in `runtime_command_parser` on
 Core 0. Realtime still performs state-dependent validation, safety admission and
 mutation so actuator/sensor ownership does not move across cores. Swing-config
-duration conversion is also completed on Core 0; realtime still enforces the
-motor-voltage limit and delegates structural validation to `SwingIdRunner`.
+duration conversion is completed on Core 0; realtime still enforces the motor
+voltage ceiling and delegates structural validation to `SwingIdRunner`.
 
 The parser has a host-side contract test in
 `tools/tests/runtime_command_parser_test.cpp`. CI compiles the parser directly
@@ -95,10 +95,11 @@ default arguments, swing-duration conversion, usage errors, and the remaining
 legacy-not-matched boundary before the ESP-IDF build begins.
 
 The original swing-ownership policy is preserved. While identification owns
-realtime actuation, the swing command family itself still reaches its existing
-state-dependent checks, timing-profile control remains available as before, and
-`telemetry off` remains allowed. Other migrated mutations are rejected by the
-same swing-ownership policy.
+realtime actuation, `swing start`, `swing config`, and `swing abort` still reach
+their existing state-dependent checks instead of being rejected by the generic
+ownership gate. Timing-profile control also remains available during an active
+identification run as before, and `telemetry off` remains allowed. Other migrated
+mutations are rejected by the same swing-ownership policy.
 
 ## Remaining legacy command surface
 
