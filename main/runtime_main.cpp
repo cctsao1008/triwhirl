@@ -5,13 +5,18 @@
 #define app_main triwhirl_legacy_app_main
 #define updateEncoder triwhirl_legacy_updateEncoder
 #define updateImu triwhirl_legacy_updateImu
+#define initEncoderBus triwhirl_legacy_initEncoderBus
+#define initImuBus triwhirl_legacy_initImuBus
 #include "app_main.cpp"
+#undef initImuBus
+#undef initEncoderBus
 #undef updateImu
 #undef updateEncoder
 #undef app_main
 
 #include "freertos/queue.h"
 #include "runtime_control.hpp"
+#include "runtime_platform.hpp"
 #include "triwhirl/swing_id.hpp"
 
 namespace {
@@ -25,6 +30,28 @@ using triwhirl::SwingIdStopReason;
 using triwhirl::SwingIdVertex;
 
 constexpr std::uint32_t kSupervisorConsolePollPeriodUs = 5000U;
+
+bool initEncoderBus(i2c_master_bus_handle_t* bus) {
+  i2c_master_bus_config_t config{};
+  config.i2c_port = I2C_NUM_0;
+  config.sda_io_num = static_cast<gpio_num_t>(triwhirl::board::kAs5600SdaGpio);
+  config.scl_io_num = static_cast<gpio_num_t>(triwhirl::board::kAs5600SclGpio);
+  config.clk_source = I2C_CLK_SRC_DEFAULT;
+  config.glitch_ignore_cnt = 7;
+  config.flags.enable_internal_pullup = true;
+  return triwhirl::runtime::createI2cMasterBusOnCore(&config, bus, 0) == ESP_OK;
+}
+
+bool initImuBus(i2c_master_bus_handle_t* bus) {
+  i2c_master_bus_config_t config{};
+  config.i2c_port = I2C_NUM_1;
+  config.sda_io_num = static_cast<gpio_num_t>(triwhirl::board::kMpu6050SdaGpio);
+  config.scl_io_num = static_cast<gpio_num_t>(triwhirl::board::kMpu6050SclGpio);
+  config.clk_source = I2C_CLK_SRC_DEFAULT;
+  config.glitch_ignore_cnt = 7;
+  config.flags.enable_internal_pullup = true;
+  return triwhirl::runtime::createI2cMasterBusOnCore(&config, bus, 1) == ESP_OK;
+}
 
 // runtime_main owns the realtime acquisition cadence. The legacy helpers gate
 // sensor reads on elapsed microseconds, which aliases with the 1 ms RTOS tick
