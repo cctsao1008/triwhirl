@@ -63,9 +63,52 @@ void writeRuntimeSnapshotUnavailable() {
   writeText("ERR runtime snapshot unavailable\r\n");
 }
 
+void writeHelp() {
+  static constexpr char kHelp[] =
+      "commands:\r\n"
+      "  motor calibrate [amplitude_v] [electrical_hz] [turns]\r\n"
+      "  motor config <pole_pairs> <sensor_dir> <offset_rad>\r\n"
+      "  motor vq <volts>\r\n"
+      "  motor status\r\n"
+      "  motor stop\r\n"
+      "  imu status\r\n"
+      "  imu calibrate [samples]\r\n"
+      "  imu map <sin_axis> <cos_axis> <gyro_axis> <sin_sign> <cos_sign> <gyro_sign>\r\n"
+      "  attitude status\r\n"
+      "  attitude reset [angle_rad]\r\n"
+      "  timing status\r\n"
+      "  timing reset\r\n"
+      "  fault status\r\n"
+      "  fault clear\r\n"
+      "  ble status\r\n"
+      "  log status\r\n"
+      "  log prepare [seconds]\r\n"
+      "  log start\r\n"
+      "  log critical <on|off>\r\n"
+      "  log stop\r\n"
+      "  log dump\r\n"
+      "  field <electrical_hz> <amplitude_v>\r\n"
+      "  stop\r\n"
+      "  status\r\n"
+      "  telemetry [on|off]\r\n"
+      "  help\r\n"
+      "  swing status\r\n"
+      "  swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n"
+      "  swing start\r\n"
+      "  swing abort\r\n"
+      "  timing profile <status|on|off|reset>\r\n";
+  writeText(kHelp);
+}
+
 bool handleSupervisorReadOnlyCommand(const char* const line) {
   if (line == nullptr) {
     return false;
+  }
+
+  if (std::strcmp(line, "help") == 0) {
+    writeHelp();
+    publishSupervisorHandled();
+    return true;
   }
 
   if (std::strcmp(line, "ble status") == 0) {
