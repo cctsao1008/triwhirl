@@ -100,11 +100,21 @@ state-dependent checks, timing-profile control remains available as before, and
 `telemetry off` remains allowed. Other migrated mutations are rejected by the
 same swing-ownership policy.
 
-This remains an incremental B2 slice. Commands that are not yet migrated still
-enter Core 1 through the legacy string event, so string parsing has not yet been
-fully removed from realtime. The legacy event is migration debt, not a target
-compatibility layer; it should disappear once the remaining command grammar has
-been represented as typed commands or supervisor read-only operations.
+## Remaining legacy command surface
+
+The raw Core-1 string path is now limited primarily to:
+
+- aggregate `status` and `motor status`;
+- `imu status`, which still performs a diagnostic WHO_AM_I I2C transaction;
+- `log status` and log lifecycle commands;
+- `swing status`;
+- `timing profile status`.
+
+This is migration debt, not a compatibility target. The remaining read-only
+commands require either richer snapshots or ownership-aware service state; log
+commands require a deliberate logger-control boundary. Once these are migrated,
+`SupervisorInputEventType::kCommand`, its raw line buffer, and
+`handleSupervisorCommand(event.line)` can be deleted together.
 
 ## Target
 
