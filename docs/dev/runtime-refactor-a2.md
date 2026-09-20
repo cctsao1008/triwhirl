@@ -23,10 +23,14 @@ runtime_encoder_acquisition   ->    runtime_control
   bounded result queue              miss/safety policy
 
 runtime_supervisor_io         ->    runtime_control
-  UART/BLE byte polling              bounded input-event receive
+  UART/BLE byte polling              one bounded input event / RT iteration
   line assembly                      command execution (transitional)
   fixed-size input queue
 ```
+
+The supervisor mailbox is depth-limited and non-blocking. When full, the newest
+command/event is rejected and the transport reports `ERR command mailbox full`
+rather than blocking either domain.
 
 The supervisor I/O extraction is intentionally a B1 step. UART/BLE reads and
 line assembly no longer execute in the 1 kHz control task, but command string
@@ -60,7 +64,8 @@ runtime_supervisor_io.cpp/.hpp
 - one explicit application entry path;
 - one explicit realtime control task;
 - UART/BLE byte polling and line assembly stay outside realtime control;
-- command ingress is bounded and non-blocking;
+- command ingress is fixed-size, bounded, non-blocking, and explicitly rejects
+  overflow;
 - string parsing/formatting is removed from realtime control before A2 closes;
 - read-only diagnostics consume a bounded runtime snapshot rather than live
   cross-core state;
