@@ -70,29 +70,35 @@ these commands do not race the first snapshot publication at startup.
 contract. Commands now parsed on Core 0 and executed on Core 1 without string
 interpretation include:
 
-- no-payload commands: `motor stop`, `stop`, `swing abort`, `timing reset`,
-  `fault clear`, `telemetry on`, `telemetry off`;
+- no-payload commands: `motor stop`, `stop`, `swing abort`, `swing start`,
+  `timing reset`, `timing profile on`, `timing profile off`,
+  `timing profile reset`, `fault clear`, `telemetry on`, `telemetry off`;
 - payload commands: `motor vq <volts>`,
   `motor config <pole_pairs> <sensor_dir> <offset_rad>`,
   `motor calibrate [amplitude_v] [electrical_hz] [turns]`,
   `field <electrical_hz> <amplitude_v>`, `attitude reset [angle_rad]`,
-  `imu calibrate [samples]`, and
-  `imu map <sin_axis> <cos_axis> <gyro_axis> <sin_sign> <cos_sign> <gyro_sign>`.
+  `imu calibrate [samples]`,
+  `imu map <sin_axis> <cos_axis> <gyro_axis> <sin_sign> <cos_sign> <gyro_sign>`,
+  and `swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>`.
 
-The payload forms use fixed-size POD fields in `RuntimeCommand`; `atoi`, `strtof`
-and `strtoul` parsing remains entirely in `runtime_command_parser` on Core 0.
-Realtime still performs state-dependent validation, safety admission and mutation
-so actuator/sensor ownership does not move across cores.
+The payload forms use fixed-size POD fields in `RuntimeCommand`; `atoi`, `strtof`,
+`strtod` and `strtoul` parsing remains entirely in `runtime_command_parser` on
+Core 0. Realtime still performs state-dependent validation, safety admission and
+mutation so actuator/sensor ownership does not move across cores. Swing-config
+duration conversion is also completed on Core 0; realtime still enforces the
+motor-voltage limit and delegates structural validation to `SwingIdRunner`.
 
 The parser has a host-side contract test in
 `tools/tests/runtime_command_parser_test.cpp`. CI compiles the parser directly
 with the host compiler and verifies command type selection, payload conversion,
-default arguments, usage errors, and the legacy-not-matched boundary before the
-ESP-IDF build begins.
+default arguments, swing-duration conversion, usage errors, and the remaining
+legacy-not-matched boundary before the ESP-IDF build begins.
 
-The original swing-ownership policy is preserved: while identification owns
-realtime actuation, only commands that were previously allowed retain that
-permission (`swing abort` and `telemetry off` among this migrated set).
+The original swing-ownership policy is preserved. While identification owns
+realtime actuation, the swing command family itself still reaches its existing
+state-dependent checks, timing-profile control remains available as before, and
+`telemetry off` remains allowed. Other migrated mutations are rejected by the
+same swing-ownership policy.
 
 This remains an incremental B2 slice. Commands that are not yet migrated still
 enter Core 1 through the legacy string event, so string parsing has not yet been
