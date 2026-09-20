@@ -126,6 +126,7 @@ LocalTimingStats attitude_math_timing{};
 ControlPeriodHistogram control_period_histogram{};
 std::int64_t control_previous_start_us = 0;
 bool control_profile_active = false;
+bool command_reply_deferred = false;
 
 void printSwingHelp();
 
@@ -490,6 +491,7 @@ void publishSupervisorSnapshot(const std::uint32_t now_us) {
   snapshot.safety_first_fault =
       static_cast<std::uint32_t>(safety_latch.firstFault());
   snapshot.telemetry_enabled = telemetry_enabled;
+  snapshot.swing_active = swing_id_runner.active();
   snapshot.timing_target_us = kControlPeriodUs;
   snapshot.timing_hard_period_us = kHardControlPeriodUs;
   snapshot.timing_iterations = timing_stats.iterations;
@@ -502,6 +504,25 @@ void publishSupervisorSnapshot(const std::uint32_t now_us) {
   snapshot.timing_late_periods = timing_stats.late_periods;
   snapshot.uart_tx_drop_bytes = console_tx_dropped_bytes;
   triwhirl::runtime::publishRuntimeSnapshot(snapshot);
+}
+
+bool promptAllowedNow() {
+  return !swing_id_runner.active() && !telemetry_enabled && !binary_dump_active;
+}
+
+void deferRuntimeReply(const triwhirl::runtime::RuntimeReplyCode code) {
+  triwhirl::runtime::RuntimeReply reply{};
+  reply.code = code;
+  reply.prompt_after = promptAllowedNow();
+  command_reply_deferred = true;
+  triwhirl::runtime::publishRuntimeReply(reply);
+}
+
+void deferRuntimeReply(const triwhirl::runtime::RuntimeReply& reply_value) {
+  triwhirl::runtime::RuntimeReply reply = reply_value;
+  reply.prompt_after = promptAllowedNow();
+  command_reply_deferred = true;
+  triwhirl::runtime::publishRuntimeReply(reply);
 }
 
 bool typedCommandAllowedDuringSwing(
@@ -523,8 +544,7 @@ bool typedCommandAllowedDuringSwing(
 
 void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
   if (!typedCommandAllowedDuringSwing(command.type)) {
-    consoleWrite(
-        "ERR swing experiment owns realtime actuation; use 'swing abort' first\r\n");
+    deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kSwingOwnsRealtime);
     return;
   }
 
@@ -547,18 +567,25 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       return;
     case triwhirl::runtime::RuntimeCommandType::kMotorStop:
       stopMotor();
-      consoleWrite("OK motor stop\r\n");
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kMotorStopOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kStop:
       stopMotor();
-      consoleWrite("OK stop\r\n");
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kStopOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kSwingAbort:
       if (!swing_id_runner.active()) {
-        consoleWrite("OK swing already inactive\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kSwingAlreadyInactive);
         return;
       }
-      consoleWrite("OK swing abort\r\n");
+      {
+        triwhirl::runtime::RuntimeReply reply{};
+        reply.code = triwhirl::runtime::RuntimeReplyCode::kSwingAbortOk;
+        reply.prompt_after = !telemetry_enabled && !binary_dump_active;
+        command_reply_deferred = true;
+        triwhirl::runtime::publishRuntimeReply(reply);
+      }
       finishSwingRun(swing_id_runner.abort(SwingIdStopReason::kExternalAbort));
       return;
     case triwhirl::runtime::RuntimeCommandType::kSwingStart: {
@@ -629,7 +656,7 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
     }
     case triwhirl::runtime::RuntimeCommandType::kTimingReset:
       resetTimingStats();
-      consoleWrite("OK timing reset\r\n");
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kTimingResetOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kTimingProfileOn:
       runtime_timing_profile.enabled = false;
@@ -650,29 +677,32 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       return;
     case triwhirl::runtime::RuntimeCommandType::kTimingProfileReset:
       resetRuntimeTimingProfile();
-      consoleWrite("OK timing profile reset\r\n");
+      deferRuntimeReply(
+          triwhirl::runtime::RuntimeReplyCode::kTimingProfileResetOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kFaultClear:
       stopMotor();
       if (!safety_latch.faulted()) {
-        consoleWrite("OK fault already clear\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kFaultAlreadyClear);
         return;
       }
       if (!faultClearReady()) {
-        consoleWrite("ERR fault clear rejected; fault cause is still present\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kFaultClearRejected);
         return;
       }
       safety_latch.clear();
-      consoleWrite("OK fault clear\r\n");
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kFaultClearOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kTelemetryOn:
       telemetry_enabled = true;
       last_telemetry_us = static_cast<std::uint32_t>(esp_timer_get_time());
-      consoleWrite("OK telemetry on\r\n");
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kTelemetryOnOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kTelemetryOff:
       telemetry_enabled = false;
-      consoleWrite("OK telemetry off\r\n");
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kTelemetryOffOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kMotorVq: {
       const float requested_vq = clampFinite(
@@ -700,16 +730,19 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       config.electrical_offset_rad = triwhirl::wrapElectricalAngle(
           command.payload.motor_config.electrical_offset_rad);
       if (!triwhirl::validMotorElectricalConfig(config)) {
-        consoleWrite("ERR invalid motor config\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kInvalidMotorConfig);
         return;
       }
       stopMotor();
       motor_config = config;
       motor_config_valid = true;
-      consolePrintf(
-          "OK motor config pole_pairs=%d sensor_dir=%d offset_rad=%.6f\r\n",
-          motor_config.pole_pairs, motor_config.sensor_direction,
-          motor_config.electrical_offset_rad);
+      triwhirl::runtime::RuntimeReply reply{};
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kMotorConfigOk;
+      reply.value0 = motor_config.pole_pairs;
+      reply.value1 = motor_config.sensor_direction;
+      reply.float0 = motor_config.electrical_offset_rad;
+      deferRuntimeReply(reply);
       return;
     }
     case triwhirl::runtime::RuntimeCommandType::kMotorCalibrate:
@@ -762,19 +795,25 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
     case triwhirl::runtime::RuntimeCommandType::kAttitudeReset:
       if (command.payload.attitude_reset.use_accelerometer) {
         resetAttitudeFromAccel();
-        consoleWrite("OK attitude reset from accelerometer\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kAttitudeResetFromAccelOk);
         return;
       }
       if (!std::isfinite(command.payload.attitude_reset.angle_rad)) {
-        consoleWrite("ERR invalid attitude angle\r\n");
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kInvalidAttitudeAngle);
         return;
       }
       attitude_estimator.reset(command.payload.attitude_reset.angle_rad, 0.0F);
       attitude_state = attitude_estimator.state();
       attitude_initialized = true;
       last_attitude_update_us = static_cast<std::uint32_t>(esp_timer_get_time());
-      consolePrintf("OK attitude reset angle_rad=%.6f\r\n",
-                    command.payload.attitude_reset.angle_rad);
+      {
+        triwhirl::runtime::RuntimeReply reply{};
+        reply.code = triwhirl::runtime::RuntimeReplyCode::kAttitudeResetAngleOk;
+        reply.float0 = command.payload.attitude_reset.angle_rad;
+        deferRuntimeReply(reply);
+      }
       return;
     case triwhirl::runtime::RuntimeCommandType::kImuCalibrate:
       startGyroCalibration(command.payload.imu_calibrate.samples);
@@ -788,15 +827,20 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       map.accel_cos_sign = command.payload.imu_map.accel_cos_sign;
       map.gyro_sign = command.payload.imu_map.gyro_sign;
       if (!validImuMap(map)) {
-        consoleWrite("ERR invalid imu map\r\n");
+        deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kInvalidImuMap);
         return;
       }
       imu_map = map;
       resetAttitudeFromAccel();
-      consolePrintf("OK imu map %d %d %d %d %d %d\r\n",
-                    imu_map.accel_sin_axis, imu_map.accel_cos_axis,
-                    imu_map.gyro_axis, imu_map.accel_sin_sign,
-                    imu_map.accel_cos_sign, imu_map.gyro_sign);
+      triwhirl::runtime::RuntimeReply reply{};
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kImuMapOk;
+      reply.value0 = imu_map.accel_sin_axis;
+      reply.value1 = imu_map.accel_cos_axis;
+      reply.value2 = imu_map.gyro_axis;
+      reply.value3 = imu_map.accel_sin_sign;
+      reply.value4 = imu_map.accel_cos_sign;
+      reply.value5 = imu_map.gyro_sign;
+      deferRuntimeReply(reply);
       return;
     }
     case triwhirl::runtime::RuntimeCommandType::kLogPrepare: {
@@ -889,10 +933,9 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
 void processOneSupervisorInput() {
   triwhirl::runtime::SupervisorInputEvent event{};
   if (!triwhirl::runtime::tryReceiveSupervisorInput(&event)) return;
-  if (event.type == triwhirl::runtime::SupervisorInputEventType::kRuntimeCommand) {
-    executeRuntimeCommand(event.runtime_command);
-  }
-  if (!swing_id_runner.active()) printPrompt();
+  command_reply_deferred = false;
+  executeRuntimeCommand(event.runtime_command);
+  if (!command_reply_deferred && !swing_id_runner.active()) printPrompt();
 }
 
 void realtimeControlTaskImpl(void*) {
