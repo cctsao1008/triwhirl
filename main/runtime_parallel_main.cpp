@@ -1,12 +1,11 @@
 // Parallel sensor-acquisition runtime for the established supervisor/swing path.
 //
-// The replacement control task starts the AS5600 transaction on core 0 while
-// core 1 performs the blocking MPU6050 transaction and attitude update. The two
-// sensors already live on independent ESP32 I2C controllers, so their bus time
-// can overlap without moving realtime control authority off the ESP32.
+// The realtime control task starts the AS5600 transaction on core 0 while core 1
+// performs the blocking MPU6050 transaction and attitude update. The two sensors
+// already live on independent ESP32 I2C controllers, so their bus time can
+// overlap without moving realtime control authority off the ESP32.
 
 #include <cstdint>
-#include <cstring>
 
 #include "driver/i2c_master.h"
 #include "esp_err.h"
@@ -19,21 +18,6 @@
 #include "runtime_release.hpp"
 
 namespace {
-
-BaseType_t triwhirlCreatePinnedTaskIntercept(
-    TaskFunction_t task_code,
-    const char* const name,
-    const std::uint32_t stack_depth,
-    void* const parameters,
-    const UBaseType_t priority,
-    TaskHandle_t* const created_task,
-    const BaseType_t core_id) {
-  if (name != nullptr && std::strcmp(name, "triwhirl_control") == 0) {
-    task_code = triwhirl::runtime::realtimeControlTask;
-  }
-  return xTaskCreatePinnedToCore(task_code, name, stack_depth, parameters,
-                                 priority, created_task, core_id);
-}
 
 esp_err_t triwhirlI2cNewMasterBusIntercept(
     const i2c_master_bus_config_t* config,
@@ -55,14 +39,12 @@ esp_err_t triwhirlI2cNewMasterBusIntercept(
 }  // namespace
 
 // runtime_main.cpp still owns the supervisor/swing runtime in this
-// behavior-preserving refactor slice. The remaining source-inclusion shim only
-// redirects the control-task creation and I2C bus creation call sites; the
-// implementations themselves now live behind explicit runtime interfaces.
-#define xTaskCreatePinnedToCore triwhirlCreatePinnedTaskIntercept
+// behavior-preserving refactor slice. Control-task selection is now explicit;
+// the only remaining source-inclusion hook preserves I2C interrupt affinity
+// until bus initialization itself is lifted out of app_main.cpp.
 #define i2c_new_master_bus triwhirlI2cNewMasterBusIntercept
 #include "runtime_main.cpp"
 #undef i2c_new_master_bus
-#undef xTaskCreatePinnedToCore
 
 static_assert(triwhirl::runtime::kRealtimeReleasePeriodUs == kControlPeriodUs,
               "GPTimer release period must match control period");
