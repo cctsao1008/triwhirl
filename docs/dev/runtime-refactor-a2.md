@@ -2,21 +2,26 @@
 
 Issue: #32
 
-A2 removes the remaining source-inclusion composition without changing the
-validated control behavior.
+A2 removes runtime source-inclusion composition while preserving the validated
+control behavior and command wire protocol.
 
-## Current active path
+## Current active composition
 
 ```text
-runtime_main.cpp
-  -> app_main.cpp
+runtime_main.cpp        explicit app entry + Core-1 realtime runtime
+runtime_state.cpp/.hpp  shared runtime state and bring-up helpers
 ```
 
-`runtime_main.cpp` is now the explicit realtime/startup translation unit.
-The former `runtime_control.cpp -> runtime_main.cpp` wrapper layer has been
-removed and `runtime_control.cpp` is no longer built or present.
+The historical composition chain is gone:
 
-## Explicit runtime boundaries already extracted
+```text
+runtime_control.cpp -> runtime_main.cpp -> app_main.cpp
+```
+
+`runtime_control.cpp` and legacy `app_main.cpp` are no longer present. There are
+no `.cpp` source inclusions and no symbol-renaming shims.
+
+## Explicit runtime boundaries
 
 ```text
 Core 0                                      Core 1
@@ -44,123 +49,80 @@ runtime_supervisor_io                 <-    runtime_snapshot
   static help text
 ```
 
-BLE is a NimBLE GATT transport, not UART. The RX characteristic accepts GATT
-writes and the BLE component places those payload bytes into an internal stream
-buffer; `runtime_supervisor_io` drains that buffer. TX uses the GATT notify
-characteristic. UART0 remains intentionally separate as a wired development and
-service CLI during bring-up. Neither transport has realtime authority.
+BLE is a NimBLE GATT transport, not UART. RX characteristic writes are buffered
+inside the BLE component and drained by `runtime_supervisor_io`; TX uses GATT
+notifications. UART0 remains a separate wired development/service CLI. Neither
+transport has realtime authority.
 
-Transport ownership and command grammar are separate services:
-`runtime_supervisor_io` owns ingress/framing while `runtime_command_parser`
-owns command text, numeric parsing, aliases, and usage validation. No raw command
-string or line buffer crosses into Core 1 anymore.
+`runtime_supervisor_io` owns ingress/framing while `runtime_command_parser` owns
+command text, aliases, numeric parsing, and usage validation. No raw command
+string or line buffer crosses into Core 1.
 
-The supervisor mailbox is depth-limited and non-blocking. When full, the newest
-command/event is rejected and the transport reports `ERR command mailbox full`
-rather than blocking either domain. Unknown commands are rejected in the
-supervisor domain with `ERR unknown command`.
+The supervisor mailbox is depth-limited and non-blocking. Mailbox saturation is
+reported as `ERR command mailbox full`; unknown commands are rejected on Core 0.
+The snapshot channel is depth one with overwrite/peek semantics, and the first
+snapshot is published before supervisor ingress starts.
 
-The snapshot channel is depth one and uses overwrite/peek semantics. Core 1
-publishes the latest complete snapshot without blocking; Core 0 reads a complete
-copy without consuming it. `attitude status`, `fault status`, `timing status`,
-and the read-only `telemetry` query are snapshot-backed on Core 0. `ble status`
-is handled entirely on Core 0 because its authoritative state belongs to the BLE
-GATT transport itself. Static `help` formatting is supervisor-owned as well. The
-first snapshot is published before supervisor ingress starts.
+`runtime_command.hpp` represents the remaining command surface that requires
+realtime-owned state. Motor, IMU, swing, timing-profile, logger, and attitude
+mutations arrive on Core 1 only as fixed-size typed records. Original aliases,
+usage errors, and swing ownership behavior are preserved.
 
-`runtime_command.hpp` represents the complete remaining command surface that
-needs realtime-owned state. This includes motor, IMU, swing, timing-profile, and
-logger lifecycle operations plus status requests that still depend on legacy
-runtime-owned state. Numeric conversion for all payload-bearing commands occurs
-only in `runtime_command_parser` on Core 0.
+## Composition cleanup: complete
 
-The original command-family aliases are preserved (`imu`, `log`, `swing`, and
-`timing profile` still resolve to their status forms; `attitude`, `timing`,
-`fault`, and `ble` status aliases remain supervisor-owned). Existing usage-error
-strings and the swing ownership policy are preserved.
-
-## Legacy string path: removed
-
-The following transitional path has been deleted:
+The following transitional mechanisms have been removed:
 
 ```text
 SupervisorInputEventType::kCommand
-char line[128] crossing into Core 1
+raw command line crossing into Core 1
 handleSupervisorCommand(event.line)
+legacy swing/timing string parsers
+updateEncoder/updateImu rename shims
+initEncoderBus/initImuBus rename shims
+runtime_control.cpp wrapper
+app_main rename shim
+all .cpp source inclusion
 ```
 
-`SupervisorInputEvent` now carries only typed `RuntimeCommand` records or small
-supervisor bookkeeping events. CI explicitly fails if the raw string path is
-reintroduced.
-
-The obsolete string bridge inside the runtime has also been deleted:
-`handleSupervisorCommand`, `consumeSupervisorBytes`, `pollSupervisorConsole`,
-legacy swing parsing, and legacy timing-profile parsing are gone.
-
-## Composition debt reduced to one bridge
-
-The redundant `updateEncoder` / `updateImu` rename shims were removed first.
-The I2C startup overrides were then renamed explicitly to
-`initRuntimeEncoderBus` and `initRuntimeImuBus`, removing the `initEncoderBus`
-and `initImuBus` preprocessor shims as well.
-
-The former `runtime_control.cpp` wrapper has now been folded into
-`runtime_main.cpp`. `runtime_main.cpp` directly owns:
-
-- the Core-1 realtime task implementation;
-- the AS5600 acquisition handoff and join policy;
-- the supervisor typed-command consumer;
-- runtime snapshot publication;
-- timing-profile accounting;
-- swing-identification runtime execution;
-- the application startup path.
-
-Only one source inclusion and one rename shim remain:
+`runtime_state.cpp/.hpp` now explicitly owns the state and helpers that were
+previously visible only because `app_main.cpp` was textually included. CMake
+compiles every runtime service as a normal translation unit. The architecture
+contract requires:
 
 ```text
-#define app_main triwhirl_legacy_app_main
-#include "app_main.cpp"
-#undef app_main
+cpp_includes = 0
+renaming_shims = 0
+app_main owner = runtime_main.cpp
+legacy app_main.cpp absent
+runtime_control.cpp absent
 ```
-
-CI locks that exact debt set: one `.cpp` include and one `app_main` rename shim.
-Any additional source inclusion or rename interception fails the architecture
-contract. It also rejects a return of the deleted `runtime_control.cpp` wrapper.
 
 ## Remaining A2 debt
 
-Command parsing and the extra realtime wrapper are gone, but A2 is not complete
-yet. Remaining work is now concentrated in the legacy bring-up state boundary:
+Composition is clean, but A2 still has two ownership problems to finish before
+closure:
 
-- extract the state/helpers still inherited from `app_main.cpp`, then delete the
-  final `runtime_main.cpp -> app_main.cpp` source inclusion and `app_main` shim;
-- status/IMU formatting still executes from Core 1 for commands whose state has
-  not yet been fully represented in `RuntimeSnapshot`;
-- aggregate `status` still refreshes AS5600 health and `imu status` still performs
-  a WHO_AM_I diagnostic I2C transaction in the realtime translation unit;
-- command responses and some telemetry/event formatting still originate on Core
-  1, so final single-writer supervisor egress is still pending.
+- read-only aggregate `status` still refreshes AS5600 health and `imu status`
+  still performs MPU6050 WHO_AM_I diagnostic I2C from realtime-owned state;
+- command responses, telemetry, swing events, and some status formatting still
+  originate from Core 1, so supervisor-owned single-writer protocol egress is
+  not complete.
+
+The next slices should move diagnostic acquisition/caching out of the realtime
+deadline and add a bounded Core-1 -> Core-0 result/event path for formatting and
+transport output. No blocking output or mutex should be introduced into Core 1.
 
 ## Target
 
 ```text
-runtime_startup.cpp
-runtime_control.cpp
-runtime_supervisor.cpp
-runtime_state.cpp/.hpp
-runtime_platform.cpp/.hpp
-runtime_release.cpp/.hpp
-```
-
-Supporting bounded services may remain separate when they have one clear
-hardware/concurrency responsibility, such as:
-
-```text
-runtime_command.hpp
-runtime_command_parser.cpp/.hpp
-runtime_encoder_acquisition.cpp/.hpp
-runtime_supervisor_io.cpp/.hpp
-runtime_snapshot.cpp/.hpp
+runtime_main.cpp          app entry + realtime orchestration
+runtime_state.cpp/.hpp    state/control primitives
+runtime_supervisor_io.*   Core-0 transport/framing/output
+runtime_command_parser.*  Core-0 command grammar
+runtime_snapshot.*        latest read-only runtime state
+runtime_encoder_acquisition.*
+runtime_platform.*
+runtime_release.*
 ```
 
 ## Acceptance
@@ -169,15 +131,14 @@ runtime_snapshot.cpp/.hpp
 - no symbol-renaming or generic ESP-IDF API interception;
 - one explicit application entry path;
 - one explicit realtime control task;
-- UART development ingress and BLE GATT ingress stay outside realtime control;
-- UART0 may remain as a wired development/service transport, but it does not
-  bypass the same Core-0 parser and typed command boundary used by BLE GATT;
+- UART development ingress and BLE GATT ingress remain outside realtime control;
 - command ingress is fixed-size, bounded, non-blocking, and explicitly rejects
   overflow;
 - no raw command strings cross into realtime;
-- string parsing/formatting is removed from realtime control before A2 closes;
-- read-only diagnostics consume bounded snapshot/transport state rather than
-  live cross-core state;
-- command protocol and identification behavior preserved;
+- no blocking diagnostic I2C is triggered by read-only supervisor commands in
+  the realtime deadline;
+- protocol formatting/egress is supervisor-owned through bounded non-blocking
+  Core-1 -> Core-0 records;
+- command protocol and identification behavior remain preserved;
 - realtime ownership remains on ESP32;
 - CI and hardware timing validation remain green after each structural slice.
