@@ -32,6 +32,9 @@ class Mpu6050 {
   Mpu6050() = default;
 
   bool init(i2c_master_bus_handle_t bus, std::uint8_t address = 0x68U);
+
+  // Identity is probed during init and cached. After successful init this is a
+  // pure cached read, so diagnostic status commands never issue live I2C.
   bool readWhoAmI(std::uint8_t* who_am_i);
   bool readSample(Mpu6050Sample* sample);
 
@@ -47,6 +50,8 @@ class Mpu6050 {
   void recordSampleTiming(std::uint32_t transfer_us, std::uint32_t decode_us);
 
   i2c_master_dev_handle_t device_ = nullptr;
+  std::uint8_t who_am_i_ = 0U;
+  bool who_am_i_valid_ = false;
   bool timing_profile_enabled_ = false;
   Mpu6050TimingStats timing_stats_{};
 };
