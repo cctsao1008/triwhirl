@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN = ROOT / "main"
+TESTS = ROOT / "tools" / "tests"
 
 ALLOWED_CPP_INCLUDES = {
     ("runtime_control.cpp", "runtime_main.cpp"),
@@ -36,10 +37,13 @@ CONTROL_FORBIDDEN_SUPERVISOR_IO = (
     "triwhirl::ble::read(",
 )
 
-SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS = (
+SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
     'std::strcmp(line, "attitude status")',
     'std::strcmp(line, "fault status")',
+    'std::strcmp(line, "ble status")',
     "readLatestRuntimeSnapshot(",
+    "triwhirl::ble::connected()",
+    "triwhirl::ble::subscribed()",
 )
 
 PARSER_REQUIRED_TYPED_COMMANDS = (
@@ -89,6 +93,16 @@ CONTROL_REQUIRED_TYPED_COMMANDS = (
     "RuntimeCommandType::kField",
     "RuntimeCommandType::kAttitudeReset",
     "RuntimeCommandType::kImuCalibrate",
+)
+
+PARSER_TEST_REQUIRED_TOKENS = (
+    'parseRuntimeCommand("motor stop")',
+    'parseRuntimeCommand("motor vq -0.625")',
+    'parseRuntimeCommand("field 3.5 0.8")',
+    'parseRuntimeCommand("attitude reset -1.25")',
+    'parseRuntimeCommand("imu calibrate 750")',
+    'RuntimeCommandParseStatus::kUsageError',
+    'RuntimeCommandParseStatus::kNotMatched',
 )
 
 CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.cpp)"', re.MULTILINE)
@@ -154,15 +168,21 @@ def main() -> None:
 
     supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
     parser_text = (MAIN / "runtime_command_parser.cpp").read_text(encoding="utf-8")
+    parser_test = TESTS / "runtime_command_parser_test.cpp"
+    if not parser_test.exists():
+        fail("runtime command parser contract test is missing")
+    parser_test_text = parser_test.read_text(encoding="utf-8")
 
-    require_tokens(supervisor_text, SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS,
-                   "snapshot-backed read-only diagnostics regressed")
+    require_tokens(supervisor_text, SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS,
+                   "Core0 read-only diagnostics regressed")
     require_tokens(supervisor_text, SUPERVISOR_REQUIRED_TYPED_BOUNDARY,
                    "supervisor typed-command boundary regressed")
     require_tokens(parser_text, PARSER_REQUIRED_TYPED_COMMANDS,
                    "Core0 typed command parser regressed")
     require_tokens(control_text, CONTROL_REQUIRED_TYPED_COMMANDS,
                    "typed realtime command execution regressed")
+    require_tokens(parser_test_text, PARSER_TEST_REQUIRED_TOKENS,
+                   "runtime command parser contract coverage regressed")
 
     print("runtime architecture contract: PASS")
     print(f"  cpp_includes={sorted(cpp_includes)}")
@@ -170,9 +190,10 @@ def main() -> None:
     print(f"  app_main_sources={sorted(app_main_sources)}")
     print("  runtime_control_queue_mechanics=isolated")
     print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
-    print("  supervisor_snapshot_diagnostics=attitude,fault")
+    print("  supervisor_read_only=attitude,fault,ble")
     print("  supervisor_transports=uart_dev,ble_gatt")
     print("  command_parser=explicit_core0_service")
+    print("  command_parser_contract_test=present")
     print("  typed_runtime_commands=motor_stop,stop,swing_abort,timing_reset,fault_clear,telemetry_on,telemetry_off,motor_vq,field,attitude_reset,imu_calibrate")
 
 
