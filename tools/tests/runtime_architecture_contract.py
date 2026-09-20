@@ -28,11 +28,6 @@ CONTROL_FORBIDDEN_QUEUE_MECHANICS = (
     "xQueueReceive(", "xQueueOverwrite(",
 )
 CONTROL_FORBIDDEN_SUPERVISOR_IO = ("uart_read_bytes(", "triwhirl::ble::read(")
-LEGACY_COMMAND_TOKENS = (
-    "SupervisorInputEventType::kCommand",
-    "handleSupervisorCommand(event.line)",
-    "char line[kSupervisorCommandBytes]",
-)
 
 SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
     'std::strcmp(line, "attitude status")',
@@ -123,12 +118,16 @@ def main() -> None:
     if leaked_io:
         fail(f"UART development/BLE GATT ingress leaked into runtime_control.cpp: {leaked_io}")
 
-    legacy = [
-        x for x in LEGACY_COMMAND_TOKENS
-        if x in control_text or x in supervisor_text or x in supervisor_header
-    ]
-    if legacy:
-        fail(f"legacy raw command path remains: {legacy}")
+    # A supervisor-local line buffer is intentional for transport framing. What
+    # is forbidden is carrying raw line text across the supervisor/realtime API.
+    if "SupervisorInputEventType::kCommand" in control_text or \
+       "SupervisorInputEventType::kCommand" in supervisor_text or \
+       "SupervisorInputEventType::kCommand" in supervisor_header:
+        fail("legacy raw command event remains")
+    if "handleSupervisorCommand(event.line)" in control_text:
+        fail("realtime still dispatches raw command strings")
+    if "char line[kSupervisorCommandBytes]" in supervisor_header:
+        fail("SupervisorInputEvent still carries a raw command line")
 
     first_snapshot = control_text.find("publishSupervisorSnapshot(")
     supervisor_init = control_text.find("initSupervisorIo(")
