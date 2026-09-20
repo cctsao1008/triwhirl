@@ -3,7 +3,11 @@
 // validated on hardware; the legacy app_main symbol is renamed inside this
 // translation unit, and the real app_main below adds the swing supervisor.
 #define app_main triwhirl_legacy_app_main
+#define updateEncoder triwhirl_legacy_updateEncoder
+#define updateImu triwhirl_legacy_updateImu
 #include "app_main.cpp"
+#undef updateImu
+#undef updateEncoder
 #undef app_main
 
 #include "freertos/queue.h"
@@ -20,6 +24,21 @@ using triwhirl::SwingIdStopReason;
 using triwhirl::SwingIdVertex;
 
 constexpr std::uint32_t kSupervisorConsolePollPeriodUs = 5000U;
+
+// runtime_main owns the realtime acquisition cadence. The legacy helpers gate
+// sensor reads on elapsed microseconds, which aliases with the 1 ms RTOS tick
+// and was observed to update AS5600/MPU6050 only ~564 Hz while the task itself
+// ran ~1 kHz. Read both independent sensors on every control iteration instead;
+// actual dt remains timestamp-based in wheel/attitude processing.
+void updateEncoder(const std::uint32_t now_us) {
+  sampleEncoder(now_us);
+}
+
+void updateImu(const std::uint32_t now_us) {
+  if (sampleImu()) {
+    updateAttitude(now_us);
+  }
+}
 
 struct SwingEvent {
   SwingIdOutput output{};
@@ -511,7 +530,7 @@ void consumeSupervisorBytes(const std::uint8_t* input,
   if (input == nullptr) {
     return;
   }
-  for (std::size_t index = 0; index < received; ++index) {
+  for (std::size_t index = 0U; index < received; ++index) {
     const char c = static_cast<char>(input[index]);
     if (c == '\r' || c == '\n') {
       if (state.length > 0U) {
