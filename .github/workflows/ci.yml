@@ -9,9 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Guard runtime architecture debt
-        run: python tools/tests/runtime_architecture_smoke.py
-      - name: Smoke-test host toolbox routing
+      - name: guard: runtime architecture contract
+        run: python tools/tests/runtime_architecture_contract.py
+      - name: test: host toolbox routing
         run: |
           python tools/twtool.py --help
           python tools/twtool.py --list
@@ -30,7 +30,7 @@ jobs:
           python tools/twtool.py help id swing
           python -m tools.triwhirl_tool help log decode
           python -m compileall -q tools/triwhirl_tool model tools/synthesis/hinf
-      - name: Smoke-test native TWLG tools
+      - name: test: native TWLG tools
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -51,14 +51,14 @@ jobs:
               magic, 1, 64, 32, 1000, 2, len(payload), 0, crc, 1,
               4096, 8192, 0, 0, 0, 0, 0, 0,
           ) + payload
-          Path("/tmp/twtool-smoke.twlog").write_bytes(blob)
+          Path("/tmp/twtool-test.twlog").write_bytes(blob)
           PY
-          python tools/twtool.py log inspect /tmp/twtool-smoke.twlog --json
+          python tools/twtool.py log inspect /tmp/twtool-test.twlog --json
           python - <<'PY'
           from pathlib import Path
           from tools.triwhirl_tool import twlog
 
-          _, payload = twlog.read(Path("/tmp/twtool-smoke.twlog"))
+          _, payload = twlog.read(Path("/tmp/twtool-test.twlog"))
           stats = twlog.summarize(payload)
           assert stats.dt_min_us == 1050
           assert stats.dt_max_us == 1050
@@ -68,9 +68,9 @@ jobs:
           assert stats.imu_valid_records == 2
           assert stats.attitude_valid_records == 2
           PY
-          python -m tools.triwhirl_tool log decode /tmp/twtool-smoke.twlog -o /tmp/twtool-smoke.csv
-          test -s /tmp/twtool-smoke.csv
-      - name: Smoke-test native swing TWLG extraction
+          python -m tools.triwhirl_tool log decode /tmp/twtool-test.twlog -o /tmp/twtool-test.csv
+          test -s /tmp/twtool-test.csv
+      - name: test: swing TWLG extraction
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -96,8 +96,8 @@ jobs:
               magic, 1, 64, 32, 1000, 5, len(payload), 0, crc, 1,
               4096, 8192, 0, 0, 0, 0, 0, 0,
           ) + payload
-          source = Path("/tmp/swing-smoke.twlog")
-          output = Path("/tmp/swing-smoke-active.csv")
+          source = Path("/tmp/swing-test.twlog")
+          output = Path("/tmp/swing-test-active.csv")
           source.write_bytes(blob)
           assert write_fit_csv(source, output, vertex_a_deg=68.0) == 1
           rows = list(csv.DictReader(output.open(encoding="utf-8")))
@@ -107,22 +107,22 @@ jobs:
           assert [row["phase"] for row in rows[1:]] == ["active", "active", "active"]
           assert all(abs(float(row["planned_vq_v"]) + 0.55) < 1e-6 for row in rows)
           PY
-      - name: Smoke-test independent swing probe scheduler
+      - name: test: independent swing probe scheduler
         run: |
           g++ -std=c++17 \
             -Icomponents/triwhirl_core/include \
-            tools/tests/swing_id_probe_schedule_smoke.cpp \
+            tools/tests/swing_id_probe_schedule_test.cpp \
             components/triwhirl_core/swing_id.cpp \
-            -o /tmp/swing-id-probe-schedule-smoke
-          /tmp/swing-id-probe-schedule-smoke
-      - name: Smoke-test 120-degree upright geometry
+            -o /tmp/swing-id-probe-schedule-test
+          /tmp/swing-id-probe-schedule-test
+      - name: test: 120-degree upright geometry
         run: |
           g++ -std=c++17 \
             -Icomponents/triwhirl_core/include \
-            tools/tests/upright_geometry_smoke.cpp \
-            -o /tmp/upright-geometry-smoke
-          /tmp/upright-geometry-smoke
-      - name: Build with native ESP-IDF
+            tools/tests/upright_geometry_test.cpp \
+            -o /tmp/upright-geometry-test
+          /tmp/upright-geometry-test
+      - name: build: native ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v6.1
