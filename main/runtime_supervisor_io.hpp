@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "runtime_command.hpp"
-#include "runtime_reply.hpp"
+#include "runtime_egress.hpp"
 
 namespace triwhirl::runtime {
 
@@ -20,9 +20,8 @@ using SupervisorWriteFn = void (*)(void* context, const char* data,
 // Starts the non-realtime supervisor task. UART0 is retained as a wired
 // development/service CLI. BLE ingress is NimBLE GATT RX-characteristic data
 // drained through the BLE component's internal stream buffer; it is not UART.
-// Snapshot/transport-owned read-only commands are answered directly on Core 0;
-// remaining grammar is parsed into fixed-size RuntimeCommand records before
-// crossing into realtime.
+// Read-only commands are answered directly on Core 0; mutation grammar is
+// parsed into fixed-size RuntimeCommand records before crossing into realtime.
 bool initSupervisorIo(SupervisorWriteFn write_fn, void* write_context,
                       int core_id, unsigned task_priority);
 
@@ -30,12 +29,8 @@ bool initSupervisorIo(SupervisorWriteFn write_fn, void* write_context,
 // removed per call. No raw command strings cross this boundary.
 bool tryReceiveSupervisorInput(SupervisorInputEvent* event);
 
-// Non-blocking Core-1 -> Core-0 result/event path. Realtime publishes bounded
-// structured outcomes only; the supervisor formats synchronous command replies,
-// swing status/transitions, timing-profile reports, and post-command prompts.
-// Queue saturation is observable through runtimeReplyDroppedCount(); realtime
-// never waits for protocol egress.
-bool publishRuntimeReply(const RuntimeReply& reply);
-std::uint32_t runtimeReplyDroppedCount();
+// Structured egress publication APIs are declared in runtime_egress.hpp.
+// Replies, asynchronous state events, telemetry frames, and profile reports
+// are all bounded and zero-timeout; Core 0 owns their wire formatting.
 
 }  // namespace triwhirl::runtime

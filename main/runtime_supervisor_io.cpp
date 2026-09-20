@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <type_traits>
 
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
@@ -20,9 +21,36 @@ namespace {
 
 constexpr std::uint32_t kSupervisorPollPeriodMs = 5U;
 constexpr UBaseType_t kSupervisorQueueDepth = 4U;
-// Timing-profile status emits a bounded burst of structured stage records.
-// Keep enough headroom for that complete burst plus ordinary command replies.
-constexpr UBaseType_t kRuntimeReplyQueueDepth = 24U;
+// One FIFO preserves Core-1 publication order across synchronous replies,
+// asynchronous state events, telemetry, and profile summaries. Timing-profile
+// status is the largest normal burst, so keep explicit headroom above it.
+constexpr UBaseType_t kRuntimeEgressQueueDepth = 32U;
+
+enum class RuntimeEgressType : std::uint8_t {
+  kReply = 0,
+  kStateEvent,
+  kTelemetry,
+  kProfileReport,
+};
+
+union RuntimeEgressPayload {
+  RuntimeReply reply;
+  RuntimeStateEvent state_event;
+  RuntimeTelemetryFrame telemetry;
+  RuntimeProfileReport profile_report;
+
+  constexpr RuntimeEgressPayload() : reply{} {}
+};
+
+struct RuntimeEgressRecord {
+  RuntimeEgressType type = RuntimeEgressType::kReply;
+  RuntimeEgressPayload payload{};
+};
+
+static_assert(std::is_trivially_copyable_v<RuntimeEgressRecord>,
+              "RuntimeEgressRecord must remain trivially copyable");
+static_assert(sizeof(RuntimeEgressRecord) <= 160U,
+              "RuntimeEgressRecord grew beyond the bounded queue budget");
 
 struct CommandInputState {
   char line[kSupervisorCommandBytes]{};
@@ -30,13 +58,13 @@ struct CommandInputState {
 };
 
 QueueHandle_t input_queue = nullptr;
-QueueHandle_t reply_queue = nullptr;
+QueueHandle_t egress_queue = nullptr;
 TaskHandle_t supervisor_task = nullptr;
 SupervisorWriteFn write_fn = nullptr;
 void* write_context = nullptr;
 CommandInputState uart_development_input{};
 CommandInputState ble_gatt_input{};
-std::uint32_t reply_dropped = 0U;
+std::uint32_t egress_dropped = 0U;
 
 void writeBytes(const char* data, const std::size_t length) {
   if (write_fn != nullptr && data != nullptr && length > 0U) {
@@ -75,6 +103,14 @@ bool publishCommand(const SupervisorInputEvent& event) {
   }
   if (xQueueSend(input_queue, &event, 0) != pdTRUE) {
     writeText("ERR command mailbox full\r\n");
+    return false;
+  }
+  return true;
+}
+
+bool publishEgress(const RuntimeEgressRecord& record) {
+  if (egress_queue == nullptr || xQueueSend(egress_queue, &record, 0) != pdTRUE) {
+    ++egress_dropped;
     return false;
   }
   return true;
@@ -396,13 +432,138 @@ void formatRuntimeReply(const RuntimeReply& reply) {
   }
 }
 
-void drainRuntimeReplies() {
-  if (reply_queue == nullptr) {
+void formatRuntimeStateEvent(const RuntimeStateEvent& event) {
+  char buffer[256];
+  int length = 0;
+  switch (event.type) {
+    case RuntimeStateEventType::kNone:
+      return;
+    case RuntimeStateEventType::kFaultLatched:
+      length = std::snprintf(
+          buffer, sizeof(buffer), "FAULT,code=%s,mask=0x%08lx\r\n",
+          triwhirl::safetyFaultName(static_cast<triwhirl::SafetyFault>(event.value0)),
+          static_cast<unsigned long>(event.u32_0));
+      break;
+    case RuntimeStateEventType::kMotorCalibrationEncoderUnavailable:
+      writeText("ERR motor calibration: encoder read unavailable\r\n");
+      return;
+    case RuntimeStateEventType::kMotorCalibrationNoMotion:
+      writeText("ERR motor calibration: no usable mechanical motion\r\n");
+      return;
+    case RuntimeStateEventType::kMotorCalibrationPolePairInvalid:
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "ERR motor calibration: pole-pair estimate %.3f is invalid\r\n",
+          event.float0);
+      break;
+    case RuntimeStateEventType::kMotorCalibrationConfigInvalid:
+      writeText("ERR motor calibration: generated configuration is invalid\r\n");
+      return;
+    case RuntimeStateEventType::kMotorCalibrationComplete:
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "OK motor calibrated pole_pairs=%d sensor_dir=%d offset_rad=%.6f estimate=%.3f\r\n",
+          event.value0, event.value1, event.float0, event.float1);
+      break;
+    case RuntimeStateEventType::kFocStoppedConfigUnavailable:
+      writeText("ERR FOC stopped: motor configuration unavailable\r\n");
+      return;
+    case RuntimeStateEventType::kFocStoppedEncoderUnavailable:
+      writeText("ERR FOC stopped: encoder unavailable\r\n");
+      return;
+    case RuntimeStateEventType::kImuCalibrationComplete:
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "OK imu gyro calibration bx=%.6f by=%.6f bz=%.6f rad_s\r\n",
+          event.float0, event.float1, event.float2);
+      break;
+  }
+  writeFormatted(buffer, length, sizeof(buffer));
+}
+
+void formatRuntimeTelemetry(const RuntimeTelemetryFrame& frame) {
+  char buffer[768];
+  const int length = std::snprintf(
+      buffer, sizeof(buffer),
+      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%lu,%d,%.6f,%.6f,%.6f,%lu,%lu,%llu,%lu\r\n",
+      static_cast<unsigned long>(frame.t_us), motorModeName(frame.motor_mode),
+      frame.motor_vq_v, frame.motor_electrical_angle_rad,
+      frame.motor_electrical_hz, frame.encoder_status_valid ? 1 : 0,
+      frame.encoder_sample_valid ? 1 : 0,
+      frame.encoder_magnet_detected ? 1 : 0,
+      static_cast<unsigned>(frame.encoder_raw_count),
+      static_cast<long long>(frame.encoder_unwrapped_count),
+      frame.encoder_angle_rad, frame.encoder_unwrapped_rad,
+      frame.encoder_velocity_rad_s, frame.encoder_instantaneous_velocity_rad_s,
+      frame.encoder_velocity_valid ? 1 : 0,
+      static_cast<unsigned long>(frame.encoder_read_errors),
+      frame.imu_sample_valid ? 1 : 0, frame.imu_ax_mps2, frame.imu_ay_mps2,
+      frame.imu_az_mps2, frame.imu_gx_rad_s, frame.imu_gy_rad_s,
+      frame.imu_gz_rad_s, static_cast<unsigned long>(frame.imu_read_errors),
+      frame.attitude_valid ? 1 : 0, frame.attitude_angle_rad,
+      frame.attitude_rate_rad_s, frame.attitude_accel_weight,
+      static_cast<unsigned long>(frame.timing_last_exec_us),
+      static_cast<unsigned long>(frame.timing_max_exec_us),
+      static_cast<unsigned long long>(frame.timing_overruns),
+      static_cast<unsigned long>(frame.safety_fault_mask));
+  writeFormatted(buffer, length, sizeof(buffer));
+}
+
+void formatRuntimeProfileReport(const RuntimeProfileReport& report) {
+  char buffer[1024];
+  const double attitude_mean_us =
+      report.attitude_count > 0U
+          ? static_cast<double>(report.attitude_total_us) /
+                static_cast<double>(report.attitude_count)
+          : 0.0;
+  const int length = std::snprintf(
+      buffer, sizeof(buffer),
+      "parallel_profile,requests=%llu,completions=%llu,dispatch_failures=%llu,read_failures=%llu,stale_results=%llu,join_timeouts=%llu,max_consecutive_misses=%lu,attitude_count=%llu,attitude_mean_us=%.3f,attitude_min_us=%lu,attitude_max_us=%lu,period_lt900=%llu,period_900_949=%llu,period_950_999=%llu,period_1000_1049=%llu,period_1050_1099=%llu,period_1100_1249=%llu,period_1250_1499=%llu,period_ge1500=%llu\r\n",
+      static_cast<unsigned long long>(report.requests),
+      static_cast<unsigned long long>(report.completions),
+      static_cast<unsigned long long>(report.dispatch_failures),
+      static_cast<unsigned long long>(report.read_failures),
+      static_cast<unsigned long long>(report.stale_results),
+      static_cast<unsigned long long>(report.join_timeouts),
+      static_cast<unsigned long>(report.max_consecutive_misses),
+      static_cast<unsigned long long>(report.attitude_count), attitude_mean_us,
+      static_cast<unsigned long>(report.attitude_min_us),
+      static_cast<unsigned long>(report.attitude_max_us),
+      static_cast<unsigned long long>(report.period_lt900),
+      static_cast<unsigned long long>(report.period_900_949),
+      static_cast<unsigned long long>(report.period_950_999),
+      static_cast<unsigned long long>(report.period_1000_1049),
+      static_cast<unsigned long long>(report.period_1050_1099),
+      static_cast<unsigned long long>(report.period_1100_1249),
+      static_cast<unsigned long long>(report.period_1250_1499),
+      static_cast<unsigned long long>(report.period_ge1500));
+  writeFormatted(buffer, length, sizeof(buffer));
+}
+
+void formatRuntimeEgress(const RuntimeEgressRecord& record) {
+  switch (record.type) {
+    case RuntimeEgressType::kReply:
+      formatRuntimeReply(record.payload.reply);
+      break;
+    case RuntimeEgressType::kStateEvent:
+      formatRuntimeStateEvent(record.payload.state_event);
+      break;
+    case RuntimeEgressType::kTelemetry:
+      formatRuntimeTelemetry(record.payload.telemetry);
+      break;
+    case RuntimeEgressType::kProfileReport:
+      formatRuntimeProfileReport(record.payload.profile_report);
+      break;
+  }
+}
+
+void drainRuntimeEgress() {
+  if (egress_queue == nullptr) {
     return;
   }
-  RuntimeReply reply{};
-  while (xQueueReceive(reply_queue, &reply, 0) == pdTRUE) {
-    formatRuntimeReply(reply);
+  RuntimeEgressRecord record{};
+  while (xQueueReceive(egress_queue, &record, 0) == pdTRUE) {
+    formatRuntimeEgress(record);
   }
 }
 
@@ -689,7 +850,7 @@ void supervisorIoTask(void*) {
   std::uint8_t input[64];
 
   while (true) {
-    drainRuntimeReplies();
+    drainRuntimeEgress();
 
     const int uart_received = uart_read_bytes(UART_NUM_0, input, sizeof(input), 0);
     if (uart_received > 0) {
@@ -702,7 +863,7 @@ void supervisorIoTask(void*) {
       consumeBytes(input, ble_received, ble_gatt_input);
     }
 
-    drainRuntimeReplies();
+    drainRuntimeEgress();
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(kSupervisorPollPeriodMs));
   }
 }
@@ -712,14 +873,14 @@ void supervisorIoTask(void*) {
 bool initSupervisorIo(const SupervisorWriteFn callback,
                       void* const callback_context, const int core_id,
                       const unsigned task_priority) {
-  if (callback == nullptr || input_queue != nullptr || reply_queue != nullptr ||
+  if (callback == nullptr || input_queue != nullptr || egress_queue != nullptr ||
       supervisor_task != nullptr) {
     return false;
   }
 
   input_queue = xQueueCreate(kSupervisorQueueDepth, sizeof(SupervisorInputEvent));
-  reply_queue = xQueueCreate(kRuntimeReplyQueueDepth, sizeof(RuntimeReply));
-  if (input_queue == nullptr || reply_queue == nullptr) {
+  egress_queue = xQueueCreate(kRuntimeEgressQueueDepth, sizeof(RuntimeEgressRecord));
+  if (input_queue == nullptr || egress_queue == nullptr) {
     return false;
   }
 
@@ -737,15 +898,39 @@ bool tryReceiveSupervisorInput(SupervisorInputEvent* const event) {
 }
 
 bool publishRuntimeReply(const RuntimeReply& reply) {
-  if (reply_queue == nullptr || xQueueSend(reply_queue, &reply, 0) != pdTRUE) {
-    ++reply_dropped;
-    return false;
-  }
-  return true;
+  RuntimeEgressRecord record{};
+  record.type = RuntimeEgressType::kReply;
+  record.payload.reply = reply;
+  return publishEgress(record);
+}
+
+bool publishRuntimeStateEvent(const RuntimeStateEvent& event) {
+  RuntimeEgressRecord record{};
+  record.type = RuntimeEgressType::kStateEvent;
+  record.payload.state_event = event;
+  return publishEgress(record);
+}
+
+bool publishRuntimeTelemetry(const RuntimeTelemetryFrame& frame) {
+  RuntimeEgressRecord record{};
+  record.type = RuntimeEgressType::kTelemetry;
+  record.payload.telemetry = frame;
+  return publishEgress(record);
+}
+
+bool publishRuntimeProfileReport(const RuntimeProfileReport& report) {
+  RuntimeEgressRecord record{};
+  record.type = RuntimeEgressType::kProfileReport;
+  record.payload.profile_report = report;
+  return publishEgress(record);
+}
+
+std::uint32_t runtimeEgressDroppedCount() {
+  return egress_dropped;
 }
 
 std::uint32_t runtimeReplyDroppedCount() {
-  return reply_dropped;
+  return egress_dropped;
 }
 
 }  // namespace triwhirl::runtime

@@ -10,6 +10,7 @@
 #include "driver/uart.h"
 #include "esp_err.h"
 #include "esp_timer.h"
+#include "runtime_egress.hpp"
 #include "triwhirl/ble_transport.hpp"
 #include "triwhirl/board.hpp"
 
@@ -23,14 +24,20 @@ bool hasFault(const SafetyFault fault) {
   return (safety_latch.mask() & triwhirl::safetyFaultMask(fault)) != 0U;
 }
 
+void publishStateEvent(const triwhirl::runtime::RuntimeStateEvent& event) {
+  triwhirl::runtime::publishRuntimeStateEvent(event);
+}
+
 void tripFault(const SafetyFault fault) {
   const std::uint32_t before = safety_latch.mask();
   safety_latch.trip(fault);
   stopMotor();
   if ((before & triwhirl::safetyFaultMask(fault)) == 0U) {
-    consolePrintf("FAULT,code=%s,mask=0x%08lx\r\n",
-                  triwhirl::safetyFaultName(fault),
-                  static_cast<unsigned long>(safety_latch.mask()));
+    triwhirl::runtime::RuntimeStateEvent event{};
+    event.type = triwhirl::runtime::RuntimeStateEventType::kFaultLatched;
+    event.value0 = static_cast<std::int32_t>(fault);
+    event.u32_0 = safety_latch.mask();
+    publishStateEvent(event);
   }
 }
 
@@ -90,7 +97,10 @@ void finishCalibration() {
   const float mechanical_travel = std::fabs(delta_mechanical);
   if (!(mechanical_travel > 0.05F) || !std::isfinite(mechanical_travel)) {
     tripFault(SafetyFault::kCalibration);
-    consoleWrite("ERR motor calibration: no usable mechanical motion\r\n");
+    triwhirl::runtime::RuntimeStateEvent event{};
+    event.type =
+        triwhirl::runtime::RuntimeStateEventType::kMotorCalibrationNoMotion;
+    publishStateEvent(event);
     return;
   }
 
@@ -99,8 +109,11 @@ void finishCalibration() {
   if (pole_pairs < 1 || pole_pairs > 64 ||
       std::fabs(pole_pairs_estimate - static_cast<float>(pole_pairs)) > 0.45F) {
     tripFault(SafetyFault::kCalibration);
-    consolePrintf("ERR motor calibration: pole-pair estimate %.3f is invalid\r\n",
-                  pole_pairs_estimate);
+    triwhirl::runtime::RuntimeStateEvent event{};
+    event.type = triwhirl::runtime::RuntimeStateEventType::
+        kMotorCalibrationPolePairInvalid;
+    event.float0 = pole_pairs_estimate;
+    publishStateEvent(event);
     return;
   }
 
@@ -117,14 +130,21 @@ void finishCalibration() {
   motor_config_valid = triwhirl::validMotorElectricalConfig(motor_config);
   if (!motor_config_valid) {
     tripFault(SafetyFault::kCalibration);
-    consoleWrite("ERR motor calibration: generated configuration is invalid\r\n");
+    triwhirl::runtime::RuntimeStateEvent event{};
+    event.type = triwhirl::runtime::RuntimeStateEventType::
+        kMotorCalibrationConfigInvalid;
+    publishStateEvent(event);
     return;
   }
   stopMotor();
-  consolePrintf(
-      "OK motor calibrated pole_pairs=%d sensor_dir=%d offset_rad=%.6f estimate=%.3f\r\n",
-      motor_config.pole_pairs, motor_config.sensor_direction,
-      motor_config.electrical_offset_rad, pole_pairs_estimate);
+  triwhirl::runtime::RuntimeStateEvent event{};
+  event.type =
+      triwhirl::runtime::RuntimeStateEventType::kMotorCalibrationComplete;
+  event.value0 = motor_config.pole_pairs;
+  event.value1 = motor_config.sensor_direction;
+  event.float0 = motor_config.electrical_offset_rad;
+  event.float1 = pole_pairs_estimate;
+  publishStateEvent(event);
 }
 
 void updateCalibration(const std::uint32_t now_us) {
@@ -134,7 +154,10 @@ void updateCalibration(const std::uint32_t now_us) {
   }
   if (!encoder_sample_valid) {
     tripFault(SafetyFault::kEncoderUnavailable);
-    consoleWrite("ERR motor calibration: encoder read unavailable\r\n");
+    triwhirl::runtime::RuntimeStateEvent event{};
+    event.type = triwhirl::runtime::RuntimeStateEventType::
+        kMotorCalibrationEncoderUnavailable;
+    publishStateEvent(event);
     return;
   }
   if (calibration.stage == CalibrationStage::kAlign) {
@@ -404,9 +427,13 @@ bool sampleImu() {
       }
       gyro_calibration.active = false;
       gyro_bias_valid = true;
-      consolePrintf(
-          "OK imu gyro calibration bx=%.6f by=%.6f bz=%.6f rad_s\r\n",
-          gyro_bias_rad_s[0], gyro_bias_rad_s[1], gyro_bias_rad_s[2]);
+      triwhirl::runtime::RuntimeStateEvent event{};
+      event.type =
+          triwhirl::runtime::RuntimeStateEventType::kImuCalibrationComplete;
+      event.float0 = gyro_bias_rad_s[0];
+      event.float1 = gyro_bias_rad_s[1];
+      event.float2 = gyro_bias_rad_s[2];
+      publishStateEvent(event);
     }
   }
   return true;
@@ -490,12 +517,18 @@ void updateMotor(const std::uint32_t now_us) {
   }
   if (!motor_config_valid) {
     tripFault(SafetyFault::kCalibration);
-    consoleWrite("ERR FOC stopped: motor configuration unavailable\r\n");
+    triwhirl::runtime::RuntimeStateEvent event{};
+    event.type = triwhirl::runtime::RuntimeStateEventType::
+        kFocStoppedConfigUnavailable;
+    publishStateEvent(event);
     return;
   }
   if (!encoder_sample_valid) {
     tripFault(SafetyFault::kEncoderUnavailable);
-    consoleWrite("ERR FOC stopped: encoder unavailable\r\n");
+    triwhirl::runtime::RuntimeStateEvent event{};
+    event.type = triwhirl::runtime::RuntimeStateEventType::
+        kFocStoppedEncoderUnavailable;
+    publishStateEvent(event);
     return;
   }
   electrical_angle_rad = triwhirl::electricalAngleFromMechanical(
@@ -628,26 +661,42 @@ void emitTelemetry(const std::uint32_t now_us) {
     return;
   }
   last_telemetry_us = now_us;
-  consolePrintf(
-      "telemetry,%lu,%s,%.6f,%.6f,%.6f,%d,%d,%d,%u,%lld,%.6f,%.6f,%.6f,%.6f,%d,%lu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%lu,%d,%.6f,%.6f,%.6f,%lu,%lu,%llu,%lu\r\n",
-      static_cast<unsigned long>(now_us), motorModeName(motor_mode), vq_command_v,
-      electrical_angle_rad, open_loop_hz, encoder_status_valid ? 1 : 0,
-      encoder_sample_valid ? 1 : 0, encoder_status.magnet_detected ? 1 : 0,
-      static_cast<unsigned>(wheel_state.raw_count),
-      static_cast<long long>(wheel_state.unwrapped_count), wheel_state.angle_rad,
-      wheel_state.unwrapped_angle_rad, wheel_state.velocity_rad_s,
-      wheel_state.instantaneous_velocity_rad_s,
-      wheel_state.velocity_valid ? 1 : 0,
-      static_cast<unsigned long>(encoder_read_errors), imu_sample_valid ? 1 : 0,
-      imu_sample.accel_mps2[0], imu_sample.accel_mps2[1], imu_sample.accel_mps2[2],
-      correctedGyro(0), correctedGyro(1), correctedGyro(2),
-      static_cast<unsigned long>(imu_read_errors), attitude_state.valid ? 1 : 0,
-      attitude_state.angle_rad, attitude_state.rate_rad_s,
-      attitude_state.accel_weight,
-      static_cast<unsigned long>(timing_stats.last_exec_us),
-      static_cast<unsigned long>(timing_stats.max_exec_us),
-      static_cast<unsigned long long>(timing_stats.overruns),
-      static_cast<unsigned long>(safety_latch.mask()));
+
+  triwhirl::runtime::RuntimeTelemetryFrame frame{};
+  frame.t_us = now_us;
+  frame.motor_mode = static_cast<std::uint8_t>(motor_mode);
+  frame.motor_vq_v = vq_command_v;
+  frame.motor_electrical_angle_rad = electrical_angle_rad;
+  frame.motor_electrical_hz = open_loop_hz;
+  frame.encoder_status_valid = encoder_status_valid ? 1U : 0U;
+  frame.encoder_sample_valid = encoder_sample_valid ? 1U : 0U;
+  frame.encoder_magnet_detected = encoder_status.magnet_detected ? 1U : 0U;
+  frame.encoder_raw_count = wheel_state.raw_count;
+  frame.encoder_unwrapped_count = wheel_state.unwrapped_count;
+  frame.encoder_angle_rad = wheel_state.angle_rad;
+  frame.encoder_unwrapped_rad = wheel_state.unwrapped_angle_rad;
+  frame.encoder_velocity_rad_s = wheel_state.velocity_rad_s;
+  frame.encoder_instantaneous_velocity_rad_s =
+      wheel_state.instantaneous_velocity_rad_s;
+  frame.encoder_velocity_valid = wheel_state.velocity_valid ? 1U : 0U;
+  frame.encoder_read_errors = encoder_read_errors;
+  frame.imu_sample_valid = imu_sample_valid ? 1U : 0U;
+  frame.imu_ax_mps2 = imu_sample.accel_mps2[0];
+  frame.imu_ay_mps2 = imu_sample.accel_mps2[1];
+  frame.imu_az_mps2 = imu_sample.accel_mps2[2];
+  frame.imu_gx_rad_s = correctedGyro(0);
+  frame.imu_gy_rad_s = correctedGyro(1);
+  frame.imu_gz_rad_s = correctedGyro(2);
+  frame.imu_read_errors = imu_read_errors;
+  frame.attitude_valid = attitude_state.valid ? 1U : 0U;
+  frame.attitude_angle_rad = attitude_state.angle_rad;
+  frame.attitude_rate_rad_s = attitude_state.rate_rad_s;
+  frame.attitude_accel_weight = attitude_state.accel_weight;
+  frame.timing_last_exec_us = timing_stats.last_exec_us;
+  frame.timing_max_exec_us = timing_stats.max_exec_us;
+  frame.timing_overruns = timing_stats.overruns;
+  frame.safety_fault_mask = safety_latch.mask();
+  triwhirl::runtime::publishRuntimeTelemetry(frame);
 }
 
 void updateTimingStats(const std::int64_t start_us, const std::int64_t end_us) {

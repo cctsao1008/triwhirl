@@ -429,34 +429,29 @@ void recordControlPeriod(const std::int64_t start_us) {
   else ++control_period_histogram.ge_1500;
 }
 
-void printControlProfileSummary() {
+void publishControlProfileSummary() {
   const auto encoder_stats = triwhirl::runtime::encoderAcquisitionStats();
-  const double attitude_mean_us =
-      attitude_math_timing.count > 0U
-          ? static_cast<double>(attitude_math_timing.total_us) /
-                static_cast<double>(attitude_math_timing.count)
-          : 0.0;
-  consolePrintf(
-      "parallel_profile,requests=%llu,completions=%llu,dispatch_failures=%llu,read_failures=%llu,stale_results=%llu,join_timeouts=%llu,max_consecutive_misses=%lu,attitude_count=%llu,attitude_mean_us=%.3f,attitude_min_us=%lu,attitude_max_us=%lu,period_lt900=%llu,period_900_949=%llu,period_950_999=%llu,period_1000_1049=%llu,period_1050_1099=%llu,period_1100_1249=%llu,period_1250_1499=%llu,period_ge1500=%llu\r\n",
-      static_cast<unsigned long long>(encoder_stats.requests),
-      static_cast<unsigned long long>(encoder_acq_completions),
-      static_cast<unsigned long long>(encoder_stats.dispatch_failures),
-      static_cast<unsigned long long>(encoder_stats.read_failures),
-      static_cast<unsigned long long>(encoder_stats.stale_results),
-      static_cast<unsigned long long>(encoder_stats.join_timeouts),
-      static_cast<unsigned long>(encoder_acq_max_consecutive_misses),
-      static_cast<unsigned long long>(attitude_math_timing.count),
-      attitude_mean_us,
-      static_cast<unsigned long>(attitude_math_timing.min_us),
-      static_cast<unsigned long>(attitude_math_timing.max_us),
-      static_cast<unsigned long long>(control_period_histogram.lt_900),
-      static_cast<unsigned long long>(control_period_histogram.us_900_949),
-      static_cast<unsigned long long>(control_period_histogram.us_950_999),
-      static_cast<unsigned long long>(control_period_histogram.us_1000_1049),
-      static_cast<unsigned long long>(control_period_histogram.us_1050_1099),
-      static_cast<unsigned long long>(control_period_histogram.us_1100_1249),
-      static_cast<unsigned long long>(control_period_histogram.us_1250_1499),
-      static_cast<unsigned long long>(control_period_histogram.ge_1500));
+  triwhirl::runtime::RuntimeProfileReport report{};
+  report.requests = encoder_stats.requests;
+  report.completions = encoder_acq_completions;
+  report.dispatch_failures = encoder_stats.dispatch_failures;
+  report.read_failures = encoder_stats.read_failures;
+  report.stale_results = encoder_stats.stale_results;
+  report.join_timeouts = encoder_stats.join_timeouts;
+  report.max_consecutive_misses = encoder_acq_max_consecutive_misses;
+  report.attitude_count = attitude_math_timing.count;
+  report.attitude_total_us = attitude_math_timing.total_us;
+  report.attitude_min_us = attitude_math_timing.min_us;
+  report.attitude_max_us = attitude_math_timing.max_us;
+  report.period_lt900 = control_period_histogram.lt_900;
+  report.period_900_949 = control_period_histogram.us_900_949;
+  report.period_950_999 = control_period_histogram.us_950_999;
+  report.period_1000_1049 = control_period_histogram.us_1000_1049;
+  report.period_1050_1099 = control_period_histogram.us_1050_1099;
+  report.period_1100_1249 = control_period_histogram.us_1100_1249;
+  report.period_1250_1499 = control_period_histogram.us_1250_1499;
+  report.period_ge1500 = control_period_histogram.ge_1500;
+  triwhirl::runtime::publishRuntimeProfileReport(report);
 }
 
 void noteEncoderMiss() {
@@ -1051,7 +1046,7 @@ void realtimeControlTaskImpl(void*) {
       control_profile_active = true;
     } else if (!profile && control_profile_active) {
       control_profile_active = false;
-      printControlProfileSummary();
+      publishControlProfileSummary();
     }
     if (profile) recordControlPeriod(start_us);
 
