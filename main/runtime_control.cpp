@@ -15,12 +15,14 @@
 #include "runtime_control.hpp"
 #include "runtime_encoder_acquisition.hpp"
 #include "runtime_release.hpp"
+#include "runtime_snapshot.hpp"
 #include "runtime_supervisor_io.hpp"
 
 // runtime_main.cpp still owns the supervisor/swing runtime in this
 // behavior-preserving refactor slice. Task selection, I2C affinity, encoder
-// acquisition, supervisor transport, and the GPTimer scheduler are explicit
-// interfaces; the remaining composition debt is the source inclusion itself.
+// acquisition, supervisor transport, snapshots, and the GPTimer scheduler are
+// explicit interfaces; the remaining composition debt is the source inclusion
+// itself.
 #include "runtime_main.cpp"
 
 static_assert(triwhirl::runtime::kRealtimeReleasePeriodUs == kControlPeriodUs,
@@ -189,6 +191,24 @@ void supervisorWrite(void*, const char* const data, const std::size_t length) {
   consoleWriteBytes(data, length);
 }
 
+void publishSupervisorSnapshot(const std::uint32_t now_us) {
+  triwhirl::runtime::RuntimeSnapshot snapshot{};
+  snapshot.t_us = now_us;
+  snapshot.attitude_initialized = attitude_initialized;
+  snapshot.attitude_valid = attitude_state.valid;
+  snapshot.attitude_angle_rad = attitude_state.angle_rad;
+  snapshot.attitude_rate_rad_s = attitude_state.rate_rad_s;
+  snapshot.attitude_residual_bias_rad_s = attitude_state.gyro_bias_rad_s;
+  snapshot.attitude_innovation = attitude_state.gravity_innovation;
+  snapshot.attitude_accel_weight = attitude_state.accel_weight;
+  snapshot.wheel_rate_rad_s = wheel_state.velocity_rad_s;
+  snapshot.safety_faulted = safety_latch.faulted();
+  snapshot.safety_fault_mask = safety_latch.mask();
+  snapshot.safety_first_fault =
+      static_cast<std::uint32_t>(safety_latch.firstFault());
+  triwhirl::runtime::publishRuntimeSnapshot(snapshot);
+}
+
 void processOneSupervisorInput() {
   triwhirl::runtime::SupervisorInputEvent event{};
   if (!triwhirl::runtime::tryReceiveSupervisorInput(&event)) {
@@ -215,6 +235,14 @@ void realtimeControlTaskImpl(void*) {
     return;
   }
 
+  if (!triwhirl::runtime::initRuntimeSnapshotChannel()) {
+    safety_latch.trip(SafetyFault::kStartup);
+    stopMotor();
+    consoleWrite("FATAL fault=startup runtime snapshot channel creation failed\r\n");
+    vTaskDelete(nullptr);
+    return;
+  }
+
   if (!triwhirl::runtime::initSupervisorIo(supervisorWrite, nullptr, 0,
                                             kSupervisorTaskPriority)) {
     safety_latch.trip(SafetyFault::kStartup);
@@ -223,6 +251,8 @@ void realtimeControlTaskImpl(void*) {
     vTaskDelete(nullptr);
     return;
   }
+
+  publishSupervisorSnapshot(static_cast<std::uint32_t>(esp_timer_get_time()));
 
   TickType_t last_wake = xTaskGetTickCount();
   while (true) {
@@ -291,6 +321,7 @@ void realtimeControlTaskImpl(void*) {
 
     recordSwingRuntimeLog(loop_us);
     finalizeSwingLogIfPending();
+    publishSupervisorSnapshot(loop_us);
     if (profile) {
       const std::int64_t now = esp_timer_get_time();
       recordRuntimeTimingStage(RuntimeTimingStage::kLog, stage_us, now);
