@@ -25,12 +25,151 @@ struct SwingEvent {
   std::uint32_t fault_mask = 0U;
 };
 
+enum class RuntimeTimingStage : std::uint8_t {
+  kEncoder = 0,
+  kImuAttitude,
+  kSafetySwing,
+  kMotor,
+  kLog,
+  kConsole,
+  kTelemetry,
+  kLoop,
+  kCount,
+};
+
+struct RuntimeTimingStageStats {
+  std::uint64_t count = 0U;
+  std::uint64_t total_us = 0U;
+  std::uint32_t min_us = std::numeric_limits<std::uint32_t>::max();
+  std::uint32_t max_us = 0U;
+};
+
+struct RuntimeTimingProfile {
+  bool enabled = false;
+  RuntimeTimingStageStats stages[static_cast<std::size_t>(RuntimeTimingStage::kCount)]{};
+};
+
 SwingIdRunner swing_id_runner{};
 QueueHandle_t swing_event_queue = nullptr;
 std::uint32_t swing_event_drops = 0U;
 bool swing_log_finalize_pending = false;
+RuntimeTimingProfile runtime_timing_profile{};
 
 void printSwingHelp();
+
+const char* runtimeTimingStageName(const RuntimeTimingStage stage) {
+  switch (stage) {
+    case RuntimeTimingStage::kEncoder:
+      return "encoder";
+    case RuntimeTimingStage::kImuAttitude:
+      return "imu_attitude";
+    case RuntimeTimingStage::kSafetySwing:
+      return "safety_swing";
+    case RuntimeTimingStage::kMotor:
+      return "motor";
+    case RuntimeTimingStage::kLog:
+      return "log";
+    case RuntimeTimingStage::kConsole:
+      return "console";
+    case RuntimeTimingStage::kTelemetry:
+      return "telemetry";
+    case RuntimeTimingStage::kLoop:
+      return "loop";
+    case RuntimeTimingStage::kCount:
+      break;
+  }
+  return "unknown";
+}
+
+void resetRuntimeTimingProfile() {
+  const bool enabled = runtime_timing_profile.enabled;
+  runtime_timing_profile = {};
+  runtime_timing_profile.enabled = enabled;
+}
+
+void recordRuntimeTimingStage(const RuntimeTimingStage stage,
+                              const std::int64_t begin_us,
+                              const std::int64_t end_us) {
+  if (!runtime_timing_profile.enabled || end_us < begin_us ||
+      stage == RuntimeTimingStage::kCount) {
+    return;
+  }
+  const std::uint64_t elapsed64 = static_cast<std::uint64_t>(end_us - begin_us);
+  const std::uint32_t elapsed = elapsed64 > std::numeric_limits<std::uint32_t>::max()
+                                    ? std::numeric_limits<std::uint32_t>::max()
+                                    : static_cast<std::uint32_t>(elapsed64);
+  RuntimeTimingStageStats& stats =
+      runtime_timing_profile.stages[static_cast<std::size_t>(stage)];
+  ++stats.count;
+  stats.total_us += elapsed;
+  if (elapsed < stats.min_us) {
+    stats.min_us = elapsed;
+  }
+  if (elapsed > stats.max_us) {
+    stats.max_us = elapsed;
+  }
+}
+
+void printRuntimeTimingProfile() {
+  const RuntimeTimingStageStats& loop =
+      runtime_timing_profile.stages[static_cast<std::size_t>(RuntimeTimingStage::kLoop)];
+  consolePrintf("timing_profile,enabled=%d,samples=%llu,clock=esp_timer_us\r\n",
+                runtime_timing_profile.enabled ? 1 : 0,
+                static_cast<unsigned long long>(loop.count));
+  for (std::size_t index = 0U;
+       index < static_cast<std::size_t>(RuntimeTimingStage::kCount); ++index) {
+    const RuntimeTimingStage stage = static_cast<RuntimeTimingStage>(index);
+    const RuntimeTimingStageStats& stats = runtime_timing_profile.stages[index];
+    const double mean_us = stats.count > 0U
+                               ? static_cast<double>(stats.total_us) /
+                                     static_cast<double>(stats.count)
+                               : 0.0;
+    const std::uint32_t min_us = stats.count > 0U ? stats.min_us : 0U;
+    consolePrintf(
+        "timing_profile_stage,name=%s,count=%llu,mean_us=%.3f,min_us=%lu,max_us=%lu\r\n",
+        runtimeTimingStageName(stage),
+        static_cast<unsigned long long>(stats.count), mean_us,
+        static_cast<unsigned long>(min_us),
+        static_cast<unsigned long>(stats.max_us));
+  }
+  consoleWrite("timing_profile_end\r\n");
+}
+
+void handleRuntimeTimingProfileCommand(char* line) {
+  if (line == nullptr) {
+    return;
+  }
+  std::strtok(line, " \t");  // timing
+  char* profile = std::strtok(nullptr, " \t");
+  char* action = std::strtok(nullptr, " \t");
+  if (profile == nullptr || std::strcmp(profile, "profile") != 0) {
+    consoleWrite("ERR usage: timing profile <status|on|off|reset>\r\n");
+    return;
+  }
+  if (action == nullptr || std::strcmp(action, "status") == 0) {
+    printRuntimeTimingProfile();
+    return;
+  }
+  if (std::strcmp(action, "reset") == 0) {
+    resetRuntimeTimingProfile();
+    consoleWrite("OK timing profile reset\r\n");
+    return;
+  }
+  if (std::strcmp(action, "on") == 0) {
+    runtime_timing_profile.enabled = false;
+    resetRuntimeTimingProfile();
+    runtime_timing_profile.enabled = true;
+    consoleWrite("OK timing profile on\r\n");
+    return;
+  }
+  if (std::strcmp(action, "off") == 0) {
+    runtime_timing_profile.enabled = false;
+    consoleWrite("OK timing profile off\r\n");
+    printRuntimeTimingProfile();
+    return;
+  }
+  consoleWrite("ERR usage: timing profile <status|on|off|reset>\r\n");
+}
 
 bool swingTerminal(const SwingIdState state) {
   return state == SwingIdState::kComplete || state == SwingIdState::kAborted;
@@ -312,6 +451,11 @@ void handleSupervisorCommand(char* line) {
     handleSwingCommand(begin);
     return;
   }
+  if (std::strncmp(begin, "timing profile", 14) == 0 &&
+      (begin[14] == '\0' || begin[14] == ' ' || begin[14] == '\t')) {
+    handleRuntimeTimingProfileCommand(begin);
+    return;
+  }
   if (!commandAllowedDuringSwing(begin)) {
     consoleWrite("ERR swing experiment owns realtime actuation; use 'swing abort' first\r\n");
     return;
@@ -426,17 +570,60 @@ void swingControlTask(void*) {
   while (true) {
     const std::int64_t start_us = esp_timer_get_time();
     const std::uint32_t loop_us = static_cast<std::uint32_t>(start_us);
+    const bool profile = runtime_timing_profile.enabled;
+    std::int64_t stage_us = start_us;
+
     updateEncoder(loop_us);
+    if (profile) {
+      const std::int64_t now = esp_timer_get_time();
+      recordRuntimeTimingStage(RuntimeTimingStage::kEncoder, stage_us, now);
+      stage_us = now;
+    }
+
     updateImu(loop_us);
+    if (profile) {
+      const std::int64_t now = esp_timer_get_time();
+      recordRuntimeTimingStage(RuntimeTimingStage::kImuAttitude, stage_us, now);
+      stage_us = now;
+    }
+
     evaluateSafety(start_us);
     updateSwingIdentification(loop_us);
+    if (profile) {
+      const std::int64_t now = esp_timer_get_time();
+      recordRuntimeTimingStage(RuntimeTimingStage::kSafetySwing, stage_us, now);
+      stage_us = now;
+    }
+
     updateMotor(loop_us);
+    if (profile) {
+      const std::int64_t now = esp_timer_get_time();
+      recordRuntimeTimingStage(RuntimeTimingStage::kMotor, stage_us, now);
+      stage_us = now;
+    }
+
     recordSwingRuntimeLog(loop_us);
     finalizeSwingLogIfPending();
+    if (profile) {
+      const std::int64_t now = esp_timer_get_time();
+      recordRuntimeTimingStage(RuntimeTimingStage::kLog, stage_us, now);
+      stage_us = now;
+    }
+
     pollSupervisorConsole();
     finalizeSwingLogIfPending();
+    if (profile) {
+      const std::int64_t now = esp_timer_get_time();
+      recordRuntimeTimingStage(RuntimeTimingStage::kConsole, stage_us, now);
+      stage_us = now;
+    }
+
     emitTelemetry(loop_us);
     const std::int64_t end_us = esp_timer_get_time();
+    if (profile) {
+      recordRuntimeTimingStage(RuntimeTimingStage::kTelemetry, stage_us, end_us);
+      recordRuntimeTimingStage(RuntimeTimingStage::kLoop, start_us, end_us);
+    }
     updateTimingStats(start_us, end_us);
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1));
   }
@@ -447,6 +634,7 @@ void printSwingHelp() {
   consoleWrite("  swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n");
   consoleWrite("  swing start\r\n");
   consoleWrite("  swing abort\r\n");
+  consoleWrite("  timing profile <status|on|off|reset>\r\n");
 }
 
 }  // namespace
