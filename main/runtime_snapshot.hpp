@@ -78,6 +78,20 @@ struct RuntimeSnapshot {
   int imu_map_cos_sign = 1;
   int imu_map_gyro_sign = 1;
   std::uint32_t imu_read_errors = 0U;
+
+  // Logger status is supervisory data. The diagnostic publisher refreshes this
+  // cached view at a lower rate than the 1 kHz control snapshot publication.
+  std::uint8_t log_state = 0U;
+  std::uint32_t log_partition_bytes = 0U;
+  std::uint32_t log_prepared_bytes = 0U;
+  std::uint32_t log_max_records = 0U;
+  std::uint32_t log_buffered_bytes = 0U;
+  std::uint32_t log_records_written = 0U;
+  std::uint32_t log_dropped_records = 0U;
+  std::uint32_t log_logical_bytes = 0U;
+  bool log_flash_writes_allowed = true;
+  bool log_critical_window = false;
+  bool log_dump_active = false;
 };
 
 // Single-writer (Core 1) bounded publication. The implementation keeps only
