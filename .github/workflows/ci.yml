@@ -11,6 +11,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: "guard: runtime architecture contract"
         run: python tools/tests/runtime_architecture_contract.py
+      - name: "test: runtime command parser contract"
+        run: |
+          g++ -std=c++17 \
+            -Imain \
+            tools/tests/runtime_command_parser_test.cpp \
+            main/runtime_command_parser.cpp \
+            -o /tmp/runtime-command-parser-test
+          /tmp/runtime-command-parser-test
       - name: "test: host toolbox routing"
         run: |
           python tools/twtool.py --help
