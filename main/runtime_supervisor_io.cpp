@@ -32,13 +32,13 @@ void writeBytes(const char* data, const std::size_t length) {
   }
 }
 
-void publishEvent(const SupervisorInputEvent& event) {
+bool publishEvent(const SupervisorInputEvent& event) {
   if (input_queue == nullptr) {
-    return;
+    return false;
   }
   // Command traffic is supervisory. If the bounded mailbox is full, reject the
   // newest event rather than ever blocking this task or the realtime consumer.
-  xQueueSend(input_queue, &event, 0);
+  return xQueueSend(input_queue, &event, 0) == pdTRUE;
 }
 
 void consumeBytes(const std::uint8_t* input, const std::size_t received,
@@ -57,7 +57,9 @@ void consumeBytes(const std::uint8_t* input, const std::size_t received,
         event.type = SupervisorInputEventType::kCommand;
         std::memcpy(event.line, state.line, state.length);
         event.line[state.length] = '\0';
-        publishEvent(event);
+        if (!publishEvent(event)) {
+          writeBytes("ERR command mailbox full\r\n", 26U);
+        }
         state.length = 0U;
       }
       continue;
@@ -85,7 +87,9 @@ void consumeBytes(const std::uint8_t* input, const std::size_t received,
     writeBytes("\r\nERR command too long\r\n", 24U);
     SupervisorInputEvent event{};
     event.type = SupervisorInputEventType::kLineOverflow;
-    publishEvent(event);
+    if (!publishEvent(event)) {
+      writeBytes("ERR command mailbox full\r\n", 26U);
+    }
   }
 }
 
