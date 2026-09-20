@@ -38,6 +38,7 @@ CONTROL_FORBIDDEN_SUPERVISOR_IO = (
 )
 
 SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
+    'std::strcmp(line, "help")',
     'std::strcmp(line, "attitude status")',
     'std::strcmp(line, "fault status")',
     'std::strcmp(line, "ble status")',
@@ -48,6 +49,8 @@ SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
     "triwhirl::ble::subscribed()",
     "snapshot.timing_iterations",
     "snapshot.telemetry_enabled",
+    '"  swing status\\r\\n"',
+    '"  timing profile <status|on|off|reset>\\r\\n"',
 )
 
 PARSER_REQUIRED_TYPED_COMMANDS = (
@@ -184,9 +187,13 @@ def main() -> None:
     if leaked_supervisor_io:
         fail(f"UART development/BLE GATT ingress leaked into runtime_control.cpp: {leaked_supervisor_io}")
 
-    first_snapshot = control_text.find("publishSupervisorSnapshot(")
-    supervisor_init = control_text.find("initSupervisorIo(")
-    if first_snapshot < 0 or supervisor_init < 0 or first_snapshot > supervisor_init:
+    initial_snapshot = control_text.find(
+        "  publishSupervisorSnapshot(static_cast<std::uint32_t>(esp_timer_get_time()));"
+    )
+    supervisor_init = control_text.find(
+        "  if (!triwhirl::runtime::initSupervisorIo(supervisorWrite, nullptr, 0,"
+    )
+    if initial_snapshot < 0 or supervisor_init < 0 or initial_snapshot > supervisor_init:
         fail("initial runtime snapshot must be published before supervisor ingress starts")
 
     supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
@@ -213,7 +220,7 @@ def main() -> None:
     print(f"  app_main_sources={sorted(app_main_sources)}")
     print("  runtime_control_queue_mechanics=isolated")
     print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
-    print("  supervisor_read_only=attitude,fault,ble,timing,telemetry")
+    print("  supervisor_read_only=help,attitude,fault,ble,timing,telemetry")
     print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
     print("  command_parser=explicit_core0_service")
