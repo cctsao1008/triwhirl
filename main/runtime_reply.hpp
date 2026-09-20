@@ -101,7 +101,6 @@ struct RuntimeReply {
   std::int32_t value6 = 0;
   std::int32_t value7 = 0;
   std::int32_t value8 = 0;
-  std::int32_t value9 = 0;
   std::uint32_t u32_0 = 0U;
   std::uint32_t u32_1 = 0U;
   std::uint64_t wide0 = 0U;
@@ -115,13 +114,11 @@ struct RuntimeReply {
   float float6 = 0.0F;
   float float7 = 0.0F;
   float float8 = 0.0F;
-  float float9 = 0.0F;
-  float float10 = 0.0F;
 };
 
 static_assert(std::is_trivially_copyable_v<RuntimeReply>,
               "RuntimeReply must remain trivially copyable");
-static_assert(sizeof(RuntimeReply) <= 112U,
+static_assert(sizeof(RuntimeReply) <= 104U,
               "RuntimeReply grew beyond the bounded egress budget");
 
 }  // namespace triwhirl::runtime
