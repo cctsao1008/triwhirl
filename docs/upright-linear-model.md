@@ -25,7 +25,7 @@ C = -172 deg = 68 - 240
 
 All three therefore map to `theta_error = 0` under the same periodic coordinate. A/B/C classification remains useful for logging and identification provenance, but the runtime balance law does not need a different gain or a different state definition for each named vertex.
 
-The shared host-side helpers are `periodic_upright_error_deg()` and `periodic_upright_error_rad()` in `tools/triwhirl_tool/geometry.py`.
+The firmware contract is implemented by `triwhirl::periodicUprightErrorDeg()` / `periodicUprightErrorRad()` in `components/triwhirl_core/include/triwhirl/upright_geometry.hpp`. Matching host helpers live in `tools/triwhirl_tool/geometry.py`.
 
 ## Seller reference implementation
 
@@ -37,6 +37,8 @@ That implementation also provides two useful architectural references:
 - after balancing, it slowly trims the target angle according to persistent reaction-wheel speed, effectively using equilibrium-bias adjustment for momentum management.
 
 The seller controller is **not** copied into TriWhirl: it drives a SimpleFOC velocity loop with LQR-like outer gains, whereas TriWhirl's planned robust controller commands `Vq` directly. Its value here is evidence for the 120-degree periodic coordinate and for the usefulness of a slow momentum-unloading reference trim, not as a source of transferable gain values.
+
+A detailed source-derived comparison is kept in `docs/vendor-reference-control.md`.
 
 ## Identification versus control coverage
 
