@@ -20,15 +20,26 @@ bool validMotorElectricalConfig(const MotorElectricalConfig& config) {
          std::isfinite(config.electrical_offset_rad);
 }
 
-float wrapElectricalAngle(const float angle_rad) {
+float wrapElectricalAngle(float angle_rad) {
   if (!std::isfinite(angle_rad)) {
     return 0.0F;
   }
-  float wrapped = std::fmod(angle_rad, kTwoPi);
-  if (wrapped < 0.0F) {
-    wrapped += kTwoPi;
+
+  // Normal FOC updates arrive close to the previous electrical angle. Keep the
+  // common case out of fmod(), which is expensive on ESP32 LX6.
+  if (angle_rad >= 0.0F && angle_rad < kTwoPi) {
+    return angle_rad;
   }
-  return wrapped;
+  if (angle_rad > 8.0F * kTwoPi || angle_rad < -8.0F * kTwoPi) {
+    angle_rad = std::fmod(angle_rad, kTwoPi);
+  }
+  while (angle_rad >= kTwoPi) {
+    angle_rad -= kTwoPi;
+  }
+  while (angle_rad < 0.0F) {
+    angle_rad += kTwoPi;
+  }
+  return angle_rad;
 }
 
 float electricalAngleFromMechanical(const float mechanical_angle_rad,
@@ -57,14 +68,19 @@ PhaseVoltages makeDqVoltage(const float electrical_angle_rad,
 
   float vd = vd_v;
   float vq = vq_v;
-  const float requested = std::hypot(vd, vq);
   const float linear_limit = std::min(vector_limit_v, bus_voltage_v * kInvSqrt3);
-  if (requested > linear_limit && requested > 0.0F) {
-    const float scale = linear_limit / requested;
+  const float requested_sq = vd * vd + vq * vq;
+  const float linear_limit_sq = linear_limit * linear_limit;
+  if (requested_sq > linear_limit_sq && requested_sq > 0.0F) {
+    // sqrt() is needed only on the saturation path. Normal TriWhirl bring-up
+    // Vq commands are already within the configured vector limit.
+    const float scale = linear_limit / std::sqrt(requested_sq);
     vd *= scale;
     vq *= scale;
   }
 
+  // electricalAngleFromMechanical() already returns [0, 2*pi) in the normal
+  // FOC path; wrapElectricalAngle() therefore takes its one-compare fast path.
   const float angle = wrapElectricalAngle(electrical_angle_rad);
   const float cos_theta = std::cos(angle);
   const float sin_theta = std::sin(angle);
