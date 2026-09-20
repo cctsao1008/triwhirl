@@ -11,6 +11,7 @@ control behavior and command wire protocol.
 runtime_main.cpp         explicit app entry + Core-1 realtime orchestration
 runtime_state.cpp/.hpp   shared runtime state and bring-up/control helpers
 runtime_diagnostics.*    bounded diagnostic snapshot enrichment + Core-0 AS5600 health
+runtime_reply.hpp        fixed-size Core-1 -> Core-0 command outcome contract
 ```
 
 The historical composition chain is gone:
@@ -38,7 +39,7 @@ runtime_supervisor_io
        |
        v
 runtime_command_parser                     ->    runtime_main
-  mutation grammar                               at most one queued event / RT iteration
+  mutation grammar                               at most one queued command / RT iteration
   numeric parsing                                typed command execution
   usage errors                                   no raw command strings
   fixed-size RuntimeCommand
@@ -48,6 +49,10 @@ runtime_supervisor_io                      <-    runtime_snapshot
   status / motor status                          state copied on Core 1
   imu / log / attitude / fault / timing          non-blocking overwrite publication
   telemetry query
+
+runtime_supervisor_io                      <-    RuntimeReply queue
+  command-result formatting                      bounded, non-blocking Core-1 publish
+  post-command prompt                            fixed-size structured outcomes
 
 runtime_supervisor_io -- Core 0 live read --> AS5600 status
 BLE GATT status -- direct transport state --> runtime_supervisor_io
@@ -62,15 +67,15 @@ transport has realtime authority.
 mutation command text, aliases, numeric parsing, and usage validation. No raw
 command string or line buffer crosses into Core 1.
 
-The supervisor mailbox is depth-limited and non-blocking. Mailbox saturation is
-reported as `ERR command mailbox full`; unknown commands are rejected on Core 0.
-The snapshot channel is depth one with overwrite/peek semantics, and the first
-snapshot is published before supervisor ingress starts.
+The supervisor command mailbox is depth-limited and non-blocking. Mailbox
+saturation is reported as `ERR command mailbox full`; unknown commands are
+rejected on Core 0. The snapshot channel is depth one with overwrite/peek
+semantics, and the first snapshot is published before supervisor ingress starts.
 
-`RuntimeCommand` is a trivially-copyable fixed-size mailbox record and is bounded
-to 64 bytes by compile-time assertions. Motor, IMU, swing, timing-profile,
-logger, and attitude mutations arrive on Core 1 only as typed records. Original
-aliases, usage errors, and swing ownership behavior are preserved.
+`RuntimeCommand` is a trivially-copyable fixed-size mailbox record bounded to 64
+bytes. `RuntimeReply` is also trivially copyable and bounded to 40 bytes. The
+reply queue is depth eight and uses zero-timeout publication from Core 1; reply
+saturation increments an explicit drop counter rather than blocking realtime.
 
 ## Read-only diagnostics moved out of realtime command execution
 
@@ -105,15 +110,49 @@ Read-only formatting then happens on Core 0 using the cached snapshot.
 The existing wire formats for aggregate status, IMU status, and log status are
 preserved.
 
+## Structured Core-1 -> Core-0 replies
+
+Supervisor bookkeeping events used only to make Core 1 print a prompt have been
+removed. Core 0 now prints prompts directly for read-only commands, parser usage
+errors, unknown commands, line overflow, and mailbox-full rejection. Prompt
+suppression uses bounded snapshot state (`telemetry`, binary dump, and swing
+active).
+
+A first substantial mutation-response set now uses `RuntimeReply` instead of
+constructing text in the realtime task:
+
+```text
+swing ownership rejection
+motor stop
+stop
+swing abort / already inactive
+timing reset
+timing profile reset
+fault clear / already clear / rejected
+telemetry on / off
+motor config success / invalid
+attitude reset success / invalid
+imu map success / invalid
+```
+
+Core 1 performs the state transition and publishes only a reply code plus the
+small numeric payload needed to preserve the original response. Core 0 formats
+the existing wire string and emits the post-command prompt. Commands not yet
+migrated retain their old response path temporarily, so the refactor remains
+behavior-preserving while the egress boundary expands.
+
+The swing transition event queue already terminates in the Core-0
+`swingEventTask`; that event text is not a Core-1 transport write.
+
 ## Composition cleanup: complete
 
 The following transitional mechanisms have been removed:
 
 ```text
-SupervisorInputEventType::kCommand
 raw command line crossing into Core 1
 handleSupervisorCommand(event.line)
 legacy swing/timing string parsers
+supervisor prompt-only bookkeeping events
 updateEncoder/updateImu rename shims
 initEncoderBus/initImuBus rename shims
 runtime_control.cpp wrapper
@@ -133,27 +172,30 @@ app_main owner = runtime_main.cpp
 legacy app_main.cpp absent
 runtime_control.cpp absent
 runtime_diagnostics.cpp explicit
+RuntimeReply bounded structured egress present
 ```
 
 ## Remaining A2 debt
 
-The command-ingress and read-only diagnostic boundaries are now substantially
-cleaner. Remaining work is concentrated in outbound ownership:
+The remaining work is now concentrated in the **unmigrated outbound formatting**:
 
 - `swing status` and `timing profile status` are still formatted from
   realtime-owned structures;
-- mutation command success/error responses are still formatted by Core 1;
-- periodic telemetry, swing transition events, calibration/fault events, and
-  timing-profile summaries still originate as text from Core 1.
+- several mutation commands still construct success/error text on Core 1,
+  notably swing start/config, timing-profile on/off, motor Vq/calibration/field,
+  IMU calibration, and logger lifecycle commands;
+- periodic telemetry, calibration completion/failure, safety-fault text, and
+  timing-profile/control-profile summaries still originate as text from Core 1.
 
 Transport transmission itself is already buffered: UART text drains through the
 Core-0 console TX task and BLE `write()` feeds the BLE TX stream consumed by the
 Core-0 BLE TX task. The remaining problem is therefore **where protocol text is
-constructed**, not raw transport notification ownership.
+constructed**, not raw UART/GATT notification ownership.
 
-The next major slice should introduce bounded structured Core-1 -> Core-0 result
-and event records, then move protocol formatting into the supervisor domain. It
-must not add blocking transport calls or output mutexes to the realtime task.
+The next large slice should extend the structured reply/event contract across the
+remaining mutation results and asynchronous telemetry/fault/calibration events,
+then remove the legacy direct Core-1 formatting calls from the realtime path.
+It must not add blocking transport calls or output mutexes to Core 1.
 
 ## Target
 
@@ -162,6 +204,7 @@ runtime_main.cpp          app entry + realtime orchestration
 runtime_state.cpp/.hpp    state/control primitives
 runtime_supervisor_io.*   Core-0 transport/framing/formatting
 runtime_command_parser.*  Core-0 mutation grammar
+runtime_reply.hpp         structured Core-1 -> Core-0 outcomes
 runtime_snapshot.*        latest read-only runtime state
 runtime_diagnostics.*     bounded diagnostic state + Core-0 sensor diagnostics
 runtime_encoder_acquisition.*
@@ -181,8 +224,9 @@ runtime_release.*
 - no raw command strings cross into realtime;
 - no command-triggered diagnostic I2C runs in the realtime deadline;
 - externally reachable read-only status formatting is supervisor-owned;
-- protocol formatting for realtime command results/events moves through bounded
-  non-blocking Core-1 -> Core-0 records before A2 closes;
+- command-result formatting progressively crosses the bounded non-blocking
+  Core-1 -> Core-0 `RuntimeReply` path;
+- no prompt-only bookkeeping needs to cross into Core 1;
 - command protocol and identification behavior remain preserved;
 - realtime ownership remains on ESP32;
 - CI and hardware timing validation remain green after each structural slice.
