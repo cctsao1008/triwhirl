@@ -41,6 +41,12 @@ bool As5600::init(const i2c_master_bus_handle_t bus, const std::uint8_t address)
   if (bus == nullptr) {
     return false;
   }
+  if (mutex_ == nullptr) {
+    mutex_ = xSemaphoreCreateMutex();
+    if (mutex_ == nullptr) {
+      return false;
+    }
+  }
   i2c_device_config_t config{};
   config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
   config.device_address = address;
@@ -71,56 +77,58 @@ bool As5600::readRegisters(const std::uint8_t first_register,
 }
 
 bool As5600::readRawAngle(std::uint16_t* const raw_count) {
-  if (raw_count == nullptr || device_ == nullptr) {
+  if (raw_count == nullptr || device_ == nullptr || mutex_ == nullptr) {
+    return false;
+  }
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(kI2cTimeoutMs)) != pdTRUE) {
     return false;
   }
 
-  const std::int64_t begin_us =
-      timing_profile_enabled_ ? esp_timer_get_time() : 0;
+  const bool profile = timing_profile_enabled_;
+  const std::int64_t begin_us = profile ? esp_timer_get_time() : 0;
 
-  // The AS5600 RAW ANGLE high/low registers implement a special continuous
-  // read mode: after the address pointer is seeded to 0x0C, reading the low
-  // byte wraps the pointer back to 0x0C. Avoid re-transmitting the register
-  // address on every 1 kHz sample and use a receive-only transaction instead.
+  bool ok = true;
   if (!raw_angle_pointer_valid_) {
-    if (!selectRegister(kRawAngleHighRegister)) {
-      if (timing_profile_enabled_) {
-        recordRawTiming(static_cast<std::uint32_t>(esp_timer_get_time() - begin_us));
-      }
-      return false;
+    ok = selectRegister(kRawAngleHighRegister);
+    if (ok) {
+      raw_angle_pointer_valid_ = true;
     }
-    raw_angle_pointer_valid_ = true;
   }
 
   std::uint8_t data[2]{};
-  if (i2c_master_receive(device_, data, sizeof(data), kI2cTimeoutMs) != ESP_OK) {
+  if (ok && i2c_master_receive(device_, data, sizeof(data), kI2cTimeoutMs) != ESP_OK) {
     raw_angle_pointer_valid_ = false;
-    if (timing_profile_enabled_) {
-      recordRawTiming(static_cast<std::uint32_t>(esp_timer_get_time() - begin_us));
-    }
-    return false;
+    ok = false;
   }
 
-  *raw_count = static_cast<std::uint16_t>(
-      (static_cast<std::uint16_t>(data[0] & 0x0FU) << 8U) | data[1]);
-  if (timing_profile_enabled_) {
+  if (ok) {
+    *raw_count = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(data[0] & 0x0FU) << 8U) | data[1]);
+  }
+  if (profile) {
     recordRawTiming(static_cast<std::uint32_t>(esp_timer_get_time() - begin_us));
   }
-  return true;
+  xSemaphoreGive(mutex_);
+  return ok;
 }
 
 bool As5600::readStatus(As5600Status* const status) {
-  if (status == nullptr) {
+  if (status == nullptr || mutex_ == nullptr) {
     return false;
   }
-  const std::int64_t begin_us =
-      timing_profile_enabled_ ? esp_timer_get_time() : 0;
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(kI2cTimeoutMs)) != pdTRUE) {
+    return false;
+  }
+
+  const bool profile = timing_profile_enabled_;
+  const std::int64_t begin_us = profile ? esp_timer_get_time() : 0;
   std::uint8_t raw = 0U;
   const bool ok = readRegisters(kStatusRegister, &raw, 1U);
-  if (timing_profile_enabled_) {
+  if (profile) {
     recordStatusTiming(
         static_cast<std::uint32_t>(esp_timer_get_time() - begin_us));
   }
+  xSemaphoreGive(mutex_);
   if (!ok) {
     return false;
   }
@@ -132,15 +140,28 @@ bool As5600::readStatus(As5600Status* const status) {
 }
 
 void As5600::setTimingProfileEnabled(const bool enabled) {
+  if (mutex_ == nullptr || xSemaphoreTake(mutex_, pdMS_TO_TICKS(kI2cTimeoutMs)) != pdTRUE) {
+    return;
+  }
   timing_profile_enabled_ = enabled;
+  xSemaphoreGive(mutex_);
 }
 
 void As5600::resetTimingProfile() {
+  if (mutex_ == nullptr || xSemaphoreTake(mutex_, pdMS_TO_TICKS(kI2cTimeoutMs)) != pdTRUE) {
+    return;
+  }
   timing_stats_ = {};
+  xSemaphoreGive(mutex_);
 }
 
 As5600TimingStats As5600::timingProfile() const {
-  return timing_stats_;
+  if (mutex_ == nullptr || xSemaphoreTake(mutex_, pdMS_TO_TICKS(kI2cTimeoutMs)) != pdTRUE) {
+    return {};
+  }
+  const As5600TimingStats result = timing_stats_;
+  xSemaphoreGive(mutex_);
+  return result;
 }
 
 void As5600::recordRawTiming(const std::uint32_t elapsed_us) {
