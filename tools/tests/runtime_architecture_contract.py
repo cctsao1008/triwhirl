@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail CI if runtime composition debt regresses during issue #32/A2."""
+"""Fail CI if runtime composition/domain ownership regresses during #32/A2."""
 
 from __future__ import annotations
 
@@ -9,10 +9,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MAIN = ROOT / "main"
 TESTS = ROOT / "tools" / "tests"
+HW = ROOT / "components" / "triwhirl_hw"
 
 CONTROL_FORBIDDEN_SUPERVISOR_IO = ("uart_read_bytes(", "triwhirl::ble::read(")
 
 SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
+    'std::strcmp(line, "status")',
+    'std::strcmp(line, "motor status")',
+    'std::strcmp(line, "imu status")',
     'std::strcmp(line, "attitude status")',
     'std::strcmp(line, "fault status")',
     'std::strcmp(line, "ble status")',
@@ -20,6 +24,7 @@ SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
     'std::strcmp(line, "telemetry")',
     'std::strcmp(line, "help")',
     "readLatestRuntimeSnapshot(",
+    "readEncoderDiagnosticStatus(",
     "triwhirl::ble::connected()",
     "triwhirl::ble::subscribed()",
 )
@@ -94,12 +99,18 @@ def main() -> None:
     runtime_main_text = (MAIN / "runtime_main.cpp").read_text(encoding="utf-8")
     runtime_state_header = (MAIN / "runtime_state.hpp").read_text(encoding="utf-8")
     runtime_state_text = (MAIN / "runtime_state.cpp").read_text(encoding="utf-8")
+    runtime_snapshot_header = (MAIN / "runtime_snapshot.hpp").read_text(encoding="utf-8")
+    runtime_snapshot_text = (MAIN / "runtime_snapshot.cpp").read_text(encoding="utf-8")
+    diagnostics_header = (MAIN / "runtime_diagnostics.hpp").read_text(encoding="utf-8")
+    diagnostics_text = (MAIN / "runtime_diagnostics.cpp").read_text(encoding="utf-8")
     cmake_text = (MAIN / "CMakeLists.txt").read_text(encoding="utf-8")
     supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
     supervisor_header = (MAIN / "runtime_supervisor_io.hpp").read_text(encoding="utf-8")
     command_header = (MAIN / "runtime_command.hpp").read_text(encoding="utf-8")
     parser_text = (MAIN / "runtime_command_parser.cpp").read_text(encoding="utf-8")
     parser_test_text = (TESTS / "runtime_command_parser_test.cpp").read_text(encoding="utf-8")
+    mpu_header = (HW / "include" / "triwhirl" / "drivers" / "mpu6050.hpp").read_text(encoding="utf-8")
+    mpu_text = (HW / "mpu6050.cpp").read_text(encoding="utf-8")
 
     leaked_io = [x for x in CONTROL_FORBIDDEN_SUPERVISOR_IO if x in runtime_main_text]
     if leaked_io:
@@ -148,6 +159,32 @@ def main() -> None:
     if '"runtime_state.cpp"' not in cmake_text:
         fail("runtime_state.cpp is not compiled explicitly")
 
+    require_tokens(diagnostics_header,
+                   ("populateRuntimeDiagnosticSnapshot(",
+                    "readEncoderDiagnosticStatus(", "EncoderDiagnosticStatus"),
+                   "runtime diagnostics contract is incomplete")
+    require_tokens(diagnostics_text,
+                   ("snapshot->motor_mode", "snapshot->encoder_raw_count",
+                    "snapshot->imu_identity_valid", "encoder.readStatus("),
+                   "runtime diagnostics implementation is incomplete")
+    require_tokens(runtime_snapshot_header,
+                   ("motor_vq_v", "encoder_unwrapped_count", "imu_who_am_i",
+                    "imu_map_gyro_sign"),
+                   "runtime diagnostic snapshot is incomplete")
+    require_tokens(runtime_snapshot_text,
+                   ("populateRuntimeDiagnosticSnapshot(&complete)",
+                    "xQueueOverwrite(snapshot_queue, &complete)"),
+                   "runtime snapshot diagnostic enrichment regressed")
+    if '"runtime_diagnostics.cpp"' not in cmake_text:
+        fail("runtime_diagnostics.cpp is not compiled explicitly")
+
+    require_tokens(mpu_header, ("who_am_i_", "who_am_i_valid_"),
+                   "MPU identity cache contract is missing")
+    require_tokens(mpu_text,
+                   ("if (who_am_i_valid_)", "who_am_i_valid_ = true",
+                    "who_am_i_ = value"),
+                   "MPU identity is no longer served from init cache")
+
     first_snapshot = runtime_main_text.find("publishSupervisorSnapshot(")
     supervisor_init = runtime_main_text.find("initSupervisorIo(")
     if first_snapshot < 0 or supervisor_init < 0 or first_snapshot > supervisor_init:
@@ -155,6 +192,8 @@ def main() -> None:
 
     require_tokens(supervisor_text, SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS,
                    "Core0 read-only diagnostics regressed")
+    if "imu.readWhoAmI(" in supervisor_text or "encoder.readStatus(" in supervisor_text:
+        fail("supervisor bypassed the diagnostic boundary")
     require_tokens(supervisor_text,
                    ("parseRuntimeCommand(", "SupervisorInputEventType::kRuntimeCommand",
                     "ERR unknown command", "uart_development_input", "ble_gatt_input"),
@@ -175,11 +214,14 @@ def main() -> None:
     print("  runtime_control_wrapper=absent")
     print("  legacy_app_main=absent")
     print("  runtime_state_service=explicit_compiled")
+    print("  runtime_diagnostics_service=explicit_compiled")
     print("  raw_command_strings_cross_realtime=no")
     print("  obsolete_runtime_bridge=absent")
     print("  runtime_i2c_startup=explicit_named_helpers")
     print("  runtime_uart_dev_ble_gatt_ingress=absent")
-    print("  supervisor_read_only=attitude,fault,ble,timing,telemetry,help")
+    print("  supervisor_read_only=status,motor_status,imu,attitude,fault,ble,timing,telemetry,help")
+    print("  encoder_status_i2c=core0_supervisor")
+    print("  imu_who_am_i=cached_after_init")
     print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
     print("  command_parser=complete_core0_grammar")
