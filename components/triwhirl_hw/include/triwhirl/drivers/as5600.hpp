@@ -4,6 +4,8 @@
 #include <cstdint>
 
 #include "driver/i2c_master.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 namespace triwhirl {
 namespace drivers {
@@ -46,6 +48,7 @@ class As5600 {
   void recordStatusTiming(std::uint32_t elapsed_us);
 
   i2c_master_dev_handle_t device_ = nullptr;
+  SemaphoreHandle_t mutex_ = nullptr;
   bool raw_angle_pointer_valid_ = false;
   bool timing_profile_enabled_ = false;
   As5600TimingStats timing_stats_{};
