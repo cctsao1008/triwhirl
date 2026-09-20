@@ -9,6 +9,7 @@ constexpr std::size_t kSupervisorCommandBytes = 128U;
 
 enum class SupervisorInputEventType : std::uint8_t {
   kCommand,
+  kReadOnlyHandled,
   kLineOverflow,
 };
 
@@ -21,8 +22,9 @@ using SupervisorWriteFn = void (*)(void* context, const char* data,
                                    std::size_t length);
 
 // Starts the non-realtime UART/BLE input task. The task owns byte polling and
-// line assembly; complete fixed-size events cross into the realtime domain via
-// a bounded queue.
+// line assembly. Selected read-only commands are answered from the latest
+// bounded runtime snapshot without entering the realtime domain; mutating or
+// not-yet-migrated commands cross through a fixed-size bounded queue.
 bool initSupervisorIo(SupervisorWriteFn write_fn, void* write_context,
                       int core_id, unsigned task_priority);
 
