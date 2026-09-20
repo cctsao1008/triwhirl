@@ -17,6 +17,16 @@ struct Mpu6050Sample {
   float gyro_rad_s[3]{};
 };
 
+struct Mpu6050TimingStats {
+  std::uint64_t sample_reads = 0U;
+  std::uint64_t transfer_total_us = 0U;
+  std::uint32_t transfer_min_us = 0U;
+  std::uint32_t transfer_max_us = 0U;
+  std::uint64_t decode_total_us = 0U;
+  std::uint32_t decode_min_us = 0U;
+  std::uint32_t decode_max_us = 0U;
+};
+
 class Mpu6050 {
  public:
   Mpu6050() = default;
@@ -25,13 +35,20 @@ class Mpu6050 {
   bool readWhoAmI(std::uint8_t* who_am_i);
   bool readSample(Mpu6050Sample* sample);
 
+  void setTimingProfileEnabled(bool enabled);
+  void resetTimingProfile();
+  Mpu6050TimingStats timingProfile() const;
+
  private:
   bool writeRegister(std::uint8_t reg, std::uint8_t value);
   bool readRegisters(std::uint8_t first_register,
                      std::uint8_t* data,
                      std::size_t length);
+  void recordSampleTiming(std::uint32_t transfer_us, std::uint32_t decode_us);
 
   i2c_master_dev_handle_t device_ = nullptr;
+  bool timing_profile_enabled_ = false;
+  Mpu6050TimingStats timing_stats_{};
 };
 
 }  // namespace drivers
