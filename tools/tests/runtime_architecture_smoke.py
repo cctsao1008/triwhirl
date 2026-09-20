@@ -5,10 +5,10 @@ The active firmware still has one explicitly tolerated source-inclusion chain:
 
     runtime_control.cpp -> runtime_main.cpp -> app_main.cpp
 
-and one app_main symbol-renaming shim in runtime_main.cpp.  A2 is removing those
-pieces incrementally.  Until they are gone, CI should prevent new .cpp includes,
-new symbol-renaming interception, or a second application entry path from being
-introduced.
+and five symbol-renaming shims in runtime_main.cpp. A2 is removing those pieces
+incrementally. Until they are gone, CI prevents new .cpp includes, new
+symbol-renaming interception, a second application-entry owner, or queue/task
+mechanics from leaking back into realtime control.
 """
 
 from __future__ import annotations
@@ -32,6 +32,14 @@ ALLOWED_RENAMING_DEFINES = {
     ("runtime_main.cpp", "initEncoderBus", "triwhirl_legacy_initEncoderBus"),
     ("runtime_main.cpp", "initImuBus", "triwhirl_legacy_initImuBus"),
 }
+
+CONTROL_FORBIDDEN_QUEUE_MECHANICS = (
+    '"freertos/queue.h"',
+    "xQueueCreate(",
+    "xQueueSend(",
+    "xQueueReceive(",
+    "xQueueOverwrite(",
+)
 
 CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.cpp)"', re.MULTILINE)
 RENAME_DEFINE_RE = re.compile(
@@ -81,13 +89,24 @@ def main() -> None:
     if unexpected_entries:
         fail(f"unexpected app_main owner(s): {sorted(unexpected_entries)}")
 
-    # Keep the known debt explicit.  As A2 removes an item, delete it from the
+    control_text = (MAIN / "runtime_control.cpp").read_text(encoding="utf-8")
+    leaked_queue_mechanics = [
+        token for token in CONTROL_FORBIDDEN_QUEUE_MECHANICS if token in control_text
+    ]
+    if leaked_queue_mechanics:
+        fail(
+            "encoder queue mechanics leaked into runtime_control.cpp: "
+            f"{leaked_queue_mechanics}"
+        )
+
+    # Keep the known debt explicit. As A2 removes an item, delete it from the
     # allow-list in the same change; the test intentionally does not require all
     # allow-listed debt to remain present.
     print("runtime architecture guard: PASS")
     print(f"  cpp_includes={sorted(cpp_includes)}")
     print(f"  renaming_shims={sorted(renaming_defines)}")
     print(f"  app_main_sources={sorted(app_main_sources)}")
+    print("  runtime_control_queue_mechanics=isolated")
 
 
 if __name__ == "__main__":
