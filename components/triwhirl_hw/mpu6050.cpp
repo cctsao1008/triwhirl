@@ -46,6 +46,9 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
     return false;
   }
 
+  who_am_i_ = 0U;
+  who_am_i_valid_ = false;
+
   // The MPU-60X0 may not accept register traffic immediately after power-on.
   // app_main can run quickly after reset, so give the device a deterministic
   // startup window before probing it.
@@ -55,9 +58,9 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
   const std::uint8_t candidates[2] = {address, alternate};
 
   // A firmware/flash reset resets the ESP32 I2C controller without necessarily
-  // power-cycling the external MPU6050.  If a reset interrupts an I2C transfer,
+  // power-cycling the external MPU6050. If a reset interrupts an I2C transfer,
   // the first probe/register sequence can fail even though a full power cycle
-  // immediately restores the sensor.  Retry locally and reset the master bus
+  // immediately restores the sensor. Retry locally and reset the master bus
   // between attempts so a warm reset does not permanently disable IMU support
   // for the rest of that boot.
   for (unsigned attempt = 0U; attempt < kInitAttempts; ++attempt) {
@@ -66,6 +69,8 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
         i2c_master_bus_rm_device(device_);
         device_ = nullptr;
       }
+      who_am_i_ = 0U;
+      who_am_i_valid_ = false;
       i2c_master_bus_reset(bus);
       vTaskDelay(pdMS_TO_TICKS(kRetrySettleMs));
     }
@@ -89,6 +94,8 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
           i2c_master_bus_rm_device(device_);
           device_ = nullptr;
         }
+        who_am_i_ = 0U;
+        who_am_i_valid_ = false;
       };
 
       std::uint8_t who_am_i = 0U;
@@ -148,7 +155,19 @@ bool Mpu6050::readWhoAmI(std::uint8_t* const who_am_i) {
   if (who_am_i == nullptr) {
     return false;
   }
-  return readRegisters(kRegWhoAmI, who_am_i, 1U);
+  if (who_am_i_valid_) {
+    *who_am_i = who_am_i_;
+    return true;
+  }
+
+  std::uint8_t value = 0U;
+  if (!readRegisters(kRegWhoAmI, &value, 1U)) {
+    return false;
+  }
+  who_am_i_ = value;
+  who_am_i_valid_ = true;
+  *who_am_i = value;
+  return true;
 }
 
 bool Mpu6050::readSample(Mpu6050Sample* const sample) {
