@@ -16,6 +16,7 @@ class ThreePwmBridge {
 
  private:
   bool setDuty(std::size_t phase, float duty);
+  bool releaseOutputs();
   mcpwm_timer_handle_t timer_ = nullptr;
   mcpwm_oper_handle_t operators_[3]{};
   mcpwm_cmpr_handle_t comparators_[3]{};
@@ -23,6 +24,7 @@ class ThreePwmBridge {
   std::uint32_t period_ticks_ = 0U;
   float bus_voltage_v_ = 0.0F;
   bool initialized_ = false;
+  bool outputs_forced_low_ = true;
 };
 
 }  // namespace motor
