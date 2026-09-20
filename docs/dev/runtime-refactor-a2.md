@@ -22,11 +22,17 @@ runtime_encoder_acquisition           ->    runtime_control
   AS5600 raw read                           wheel-state commit
   bounded result queue                      miss/safety policy
 
-runtime_supervisor_io                 ->    runtime_control
-  UART0 wired development/service CLI       at most one queued event / RT iteration
-  NimBLE GATT RX-characteristic ingress     typed mutation execution
-  line assembly + string parsing            legacy string fallback (transitional)
-  bounded command queue
+runtime_supervisor_io
+  UART0 wired development/service CLI
+  NimBLE GATT RX-characteristic ingress
+  line assembly
+       |
+       v
+runtime_command_parser                ->    runtime_control
+  command grammar                           at most one queued event / RT iteration
+  numeric parsing                           typed mutation execution
+  usage errors                              legacy string fallback (transitional)
+  fixed-size RuntimeCommand
 
 runtime_supervisor_io                 <-    runtime_snapshot
   read-only formatting                      latest complete snapshot
@@ -38,6 +44,12 @@ writes and the BLE component places those payload bytes into an internal stream
 buffer; `runtime_supervisor_io` drains that buffer. TX uses the GATT notify
 characteristic. UART0 remains intentionally separate as a wired development and
 service CLI during bring-up. Neither transport has realtime authority.
+
+Transport ownership and command grammar are now separate services:
+`runtime_supervisor_io` owns ingress/framing while `runtime_command_parser`
+owns migrated command text, numeric parsing, and usage validation. This keeps
+transport code from becoming the permanent command parser and gives the legacy
+Core-1 string path a single replacement boundary.
 
 The supervisor mailbox is depth-limited and non-blocking. When full, the newest
 command/event is rejected and the transport reports `ERR command mailbox full`
@@ -59,9 +71,9 @@ interpretation include:
   `attitude reset [angle_rad]`, and `imu calibrate [samples]`.
 
 The payload forms use fixed-size POD fields in `RuntimeCommand`; `strtof` /
-`strtoul` parsing remains entirely in the Core-0 supervisor domain. Realtime
-still performs state-dependent admission and mutation so safety ownership does
-not move across cores.
+`strtoul` parsing remains entirely in `runtime_command_parser` on Core 0.
+Realtime still performs state-dependent admission and mutation so safety
+ownership does not move across cores.
 
 The original swing-ownership policy is preserved: while identification owns
 realtime actuation, only commands that were previously allowed retain that
@@ -89,6 +101,7 @@ hardware/concurrency responsibility, such as:
 
 ```text
 runtime_command.hpp
+runtime_command_parser.cpp/.hpp
 runtime_encoder_acquisition.cpp/.hpp
 runtime_supervisor_io.cpp/.hpp
 runtime_snapshot.cpp/.hpp
