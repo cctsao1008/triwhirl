@@ -10,6 +10,7 @@ namespace triwhirl::runtime {
 enum class RuntimeCommandType : std::uint8_t {
   kNone = 0,
   kMotorStop,
+  kSwingAbort,
 };
 
 struct RuntimeCommand {
