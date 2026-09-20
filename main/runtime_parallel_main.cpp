@@ -7,44 +7,18 @@
 
 #include <cstdint>
 
-#include "driver/i2c_master.h"
-#include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "runtime_control.hpp"
-#include "runtime_platform.hpp"
 #include "runtime_release.hpp"
 
-namespace {
-
-esp_err_t triwhirlI2cNewMasterBusIntercept(
-    const i2c_master_bus_config_t* config,
-    i2c_master_bus_handle_t* output) {
-  if (config == nullptr || output == nullptr) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  // ESP-IDF external peripheral interrupts are allocated on the core which
-  // creates them. Keep AS5600/I2C0 on the encoder worker's core 0 and
-  // MPU6050/I2C1 on the control task's core 1 so the independent controllers
-  // do not both depend on core-0 ISR service while running in parallel.
-  const BaseType_t target_core =
-      config->i2c_port == I2C_NUM_1 ? 1 : 0;
-  return triwhirl::runtime::createI2cMasterBusOnCore(config, output,
-                                                     target_core);
-}
-
-}  // namespace
-
 // runtime_main.cpp still owns the supervisor/swing runtime in this
-// behavior-preserving refactor slice. Control-task selection is now explicit;
-// the only remaining source-inclusion hook preserves I2C interrupt affinity
-// until bus initialization itself is lifted out of app_main.cpp.
-#define i2c_new_master_bus triwhirlI2cNewMasterBusIntercept
+// behavior-preserving refactor slice, but task selection, I2C affinity, and the
+// GPTimer scheduler are now all explicit interfaces rather than generic API
+// interception. The remaining composition debt is the source inclusion itself.
 #include "runtime_main.cpp"
-#undef i2c_new_master_bus
 
 static_assert(triwhirl::runtime::kRealtimeReleasePeriodUs == kControlPeriodUs,
               "GPTimer release period must match control period");
