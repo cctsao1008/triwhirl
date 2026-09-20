@@ -1,17 +1,12 @@
 // Transitional runtime integration for the firmware-owned swing-identification
-// experiment. Keep the established bring-up runtime intact while #31 is
-// validated on hardware; the legacy app_main symbol is renamed inside this
-// translation unit, and the real app_main below adds the swing supervisor.
+// experiment. The remaining bridge exposes the established bring-up state to
+// runtime_control while startup/state ownership is extracted explicitly.
 #define app_main triwhirl_legacy_app_main
-#define updateEncoder triwhirl_legacy_updateEncoder
-#define updateImu triwhirl_legacy_updateImu
 #define initEncoderBus triwhirl_legacy_initEncoderBus
 #define initImuBus triwhirl_legacy_initImuBus
 #include "app_main.cpp"
 #undef initImuBus
 #undef initEncoderBus
-#undef updateImu
-#undef updateEncoder
 #undef app_main
 
 #include "freertos/queue.h"
@@ -28,8 +23,6 @@ using triwhirl::SwingIdRunner;
 using triwhirl::SwingIdState;
 using triwhirl::SwingIdStopReason;
 using triwhirl::SwingIdVertex;
-
-constexpr std::uint32_t kSupervisorConsolePollPeriodUs = 5000U;
 
 bool initEncoderBus(i2c_master_bus_handle_t* bus) {
   i2c_master_bus_config_t config{};
@@ -51,21 +44,6 @@ bool initImuBus(i2c_master_bus_handle_t* bus) {
   config.glitch_ignore_cnt = 7;
   config.flags.enable_internal_pullup = true;
   return triwhirl::runtime::createI2cMasterBusOnCore(&config, bus, 1) == ESP_OK;
-}
-
-// runtime_main owns the realtime acquisition cadence. The legacy helpers gate
-// sensor reads on elapsed microseconds, which aliases with the 1 ms RTOS tick
-// and was observed to update AS5600/MPU6050 only ~564 Hz while the task itself
-// ran ~1 kHz. Read both independent sensors on every control iteration instead;
-// actual dt remains timestamp-based in wheel/attitude processing.
-void updateEncoder(const std::uint32_t now_us) {
-  sampleEncoder(now_us);
-}
-
-void updateImu(const std::uint32_t now_us) {
-  if (sampleImu()) {
-    updateAttitude(now_us);
-  }
 }
 
 struct SwingEvent {
@@ -103,7 +81,6 @@ QueueHandle_t swing_event_queue = nullptr;
 std::uint32_t swing_event_drops = 0U;
 bool swing_log_finalize_pending = false;
 RuntimeTimingProfile runtime_timing_profile{};
-std::uint32_t last_supervisor_console_poll_us = 0U;
 
 void printSwingHelp();
 
@@ -212,48 +189,6 @@ void printRuntimeTimingProfile() {
                           imu_timing.decode_min_us,
                           imu_timing.decode_max_us);
   consoleWrite("timing_profile_end\r\n");
-}
-
-void handleRuntimeTimingProfileCommand(char* line) {
-  if (line == nullptr) {
-    return;
-  }
-  std::strtok(line, " \t");  // timing
-  char* profile = std::strtok(nullptr, " \t");
-  char* action = std::strtok(nullptr, " \t");
-  if (profile == nullptr || std::strcmp(profile, "profile") != 0) {
-    consoleWrite("ERR usage: timing profile <status|on|off|reset>\r\n");
-    return;
-  }
-  if (action == nullptr || std::strcmp(action, "status") == 0) {
-    printRuntimeTimingProfile();
-    return;
-  }
-  if (std::strcmp(action, "reset") == 0) {
-    resetRuntimeTimingProfile();
-    consoleWrite("OK timing profile reset\r\n");
-    return;
-  }
-  if (std::strcmp(action, "on") == 0) {
-    runtime_timing_profile.enabled = false;
-    encoder.setTimingProfileEnabled(false);
-    imu.setTimingProfileEnabled(false);
-    resetRuntimeTimingProfile();
-    encoder.setTimingProfileEnabled(true);
-    imu.setTimingProfileEnabled(true);
-    runtime_timing_profile.enabled = true;
-    consoleWrite("OK timing profile on\r\n");
-    return;
-  }
-  if (std::strcmp(action, "off") == 0) {
-    runtime_timing_profile.enabled = false;
-    encoder.setTimingProfileEnabled(false);
-    imu.setTimingProfileEnabled(false);
-    consoleWrite("OK timing profile off\r\n");
-    printRuntimeTimingProfile();
-    return;
-  }
-  consoleWrite("ERR usage: timing profile <status|on|off|reset>\r\n");
 }
 
 bool swingTerminal(const SwingIdState state) {
@@ -365,247 +300,6 @@ void printSwingStatus() {
       config.rearm_deg, static_cast<float>(config.probe_duration_us) * 1.0e-3F,
       config.rate_switch_rad_s, config.pump_polarity, config.vertex_a_deg,
       static_cast<float>(config.max_duration_us) * 1.0e-6F);
-}
-
-bool parseSwingConfig(SwingIdConfig* const config) {
-  if (config == nullptr) {
-    return false;
-  }
-  char* target = std::strtok(nullptr, " \t");
-  char* pump_low = std::strtok(nullptr, " \t");
-  char* pump_high = std::strtok(nullptr, " \t");
-  char* capture = std::strtok(nullptr, " \t");
-  char* probe_exit = std::strtok(nullptr, " \t");
-  char* rearm = std::strtok(nullptr, " \t");
-  char* probe_ms = std::strtok(nullptr, " \t");
-  char* rate_switch = std::strtok(nullptr, " \t");
-  char* polarity = std::strtok(nullptr, " \t");
-  char* vertex_a = std::strtok(nullptr, " \t");
-  char* max_s = std::strtok(nullptr, " \t");
-  if (target == nullptr || pump_low == nullptr || pump_high == nullptr ||
-      capture == nullptr || probe_exit == nullptr || rearm == nullptr ||
-      probe_ms == nullptr || rate_switch == nullptr || polarity == nullptr ||
-      vertex_a == nullptr || max_s == nullptr || std::strtok(nullptr, " \t") != nullptr) {
-    return false;
-  }
-
-  const double probe_ms_value = std::strtod(probe_ms, nullptr);
-  const double max_s_value = std::strtod(max_s, nullptr);
-  SwingIdConfig candidate{};
-  candidate.target_captures =
-      static_cast<std::uint32_t>(std::strtoul(target, nullptr, 10));
-  candidate.pump_v_low = std::strtof(pump_low, nullptr);
-  candidate.pump_v_high = std::strtof(pump_high, nullptr);
-  candidate.capture_deg = std::strtof(capture, nullptr);
-  candidate.probe_exit_deg = std::strtof(probe_exit, nullptr);
-  candidate.rearm_deg = std::strtof(rearm, nullptr);
-  candidate.rate_switch_rad_s = std::strtof(rate_switch, nullptr);
-  candidate.pump_polarity = std::atoi(polarity);
-  candidate.vertex_a_deg = std::strtof(vertex_a, nullptr);
-
-  if (!std::isfinite(probe_ms_value) || probe_ms_value <= 0.0 ||
-      probe_ms_value > static_cast<double>(std::numeric_limits<std::uint32_t>::max()) * 1.0e-3 ||
-      !std::isfinite(max_s_value) || max_s_value <= 0.0 ||
-      max_s_value > static_cast<double>(std::numeric_limits<std::uint32_t>::max()) * 1.0e-6) {
-    return false;
-  }
-  candidate.probe_duration_us =
-      static_cast<std::uint32_t>(std::llround(probe_ms_value * 1000.0));
-  candidate.max_duration_us =
-      static_cast<std::uint32_t>(std::llround(max_s_value * 1000000.0));
-  if (candidate.pump_v_high > kMotorVectorLimitV ||
-      candidate.pump_v_low > kMotorVectorLimitV) {
-    return false;
-  }
-  *config = candidate;
-  return true;
-}
-
-void handleSwingCommand(char* line) {
-  std::strtok(line, " \t");  // consume "swing"
-  char* action = std::strtok(nullptr, " \t");
-  if (action == nullptr || std::strcmp(action, "status") == 0) {
-    printSwingStatus();
-    return;
-  }
-
-  if (std::strcmp(action, "config") == 0) {
-    SwingIdConfig config{};
-    if (!parseSwingConfig(&config) || !swing_id_runner.configure(config)) {
-      consoleWrite(
-          "ERR usage: swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n");
-      return;
-    }
-    consoleWrite("OK swing config\r\n");
-    printSwingStatus();
-    return;
-  }
-
-  if (std::strcmp(action, "start") == 0) {
-    if (swing_id_runner.active()) {
-      consoleWrite("ERR swing already active\r\n");
-      return;
-    }
-    if (motorActive()) {
-      consoleWrite("ERR swing start requires motor stopped\r\n");
-      return;
-    }
-    if (!motor_config_valid || !encoder_sample_valid ||
-        !wheel_state.velocity_valid || !imu_sample_valid || !gyro_bias_valid ||
-        !attitude_state.valid || safety_latch.faulted()) {
-      consoleWrite(
-          "ERR swing start requires motor config, encoder/wheel, calibrated IMU, valid attitude, and clear safety\r\n");
-      return;
-    }
-    const LoggerStatus log_status = runtime_logger.status();
-    const std::uint32_t needed_records =
-        (swing_id_runner.config().max_duration_us +
-         triwhirl::log::kTwLogSamplePeriodUs - 1U) /
-        triwhirl::log::kTwLogSamplePeriodUs;
-    if (log_status.state != triwhirl::log::LoggerState::kRecording ||
-        log_status.max_records < needed_records) {
-      consoleWrite(
-          "ERR swing start requires active TWLG recording with capacity for max duration\r\n");
-      return;
-    }
-
-    const std::uint32_t now_us = static_cast<std::uint32_t>(esp_timer_get_time());
-    if (!swing_id_runner.start(currentSwingInput(now_us))) {
-      consoleWrite("ERR swing start rejected\r\n");
-      return;
-    }
-    setSwingCriticalWindow(false);
-    vq_command_v = clampFinite(swing_id_runner.output().desired_vq_v,
-                               -kMotorVectorLimitV, kMotorVectorLimitV);
-    motor_mode = MotorMode::kFoc;
-    consoleWrite("OK swing start\r\n");
-    queueSwingEvent(swing_id_runner.output());
-    return;
-  }
-
-  if (std::strcmp(action, "abort") == 0) {
-    if (!swing_id_runner.active()) {
-      consoleWrite("OK swing already inactive\r\n");
-      return;
-    }
-    const SwingIdOutput output =
-        swing_id_runner.abort(SwingIdStopReason::kExternalAbort);
-    consoleWrite("OK swing abort\r\n");
-    finishSwingRun(output);
-    return;
-  }
-
-  consoleWrite("ERR usage: swing <status|config ...|start|abort>\r\n");
-}
-
-bool commandAllowedDuringSwing(const char* line) {
-  if (!swing_id_runner.active() || line == nullptr) {
-    return true;
-  }
-  while (*line == ' ' || *line == '\t') {
-    ++line;
-  }
-  if (std::strncmp(line, "swing", 5) == 0 &&
-      (line[5] == '\0' || line[5] == ' ' || line[5] == '\t')) {
-    return true;
-  }
-  static const char* const kReadOnlyPrefixes[] = {
-      "status", "timing status", "imu status", "attitude status",
-      "fault status", "ble status", "log status", "telemetry off", "help",
-  };
-  for (const char* prefix : kReadOnlyPrefixes) {
-    const std::size_t length = std::strlen(prefix);
-    if (std::strncmp(line, prefix, length) == 0 &&
-        (line[length] == '\0' || line[length] == ' ' || line[length] == '\t')) {
-      return true;
-    }
-  }
-  return false;
-}
-
-void handleSupervisorCommand(char* line) {
-  if (line == nullptr) {
-    return;
-  }
-  char* begin = line;
-  while (*begin == ' ' || *begin == '\t') {
-    ++begin;
-  }
-  if (std::strncmp(begin, "swing", 5) == 0 &&
-      (begin[5] == '\0' || begin[5] == ' ' || begin[5] == '\t')) {
-    handleSwingCommand(begin);
-    return;
-  }
-  if (std::strncmp(begin, "timing profile", 14) == 0 &&
-      (begin[14] == '\0' || begin[14] == ' ' || begin[14] == '\t')) {
-    handleRuntimeTimingProfileCommand(begin);
-    return;
-  }
-  if (!commandAllowedDuringSwing(begin)) {
-    consoleWrite("ERR swing experiment owns realtime actuation; use 'swing abort' first\r\n");
-    return;
-  }
-  const bool help = std::strcmp(begin, "help") == 0;
-  handleCommand(begin);
-  if (help) {
-    printSwingHelp();
-  }
-}
-
-void consumeSupervisorBytes(const std::uint8_t* input,
-                            const std::size_t received,
-                            CommandInputState& state) {
-  if (input == nullptr) {
-    return;
-  }
-  for (std::size_t index = 0U; index < received; ++index) {
-    const char c = static_cast<char>(input[index]);
-    if (c == '\r' || c == '\n') {
-      if (state.length > 0U) {
-        consoleWrite("\r\n");
-        state.line[state.length] = '\0';
-        handleSupervisorCommand(state.line);
-        state.length = 0U;
-        if (!swing_id_runner.active()) {
-          printPrompt();
-        }
-      }
-      continue;
-    }
-    if (c == '\b' || static_cast<unsigned char>(c) == 0x7FU) {
-      if (state.length > 0U) {
-        --state.length;
-        consoleWrite("\b \b");
-      }
-      continue;
-    }
-    if (c < 0x20 || static_cast<unsigned char>(c) > 0x7EU) {
-      continue;
-    }
-    if (state.length + 1U < sizeof(state.line)) {
-      state.line[state.length++] = c;
-      consoleWriteBytes(&c, 1U);
-    } else {
-      state.length = 0U;
-      consoleWrite("\r\nERR command too long\r\n");
-      if (!swing_id_runner.active()) {
-        printPrompt();
-      }
-    }
-  }
-}
-
-void pollSupervisorConsole() {
-  std::uint8_t input[64];
-  const int uart_received = uart_read_bytes(UART_NUM_0, input, sizeof(input), 0);
-  if (uart_received > 0) {
-    consumeSupervisorBytes(input, static_cast<std::size_t>(uart_received),
-                           uart_command_input);
-  }
-  const std::size_t ble_received = triwhirl::ble::read(input, sizeof(input));
-  if (ble_received > 0U) {
-    consumeSupervisorBytes(input, ble_received, ble_command_input);
-  }
 }
 
 std::uint16_t swingRuntimeLogFlags() {
@@ -729,7 +423,6 @@ extern "C" void app_main(void) {
   last_encoder_health_us = now_us;
   last_imu_sample_us = now_us;
   last_telemetry_us = now_us;
-  last_supervisor_console_poll_us = now_us;
 
   consoleWrite("TriWhirl deterministic motor + IMU + attitude runtime ready\r\n");
   consoleWrite("ESP32 owns swing-identification realtime decisions; host/BLE is supervisory only\r\n");
