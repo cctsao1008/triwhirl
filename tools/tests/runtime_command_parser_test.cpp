@@ -36,6 +36,33 @@ int main() {
   }
 
   {
+    const auto parsed = parseRuntimeCommand("motor config 7 -1 1.25");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kMotorConfig);
+    assert(parsed.command.payload.motor_config.pole_pairs == 7);
+    assert(parsed.command.payload.motor_config.sensor_direction == -1);
+    assert(std::fabs(parsed.command.payload.motor_config.electrical_offset_rad - 1.25F) < 1.0e-6F);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("motor calibrate");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kMotorCalibrate);
+    assert(std::fabs(parsed.command.payload.motor_calibrate.amplitude_v - 0.6F) < 1.0e-6F);
+    assert(std::fabs(parsed.command.payload.motor_calibrate.electrical_hz - 0.5F) < 1.0e-6F);
+    assert(std::fabs(parsed.command.payload.motor_calibrate.turns - 4.0F) < 1.0e-6F);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("motor calibrate 0.9 0.7 6");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kMotorCalibrate);
+    assert(std::fabs(parsed.command.payload.motor_calibrate.amplitude_v - 0.9F) < 1.0e-6F);
+    assert(std::fabs(parsed.command.payload.motor_calibrate.electrical_hz - 0.7F) < 1.0e-6F);
+    assert(std::fabs(parsed.command.payload.motor_calibrate.turns - 6.0F) < 1.0e-6F);
+  }
+
+  {
     const auto parsed = parseRuntimeCommand("field 3.5 0.8");
     assert(parsed.status == RuntimeCommandParseStatus::kCommand);
     assert(parsed.command.type == RuntimeCommandType::kField);
@@ -73,10 +100,34 @@ int main() {
   }
 
   {
+    const auto parsed = parseRuntimeCommand("imu map 0 1 2 1 -1 1");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kImuMap);
+    assert(parsed.command.payload.imu_map.accel_sin_axis == 0);
+    assert(parsed.command.payload.imu_map.accel_cos_axis == 1);
+    assert(parsed.command.payload.imu_map.gyro_axis == 2);
+    assert(parsed.command.payload.imu_map.accel_sin_sign == 1);
+    assert(parsed.command.payload.imu_map.accel_cos_sign == -1);
+    assert(parsed.command.payload.imu_map.gyro_sign == 1);
+  }
+
+  {
     const auto parsed = parseRuntimeCommand("motor vq");
     assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
     assert(parsed.error != nullptr);
     assert(std::strcmp(parsed.error, "ERR usage: motor vq <volts>\r\n") == 0);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("motor config 7 -1");
+    assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
+    assert(parsed.error != nullptr);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("imu map 0 1 2 1 -1");
+    assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
+    assert(parsed.error != nullptr);
   }
 
   {
