@@ -7,6 +7,8 @@ namespace triwhirl::runtime {
 struct RuntimeSnapshot {
   std::uint32_t t_us = 0U;
 
+  bool telemetry_enabled = false;
+
   bool attitude_initialized = false;
   bool attitude_valid = false;
   float attitude_angle_rad = 0.0F;
