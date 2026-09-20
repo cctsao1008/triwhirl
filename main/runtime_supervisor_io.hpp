@@ -10,16 +10,14 @@ namespace triwhirl::runtime {
 constexpr std::size_t kSupervisorCommandBytes = 128U;
 
 enum class SupervisorInputEventType : std::uint8_t {
-  kCommand,
   kRuntimeCommand,
   kSupervisorHandled,
   kLineOverflow,
 };
 
 struct SupervisorInputEvent {
-  SupervisorInputEventType type = SupervisorInputEventType::kCommand;
+  SupervisorInputEventType type = SupervisorInputEventType::kSupervisorHandled;
   RuntimeCommand runtime_command{};
-  char line[kSupervisorCommandBytes]{};
 };
 
 using SupervisorWriteFn = void (*)(void* context, const char* data,
@@ -28,11 +26,9 @@ using SupervisorWriteFn = void (*)(void* context, const char* data,
 // Starts the non-realtime supervisor ingress task. UART0 is retained as a wired
 // development/service CLI. BLE ingress is NimBLE GATT RX-characteristic data
 // drained through the BLE component's internal stream buffer; it is not UART.
-// Selected read-only commands are answered from the latest bounded runtime
-// snapshot. Migrated mutating commands, including fixed-size numeric payloads,
-// are parsed into RuntimeCommand records; not-yet-migrated commands remain
-// temporarily available through the legacy string event until that path is
-// deleted.
+// Read-only supervisor-owned commands are answered directly; all remaining
+// command grammar is parsed into fixed-size RuntimeCommand records before it
+// crosses into realtime. Raw command strings never cross this boundary.
 bool initSupervisorIo(SupervisorWriteFn write_fn, void* write_context,
                       int core_id, unsigned task_priority);
 
