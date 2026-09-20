@@ -2,9 +2,10 @@
 //
 // Core 1 owns the 1 kHz control iteration. AS5600 acquisition is delegated to
 // a dedicated Core-0 worker through runtime_encoder_acquisition; Core 1 performs
-// the blocking MPU6050 transaction and attitude update in parallel. UART/BLE
-// byte polling and line assembly are delegated to the Core-0 supervisor I/O
-// service and enter this domain through a bounded command mailbox.
+// the blocking MPU6050 transaction and attitude update in parallel. UART0 is a
+// wired development/service ingress and BLE commands arrive through NimBLE GATT;
+// both are parsed in the Core-0 supervisor domain before typed mutations enter
+// this domain through a bounded command mailbox.
 
 #include <cstddef>
 #include <cstdint>
@@ -209,16 +210,30 @@ void publishSupervisorSnapshot(const std::uint32_t now_us) {
   triwhirl::runtime::publishRuntimeSnapshot(snapshot);
 }
 
+bool typedCommandAllowedDuringSwing(
+    const triwhirl::runtime::RuntimeCommandType type) {
+  if (!swing_id_runner.active()) {
+    return true;
+  }
+  return type == triwhirl::runtime::RuntimeCommandType::kSwingAbort ||
+         type == triwhirl::runtime::RuntimeCommandType::kTelemetryOff;
+}
+
 void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
+  if (!typedCommandAllowedDuringSwing(command.type)) {
+    consoleWrite(
+        "ERR swing experiment owns realtime actuation; use 'swing abort' first\r\n");
+    return;
+  }
+
   switch (command.type) {
     case triwhirl::runtime::RuntimeCommandType::kMotorStop:
-      if (swing_id_runner.active()) {
-        consoleWrite(
-            "ERR swing experiment owns realtime actuation; use 'swing abort' first\r\n");
-        return;
-      }
       stopMotor();
       consoleWrite("OK motor stop\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kStop:
+      stopMotor();
+      consoleWrite("OK stop\r\n");
       return;
     case triwhirl::runtime::RuntimeCommandType::kSwingAbort:
       if (!swing_id_runner.active()) {
@@ -228,6 +243,32 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       consoleWrite("OK swing abort\r\n");
       finishSwingRun(
           swing_id_runner.abort(SwingIdStopReason::kExternalAbort));
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kTimingReset:
+      resetTimingStats();
+      consoleWrite("OK timing reset\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kFaultClear:
+      stopMotor();
+      if (!safety_latch.faulted()) {
+        consoleWrite("OK fault already clear\r\n");
+        return;
+      }
+      if (!faultClearReady()) {
+        consoleWrite("ERR fault clear rejected; fault cause is still present\r\n");
+        return;
+      }
+      safety_latch.clear();
+      consoleWrite("OK fault clear\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kTelemetryOn:
+      telemetry_enabled = true;
+      last_telemetry_us = static_cast<std::uint32_t>(esp_timer_get_time());
+      consoleWrite("OK telemetry on\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kTelemetryOff:
+      telemetry_enabled = false;
+      consoleWrite("OK telemetry off\r\n");
       return;
     case triwhirl::runtime::RuntimeCommandType::kNone:
       return;
