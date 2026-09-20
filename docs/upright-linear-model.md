@@ -2,19 +2,41 @@
 
 ## Control-coordinate contract
 
-TriWhirl has three physically valid upright contact vertices, separated by 120 degrees in the IMU frame. The balance controller is **not** tied to one named vertex.
+TriWhirl has three physically valid upright contact vertices separated by 120 degrees in the IMU frame. The balance controller is **not** tied to one named vertex.
 
-At runtime:
+For control, the natural coordinate is 120-degree periodic rather than a vertex-specific state:
 
 ```text
-nearest upright vertex A/B/C
-        -> wrapped local theta_error
-        -> x = [theta_error, theta_rate, wheel_rate]^T
+theta_error = wrap_periodic(theta - theta_ref, period = 120 deg)
+            in [-60 deg, +60 deg)
+
+x = [theta_error, theta_rate, wheel_rate]^T
         -> one shared balance controller
         -> Vq
 ```
 
-The A/B/C labels are therefore coordinate anchors. They are not separate controller identities.
+With the current IMU-frame reference near 68 degrees, the measured upright centers are approximately:
+
+```text
+A =  +68 deg
+B =  -52 deg = 68 - 120
+C = -172 deg = 68 - 240
+```
+
+All three therefore map to `theta_error = 0` under the same periodic coordinate. A/B/C classification remains useful for logging and identification provenance, but the runtime balance law does not need a different gain or a different state definition for each named vertex.
+
+The shared host-side helpers are `periodic_upright_error_deg()` and `periodic_upright_error_rad()` in `tools/triwhirl_tool/geometry.py`.
+
+## Seller reference implementation
+
+The seller-provided TRC-V1.1 source independently confirms this control structure on the same class of hardware. Its balance path first reduces the fused body angle modulo 120 degrees and then wraps the result into roughly `[-60,+60]` before applying one set of balance gains. It does not run three independent balance controllers for three corners.
+
+That implementation also provides two useful architectural references:
+
+- coarse swing-up is separate from the near-upright balance law;
+- after balancing, it slowly trims the target angle according to persistent reaction-wheel speed, effectively using equilibrium-bias adjustment for momentum management.
+
+The seller controller is **not** copied into TriWhirl: it drives a SimpleFOC velocity loop with LQR-like outer gains, whereas TriWhirl's planned robust controller commands `Vq` directly. Its value here is evidence for the 120-degree periodic coordinate and for the usefulness of a slow momentum-unloading reference trim, not as a source of transferable gain values.
 
 ## Identification versus control coverage
 
@@ -59,6 +81,7 @@ The fitted affine term `d` is retained as diagnostic evidence. Robust synthesis 
 4. Convert them to state-space with `model/linearization/from_active_fit.py`.
 5. Build the compact measured polytope with `model/uncertainty/build_polytopic.py`.
 6. Synthesize one common robust state-feedback gain over that plant set.
+7. At runtime apply that one gain to the 120-degree-periodic local state.
 
 Example using two measured locations:
 
