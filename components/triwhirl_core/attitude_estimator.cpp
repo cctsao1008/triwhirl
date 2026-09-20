@@ -36,6 +36,14 @@ float clamp01(const float value) {
   return value < 0.0F ? 0.0F : (value > 1.0F ? 1.0F : value);
 }
 
+inline void fastSinCos(const float angle_rad, float* const sin_out,
+                       float* const cos_out) {
+  // GCC can lower this pair to the target's combined sincosf implementation,
+  // avoiding two independent range reductions/libm calls on every estimator
+  // sample. Keep this local so numerical semantics stay identical to sin/cos.
+  __builtin_sincosf(angle_rad, sin_out, cos_out);
+}
+
 }  // namespace
 
 PlanarAttitudeEstimator::PlanarAttitudeEstimator(
@@ -76,8 +84,9 @@ AttitudeEstimate PlanarAttitudeEstimator::update(
   if (accel_norm > 1.0e-5F) {
     const float ax = body_accel_x_mps2 / accel_norm;
     const float az = body_accel_z_mps2 / accel_norm;
-    const float gravity_x = std::sin(state_.angle_rad);
-    const float gravity_z = std::cos(state_.angle_rad);
+    float gravity_x = 0.0F;
+    float gravity_z = 1.0F;
+    fastSinCos(state_.angle_rad, &gravity_x, &gravity_z);
 
     // innovation = sin(theta_est - theta_accel).  Positive innovation means
     // the estimate is ahead of gravity, so both proportional correction and
