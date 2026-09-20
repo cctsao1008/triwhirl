@@ -26,8 +26,8 @@ QueueHandle_t input_queue = nullptr;
 TaskHandle_t supervisor_task = nullptr;
 SupervisorWriteFn write_fn = nullptr;
 void* write_context = nullptr;
-CommandInputState uart_input{};
-CommandInputState ble_input{};
+CommandInputState uart_development_input{};
+CommandInputState ble_gatt_input{};
 
 void writeBytes(const char* data, const std::size_t length) {
   if (write_fn != nullptr && data != nullptr && length > 0U) {
@@ -117,8 +117,18 @@ bool handleTypedRuntimeCommand(const char* const line) {
   RuntimeCommand command{};
   if (std::strcmp(line, "motor stop") == 0) {
     command.type = RuntimeCommandType::kMotorStop;
+  } else if (std::strcmp(line, "stop") == 0) {
+    command.type = RuntimeCommandType::kStop;
   } else if (std::strcmp(line, "swing abort") == 0) {
     command.type = RuntimeCommandType::kSwingAbort;
+  } else if (std::strcmp(line, "timing reset") == 0) {
+    command.type = RuntimeCommandType::kTimingReset;
+  } else if (std::strcmp(line, "fault clear") == 0) {
+    command.type = RuntimeCommandType::kFaultClear;
+  } else if (std::strcmp(line, "telemetry on") == 0) {
+    command.type = RuntimeCommandType::kTelemetryOn;
+  } else if (std::strcmp(line, "telemetry off") == 0) {
+    command.type = RuntimeCommandType::kTelemetryOff;
   } else {
     return false;
   }
@@ -186,14 +196,19 @@ void supervisorIoTask(void*) {
   std::uint8_t input[64];
 
   while (true) {
+    // UART0 remains an explicit wired development/service CLI. It is not the
+    // product BLE transport and has no realtime authority.
     const int uart_received = uart_read_bytes(UART_NUM_0, input, sizeof(input), 0);
     if (uart_received > 0) {
-      consumeBytes(input, static_cast<std::size_t>(uart_received), uart_input);
+      consumeBytes(input, static_cast<std::size_t>(uart_received),
+                   uart_development_input);
     }
 
+    // ble::read() drains payload bytes previously accepted by the NimBLE GATT
+    // RX characteristic write callback. BLE command ingress is GATT, not UART.
     const std::size_t ble_received = triwhirl::ble::read(input, sizeof(input));
     if (ble_received > 0U) {
-      consumeBytes(input, ble_received, ble_input);
+      consumeBytes(input, ble_received, ble_gatt_input);
     }
 
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(kSupervisorPollPeriodMs));
