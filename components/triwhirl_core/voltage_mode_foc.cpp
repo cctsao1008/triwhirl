@@ -12,6 +12,13 @@ constexpr float kSqrt3Over2 = 0.8660254037844386F;
 float clampValue(const float value, const float low, const float high) {
   return value < low ? low : (value > high ? high : value);
 }
+
+inline void fastSinCos(const float angle_rad, float* const sin_out,
+                       float* const cos_out) {
+  // Use one combined libm operation so the electrical-angle range reduction is
+  // not repeated for separate sin() and cos() calls on every active FOC update.
+  __builtin_sincosf(angle_rad, sin_out, cos_out);
+}
 }  // namespace
 
 bool validMotorElectricalConfig(const MotorElectricalConfig& config) {
@@ -82,8 +89,9 @@ PhaseVoltages makeDqVoltage(const float electrical_angle_rad,
   // electricalAngleFromMechanical() already returns [0, 2*pi) in the normal
   // FOC path; wrapElectricalAngle() therefore takes its one-compare fast path.
   const float angle = wrapElectricalAngle(electrical_angle_rad);
-  const float cos_theta = std::cos(angle);
-  const float sin_theta = std::sin(angle);
+  float sin_theta = 0.0F;
+  float cos_theta = 1.0F;
+  fastSinCos(angle, &sin_theta, &cos_theta);
 
   const float alpha = vd * cos_theta - vq * sin_theta;
   const float beta = vd * sin_theta + vq * cos_theta;
