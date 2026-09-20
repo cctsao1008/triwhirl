@@ -17,6 +17,7 @@ SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
     'std::strcmp(line, "status")',
     'std::strcmp(line, "motor status")',
     'std::strcmp(line, "imu status")',
+    'std::strcmp(line, "log status")',
     'std::strcmp(line, "attitude status")',
     'std::strcmp(line, "fault status")',
     'std::strcmp(line, "ble status")',
@@ -27,6 +28,7 @@ SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
     "readEncoderDiagnosticStatus(",
     "triwhirl::ble::connected()",
     "triwhirl::ble::subscribed()",
+    "triwhirl::log::loggerStateName(",
 )
 
 REQUIRED_TYPES = (
@@ -165,11 +167,14 @@ def main() -> None:
                    "runtime diagnostics contract is incomplete")
     require_tokens(diagnostics_text,
                    ("snapshot->motor_mode", "snapshot->encoder_raw_count",
-                    "snapshot->imu_identity_valid", "encoder.readStatus("),
+                    "snapshot->imu_identity_valid", "encoder.readStatus(",
+                    "cached_logger_status", "snapshot->log_state",
+                    "kLoggerSnapshotPeriodUs"),
                    "runtime diagnostics implementation is incomplete")
     require_tokens(runtime_snapshot_header,
                    ("motor_vq_v", "encoder_unwrapped_count", "imu_who_am_i",
-                    "imu_map_gyro_sign"),
+                    "imu_map_gyro_sign", "log_partition_bytes",
+                    "log_dump_active"),
                    "runtime diagnostic snapshot is incomplete")
     require_tokens(runtime_snapshot_text,
                    ("populateRuntimeDiagnosticSnapshot(&complete)",
@@ -219,9 +224,10 @@ def main() -> None:
     print("  obsolete_runtime_bridge=absent")
     print("  runtime_i2c_startup=explicit_named_helpers")
     print("  runtime_uart_dev_ble_gatt_ingress=absent")
-    print("  supervisor_read_only=status,motor_status,imu,attitude,fault,ble,timing,telemetry,help")
+    print("  supervisor_read_only=status,motor_status,imu,log,attitude,fault,ble,timing,telemetry,help")
     print("  encoder_status_i2c=core0_supervisor")
     print("  imu_who_am_i=cached_after_init")
+    print("  logger_status=20ms_snapshot_cache")
     print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
     print("  command_parser=complete_core0_grammar")
