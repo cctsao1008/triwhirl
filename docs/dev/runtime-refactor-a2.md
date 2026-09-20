@@ -105,7 +105,17 @@ The I2C startup overrides were then renamed explicitly to
 and `initImuBus` preprocessor shims as well.
 
 The former `runtime_control.cpp` wrapper has now been folded into
-`runtime_main.cpp`, so only one source inclusion and one rename shim remain:
+`runtime_main.cpp`. `runtime_main.cpp` directly owns:
+
+- the Core-1 realtime task implementation;
+- the AS5600 acquisition handoff and join policy;
+- the supervisor typed-command consumer;
+- runtime snapshot publication;
+- timing-profile accounting;
+- swing-identification runtime execution;
+- the application startup path.
+
+Only one source inclusion and one rename shim remain:
 
 ```text
 #define app_main triwhirl_legacy_app_main
@@ -115,7 +125,7 @@ The former `runtime_control.cpp` wrapper has now been folded into
 
 CI locks that exact debt set: one `.cpp` include and one `app_main` rename shim.
 Any additional source inclusion or rename interception fails the architecture
-contract.
+contract. It also rejects a return of the deleted `runtime_control.cpp` wrapper.
 
 ## Remaining A2 debt
 
