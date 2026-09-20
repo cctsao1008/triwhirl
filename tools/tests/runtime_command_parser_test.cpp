@@ -43,8 +43,22 @@ int main() {
   expectType("log stop", RuntimeCommandType::kLogStop);
   expectType("log dump", RuntimeCommandType::kLogDump);
 
+  // Legacy strtok-based CLI accepted surrounding whitespace and arbitrary
+  // horizontal whitespace between tokens. Keep that wire behavior while
+  // parsing is supervisor-owned.
+  expectType("   motor\t\tstop   ", RuntimeCommandType::kMotorStop);
+  expectType("\t timing   profile\tstatus \t", RuntimeCommandType::kTimingProfileStatus);
+  expectType("  imu   status  ", RuntimeCommandType::kImuStatus);
+
   {
     const auto parsed = parseRuntimeCommand("motor vq -0.625");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kMotorVq);
+    assert(std::fabs(parsed.command.payload.motor_vq.volts + 0.625F) < 1.0e-6F);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("  motor\t vq   -0.625  ");
     assert(parsed.status == RuntimeCommandParseStatus::kCommand);
     assert(parsed.command.type == RuntimeCommandType::kMotorVq);
     assert(std::fabs(parsed.command.payload.motor_vq.volts + 0.625F) < 1.0e-6F);
@@ -143,6 +157,16 @@ int main() {
     assert(config.pump_polarity == -1);
     assert(std::fabs(config.vertex_a_deg - 68.0F) < 1.0e-6F);
     assert(config.max_duration_us == 20000000U);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand(
+        "  swing\tconfig  24\t0.4 0.8  5 9 14\t12.5 0.2 -1 68 20   ");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kSwingConfig);
+    assert(parsed.command.payload.swing_config.target_captures == 24U);
+    assert(parsed.command.payload.swing_config.probe_duration_us == 12500U);
+    assert(parsed.command.payload.swing_config.max_duration_us == 20000000U);
   }
 
   {
