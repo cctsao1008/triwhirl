@@ -96,7 +96,7 @@ CONTROL_REQUIRED_TYPED_COMMANDS = (
 )
 
 PARSER_TEST_REQUIRED_TOKENS = (
-    'parseRuntimeCommand("motor stop")',
+    'expectType("motor stop", RuntimeCommandType::kMotorStop)',
     'parseRuntimeCommand("motor vq -0.625")',
     'parseRuntimeCommand("field 3.5 0.8")',
     'parseRuntimeCommand("attitude reset -1.25")',
