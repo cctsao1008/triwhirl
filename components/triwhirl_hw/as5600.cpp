@@ -11,6 +11,7 @@ constexpr std::uint8_t kStatusMagnetDetected = 1U << 5;
 constexpr std::uint8_t kStatusMagnetTooWeak = 1U << 4;
 constexpr std::uint8_t kStatusMagnetTooStrong = 1U << 3;
 constexpr int kI2cTimeoutMs = 20;
+constexpr std::uint32_t kI2cClockHz = 1000000U;  // AS5600 Fast-mode Plus max.
 }  // namespace
 
 bool As5600::init(const i2c_master_bus_handle_t bus, const std::uint8_t address) {
@@ -20,7 +21,7 @@ bool As5600::init(const i2c_master_bus_handle_t bus, const std::uint8_t address)
   i2c_device_config_t config{};
   config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
   config.device_address = address;
-  config.scl_speed_hz = 400000U;
+  config.scl_speed_hz = kI2cClockHz;
   return i2c_master_bus_add_device(bus, &config, &device_) == ESP_OK;
 }
 
