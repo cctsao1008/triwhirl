@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail CI if runtime composition debt grows during issue #32/A2."""
+"""Fail CI if runtime composition debt regresses during issue #32/A2."""
 
 from __future__ import annotations
 
@@ -9,14 +9,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MAIN = ROOT / "main"
 TESTS = ROOT / "tools" / "tests"
-
-ALLOWED_CPP_INCLUDES = {
-    ("runtime_main.cpp", "app_main.cpp"),
-}
-
-ALLOWED_RENAMING_DEFINES = {
-    ("runtime_main.cpp", "app_main", "triwhirl_legacy_app_main"),
-}
 
 CONTROL_FORBIDDEN_SUPERVISOR_IO = ("uart_read_bytes(", "triwhirl::ble::read(")
 
@@ -88,12 +80,16 @@ def main() -> None:
         if APP_MAIN_RE.search(text):
             app_main_sources.append(path.name)
 
-    if cpp_includes != ALLOWED_CPP_INCLUDES:
-        fail(f"source-inclusion bridge set changed unexpectedly: {sorted(cpp_includes)}")
-    if renaming_defines != ALLOWED_RENAMING_DEFINES:
-        fail(f"legacy renaming shim set changed unexpectedly: {sorted(renaming_defines)}")
+    if cpp_includes:
+        fail(f".cpp source inclusion is forbidden: {sorted(cpp_includes)}")
+    if renaming_defines:
+        fail(f"symbol-renaming shims are forbidden: {sorted(renaming_defines)}")
     if (MAIN / "runtime_control.cpp").exists():
         fail("obsolete runtime_control.cpp wrapper returned")
+    if (MAIN / "app_main.cpp").exists():
+        fail("obsolete legacy app_main.cpp returned")
+    if app_main_sources != ["runtime_main.cpp"]:
+        fail(f"application entry ownership regressed: {sorted(app_main_sources)}")
 
     runtime_main_text = (MAIN / "runtime_main.cpp").read_text(encoding="utf-8")
     runtime_state_header = (MAIN / "runtime_state.hpp").read_text(encoding="utf-8")
@@ -124,16 +120,18 @@ def main() -> None:
         "parseSwingConfig(", "handleRuntimeTimingProfileCommand(",
         "commandAllowedDuringSwing(", "triwhirl_legacy_updateEncoder",
         "triwhirl_legacy_updateImu", "triwhirl_legacy_initEncoderBus",
-        "triwhirl_legacy_initImuBus",
+        "triwhirl_legacy_initImuBus", "triwhirl_legacy_app_main",
     )
     leaked_bridge = [x for x in obsolete_runtime_bridge if x in runtime_main_text]
     if leaked_bridge:
-        fail(f"obsolete runtime string/startup bridge remains: {leaked_bridge}")
+        fail(f"obsolete runtime bridge remains: {leaked_bridge}")
 
     require_tokens(runtime_main_text,
                    ("initRuntimeEncoderBus(", "initRuntimeImuBus(",
                     "void triwhirl::runtime::realtimeControlTask(",
-                    "initEncoderAcquisition(", "waitForNextRealtimeRelease("),
+                    "initEncoderAcquisition(", "waitForNextRealtimeRelease(",
+                    '#include "runtime_state.hpp"',
+                    'extern "C" void app_main(void)'),
                    "explicit realtime/startup ownership regressed")
 
     require_tokens(runtime_state_header,
@@ -171,13 +169,14 @@ def main() -> None:
                    "runtime command parser contract coverage regressed")
 
     print("runtime architecture contract: PASS")
-    print(f"  cpp_includes={sorted(cpp_includes)}")
-    print(f"  renaming_shims={sorted(renaming_defines)}")
-    print(f"  app_main_sources={sorted(app_main_sources)}")
+    print("  cpp_includes=[]")
+    print("  renaming_shims=[]")
+    print("  app_main_sources=['runtime_main.cpp']")
     print("  runtime_control_wrapper=absent")
+    print("  legacy_app_main=absent")
     print("  runtime_state_service=explicit_compiled")
     print("  raw_command_strings_cross_realtime=no")
-    print("  obsolete_runtime_string_bridge=absent")
+    print("  obsolete_runtime_bridge=absent")
     print("  runtime_i2c_startup=explicit_named_helpers")
     print("  runtime_uart_dev_ble_gatt_ingress=absent")
     print("  supervisor_read_only=attitude,fault,ble,timing,telemetry,help")
