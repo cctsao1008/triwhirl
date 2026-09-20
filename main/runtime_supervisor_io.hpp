@@ -4,36 +4,34 @@
 #include <cstdint>
 
 #include "runtime_command.hpp"
+#include "runtime_reply.hpp"
 
 namespace triwhirl::runtime {
 
 constexpr std::size_t kSupervisorCommandBytes = 128U;
 
-enum class SupervisorInputEventType : std::uint8_t {
-  kRuntimeCommand,
-  kSupervisorHandled,
-  kLineOverflow,
-};
-
 struct SupervisorInputEvent {
-  SupervisorInputEventType type = SupervisorInputEventType::kSupervisorHandled;
   RuntimeCommand runtime_command{};
 };
 
 using SupervisorWriteFn = void (*)(void* context, const char* data,
                                    std::size_t length);
 
-// Starts the non-realtime supervisor ingress task. UART0 is retained as a wired
+// Starts the non-realtime supervisor task. UART0 is retained as a wired
 // development/service CLI. BLE ingress is NimBLE GATT RX-characteristic data
 // drained through the BLE component's internal stream buffer; it is not UART.
-// Read-only supervisor-owned commands are answered directly; all remaining
-// command grammar is parsed into fixed-size RuntimeCommand records before it
-// crosses into realtime. Raw command strings never cross this boundary.
+// Read-only commands are answered directly on Core 0; mutation grammar is
+// parsed into fixed-size RuntimeCommand records before crossing into realtime.
 bool initSupervisorIo(SupervisorWriteFn write_fn, void* write_context,
                       int core_id, unsigned task_priority);
 
-// Non-blocking receive for the realtime consumer. At most one queue element is
-// removed per call.
+// Non-blocking receive for the realtime consumer. At most one command is
+// removed per call. No raw command strings cross this boundary.
 bool tryReceiveSupervisorInput(SupervisorInputEvent* event);
+
+// Non-blocking Core-1 -> Core-0 result path. Realtime publishes structured
+// outcomes only; the supervisor formats wire text and owns post-command prompts.
+bool publishRuntimeReply(const RuntimeReply& reply);
+std::uint32_t runtimeReplyDroppedCount();
 
 }  // namespace triwhirl::runtime
