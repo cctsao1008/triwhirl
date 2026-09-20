@@ -12,7 +12,12 @@ enum class RuntimeCommandType : std::uint8_t {
   kMotorStop,
   kStop,
   kSwingAbort,
+  kSwingStart,
+  kSwingConfig,
   kTimingReset,
+  kTimingProfileOn,
+  kTimingProfileOff,
+  kTimingProfileReset,
   kFaultClear,
   kTelemetryOn,
   kTelemetryOff,
@@ -64,6 +69,20 @@ struct ImuMapPayload {
   int gyro_sign = 1;
 };
 
+struct SwingConfigPayload {
+  std::uint32_t target_captures = 0U;
+  float pump_v_low = 0.0F;
+  float pump_v_high = 0.0F;
+  float capture_deg = 0.0F;
+  float probe_exit_deg = 0.0F;
+  float rearm_deg = 0.0F;
+  std::uint32_t probe_duration_us = 0U;
+  float rate_switch_rad_s = 0.0F;
+  int pump_polarity = 0;
+  float vertex_a_deg = 0.0F;
+  std::uint32_t max_duration_us = 0U;
+};
+
 union RuntimeCommandPayload {
   MotorVqPayload motor_vq;
   MotorConfigPayload motor_config;
@@ -72,6 +91,7 @@ union RuntimeCommandPayload {
   AttitudeResetPayload attitude_reset;
   ImuCalibratePayload imu_calibrate;
   ImuMapPayload imu_map;
+  SwingConfigPayload swing_config;
 
   constexpr RuntimeCommandPayload() : motor_vq{} {}
 };
