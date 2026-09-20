@@ -41,9 +41,13 @@ SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
     'std::strcmp(line, "attitude status")',
     'std::strcmp(line, "fault status")',
     'std::strcmp(line, "ble status")',
+    'std::strcmp(line, "timing status")',
+    'std::strcmp(line, "telemetry")',
     "readLatestRuntimeSnapshot(",
     "triwhirl::ble::connected()",
     "triwhirl::ble::subscribed()",
+    "snapshot.timing_iterations",
+    "snapshot.telemetry_enabled",
 )
 
 PARSER_REQUIRED_TYPED_COMMANDS = (
@@ -102,6 +106,8 @@ CONTROL_REQUIRED_TYPED_COMMANDS = (
     "RuntimeCommandType::kAttitudeReset",
     "RuntimeCommandType::kImuCalibrate",
     "RuntimeCommandType::kImuMap",
+    "snapshot.timing_iterations",
+    "snapshot.telemetry_enabled",
 )
 
 PARSER_TEST_REQUIRED_TOKENS = (
@@ -178,6 +184,11 @@ def main() -> None:
     if leaked_supervisor_io:
         fail(f"UART development/BLE GATT ingress leaked into runtime_control.cpp: {leaked_supervisor_io}")
 
+    first_snapshot = control_text.find("publishSupervisorSnapshot(")
+    supervisor_init = control_text.find("initSupervisorIo(")
+    if first_snapshot < 0 or supervisor_init < 0 or first_snapshot > supervisor_init:
+        fail("initial runtime snapshot must be published before supervisor ingress starts")
+
     supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
     parser_text = (MAIN / "runtime_command_parser.cpp").read_text(encoding="utf-8")
     parser_test = TESTS / "runtime_command_parser_test.cpp"
@@ -202,7 +213,8 @@ def main() -> None:
     print(f"  app_main_sources={sorted(app_main_sources)}")
     print("  runtime_control_queue_mechanics=isolated")
     print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
-    print("  supervisor_read_only=attitude,fault,ble")
+    print("  supervisor_read_only=attitude,fault,ble,timing,telemetry")
+    print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
     print("  command_parser=explicit_core0_service")
     print("  command_parser_contract_test=present")
