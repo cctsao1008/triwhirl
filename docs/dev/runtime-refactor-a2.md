@@ -8,17 +8,20 @@ validated control behavior.
 ## Current active path
 
 ```text
-runtime_control.cpp
-  -> runtime_main.cpp
-     -> app_main.cpp
+runtime_main.cpp
+  -> app_main.cpp
 ```
+
+`runtime_main.cpp` is now the explicit realtime/startup translation unit.
+The former `runtime_control.cpp -> runtime_main.cpp` wrapper layer has been
+removed and `runtime_control.cpp` is no longer built or present.
 
 ## Explicit runtime boundaries already extracted
 
 ```text
 Core 0                                      Core 1
 ------                                      ------
-runtime_encoder_acquisition           ->    runtime_control
+runtime_encoder_acquisition           ->    runtime_main
   AS5600 raw read                           wheel-state commit
   bounded result queue                      miss/safety policy
 
@@ -28,7 +31,7 @@ runtime_supervisor_io
   line assembly
        |
        v
-runtime_command_parser                ->    runtime_control
+runtime_command_parser                ->    runtime_main
   complete command grammar                  at most one queued event / RT iteration
   numeric parsing                           typed command execution
   usage errors                              no raw command strings
@@ -65,7 +68,7 @@ is handled entirely on Core 0 because its authoritative state belongs to the BLE
 GATT transport itself. Static `help` formatting is supervisor-owned as well. The
 first snapshot is published before supervisor ingress starts.
 
-`runtime_command.hpp` now represents the complete remaining command surface that
+`runtime_command.hpp` represents the complete remaining command surface that
 needs realtime-owned state. This includes motor, IMU, swing, timing-profile, and
 logger lifecycle operations plus status requests that still depend on legacy
 runtime-owned state. Numeric conversion for all payload-bearing commands occurs
@@ -90,24 +93,41 @@ handleSupervisorCommand(event.line)
 supervisor bookkeeping events. CI explicitly fails if the raw string path is
 reintroduced.
 
-The obsolete string bridge inside `runtime_main.cpp` has also been deleted:
+The obsolete string bridge inside the runtime has also been deleted:
 `handleSupervisorCommand`, `consumeSupervisorBytes`, `pollSupervisorConsole`,
-legacy swing parsing, and legacy timing-profile parsing are gone. The redundant
-`updateEncoder` / `updateImu` rename shims were removed with those dead paths.
-Only three source-inclusion shims remain: `app_main`, `initEncoderBus`, and
-`initImuBus`.
+legacy swing parsing, and legacy timing-profile parsing are gone.
+
+## Composition debt reduced to one bridge
+
+The redundant `updateEncoder` / `updateImu` rename shims were removed first.
+The I2C startup overrides were then renamed explicitly to
+`initRuntimeEncoderBus` and `initRuntimeImuBus`, removing the `initEncoderBus`
+and `initImuBus` preprocessor shims as well.
+
+The former `runtime_control.cpp` wrapper has now been folded into
+`runtime_main.cpp`, so only one source inclusion and one rename shim remain:
+
+```text
+#define app_main triwhirl_legacy_app_main
+#include "app_main.cpp"
+#undef app_main
+```
+
+CI locks that exact debt set: one `.cpp` include and one `app_main` rename shim.
+Any additional source inclusion or rename interception fails the architecture
+contract.
 
 ## Remaining A2 debt
 
-Command parsing is no longer part of realtime execution, but A2 is not complete
-yet. Remaining work is structural and output/diagnostic ownership:
+Command parsing and the extra realtime wrapper are gone, but A2 is not complete
+yet. Remaining work is now concentrated in the legacy bring-up state boundary:
 
-- `runtime_control.cpp -> runtime_main.cpp -> app_main.cpp` source inclusion;
-- three legacy symbol-renaming shims in `runtime_main.cpp`;
-- status/IMU formatting still executed from Core 1 for commands whose state has
+- extract the state/helpers still inherited from `app_main.cpp`, then delete the
+  final `runtime_main.cpp -> app_main.cpp` source inclusion and `app_main` shim;
+- status/IMU formatting still executes from Core 1 for commands whose state has
   not yet been fully represented in `RuntimeSnapshot`;
-- `status` still refreshes AS5600 health and `imu status` still performs a
-  WHO_AM_I diagnostic I2C transaction in the realtime translation unit;
+- aggregate `status` still refreshes AS5600 health and `imu status` still performs
+  a WHO_AM_I diagnostic I2C transaction in the realtime translation unit;
 - command responses and some telemetry/event formatting still originate on Core
   1, so final single-writer supervisor egress is still pending.
 
