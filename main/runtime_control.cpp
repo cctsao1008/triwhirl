@@ -291,6 +291,53 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       consolePrintf("OK motor FOC vq_v=%.6f\r\n", vq_command_v);
       return;
     }
+    case triwhirl::runtime::RuntimeCommandType::kMotorConfig: {
+      MotorElectricalConfig config{};
+      config.pole_pairs = command.payload.motor_config.pole_pairs;
+      config.sensor_direction = command.payload.motor_config.sensor_direction;
+      config.electrical_offset_rad = triwhirl::wrapElectricalAngle(
+          command.payload.motor_config.electrical_offset_rad);
+      if (!triwhirl::validMotorElectricalConfig(config)) {
+        consoleWrite("ERR invalid motor config\r\n");
+        return;
+      }
+      stopMotor();
+      motor_config = config;
+      motor_config_valid = true;
+      consolePrintf(
+          "OK motor config pole_pairs=%d sensor_dir=%d offset_rad=%.6f\r\n",
+          motor_config.pole_pairs, motor_config.sensor_direction,
+          motor_config.electrical_offset_rad);
+      return;
+    }
+    case triwhirl::runtime::RuntimeCommandType::kMotorCalibrate:
+      if (!motorStartAllowed()) {
+        return;
+      }
+      stopMotor();
+      if (!encoder_sample_valid) {
+        consoleWrite("ERR motor calibrate: encoder read unavailable\r\n");
+        return;
+      }
+      calibration.amplitude_v = clampFinite(
+          command.payload.motor_calibrate.amplitude_v, 0.1F,
+          kMotorVectorLimitV);
+      calibration.electrical_hz = clampFinite(
+          command.payload.motor_calibrate.electrical_hz, 0.1F, 2.0F);
+      calibration.electrical_turns = clampFinite(
+          command.payload.motor_calibrate.turns, 1.0F, 12.0F);
+      calibration.commanded_electrical_rad = 0.0F;
+      calibration.start_mechanical_rad = wheel_state.unwrapped_angle_rad;
+      calibration.stage = CalibrationStage::kAlign;
+      calibration.stage_start_us =
+          static_cast<std::uint32_t>(esp_timer_get_time());
+      motor_mode = MotorMode::kCalibrating;
+      vq_command_v = 0.0F;
+      consolePrintf(
+          "OK motor calibration started amp_v=%.3f e_hz=%.3f turns=%.3f\r\n",
+          calibration.amplitude_v, calibration.electrical_hz,
+          calibration.electrical_turns);
+      return;
     case triwhirl::runtime::RuntimeCommandType::kField: {
       const float requested_hz = clampFinite(
           command.payload.field.electrical_hz, -kMaxElectricalHz,
@@ -334,6 +381,26 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
     case triwhirl::runtime::RuntimeCommandType::kImuCalibrate:
       startGyroCalibration(command.payload.imu_calibrate.samples);
       return;
+    case triwhirl::runtime::RuntimeCommandType::kImuMap: {
+      ImuPlanarMap map{};
+      map.accel_sin_axis = command.payload.imu_map.accel_sin_axis;
+      map.accel_cos_axis = command.payload.imu_map.accel_cos_axis;
+      map.gyro_axis = command.payload.imu_map.gyro_axis;
+      map.accel_sin_sign = command.payload.imu_map.accel_sin_sign;
+      map.accel_cos_sign = command.payload.imu_map.accel_cos_sign;
+      map.gyro_sign = command.payload.imu_map.gyro_sign;
+      if (!validImuMap(map)) {
+        consoleWrite("ERR invalid imu map\r\n");
+        return;
+      }
+      imu_map = map;
+      resetAttitudeFromAccel();
+      consolePrintf("OK imu map %d %d %d %d %d %d\r\n",
+                    imu_map.accel_sin_axis, imu_map.accel_cos_axis,
+                    imu_map.gyro_axis, imu_map.accel_sin_sign,
+                    imu_map.accel_cos_sign, imu_map.gyro_sign);
+      return;
+    }
     case triwhirl::runtime::RuntimeCommandType::kNone:
       return;
   }
