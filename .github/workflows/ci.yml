@@ -9,9 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: guard: runtime architecture contract
+      - name: "guard: runtime architecture contract"
         run: python tools/tests/runtime_architecture_contract.py
-      - name: test: host toolbox routing
+      - name: "test: host toolbox routing"
         run: |
           python tools/twtool.py --help
           python tools/twtool.py --list
@@ -30,7 +30,7 @@ jobs:
           python tools/twtool.py help id swing
           python -m tools.triwhirl_tool help log decode
           python -m compileall -q tools/triwhirl_tool model tools/synthesis/hinf
-      - name: test: native TWLG tools
+      - name: "test: native TWLG tools"
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -70,7 +70,7 @@ jobs:
           PY
           python -m tools.triwhirl_tool log decode /tmp/twtool-test.twlog -o /tmp/twtool-test.csv
           test -s /tmp/twtool-test.csv
-      - name: test: swing TWLG extraction
+      - name: "test: swing TWLG extraction"
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -107,7 +107,7 @@ jobs:
           assert [row["phase"] for row in rows[1:]] == ["active", "active", "active"]
           assert all(abs(float(row["planned_vq_v"]) + 0.55) < 1e-6 for row in rows)
           PY
-      - name: test: independent swing probe scheduler
+      - name: "test: independent swing probe scheduler"
         run: |
           g++ -std=c++17 \
             -Icomponents/triwhirl_core/include \
@@ -115,14 +115,14 @@ jobs:
             components/triwhirl_core/swing_id.cpp \
             -o /tmp/swing-id-probe-schedule-test
           /tmp/swing-id-probe-schedule-test
-      - name: test: 120-degree upright geometry
+      - name: "test: 120-degree upright geometry"
         run: |
           g++ -std=c++17 \
             -Icomponents/triwhirl_core/include \
             tools/tests/upright_geometry_test.cpp \
             -o /tmp/upright-geometry-test
           /tmp/upright-geometry-test
-      - name: build: native ESP-IDF
+      - name: "build: native ESP-IDF"
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v6.1
