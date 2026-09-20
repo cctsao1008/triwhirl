@@ -29,9 +29,9 @@ runtime_supervisor_io
        |
        v
 runtime_command_parser                ->    runtime_control
-  command grammar                           at most one queued event / RT iteration
-  numeric parsing                           typed mutation execution
-  usage errors                              legacy string fallback (transitional)
+  complete command grammar                  at most one queued event / RT iteration
+  numeric parsing                           typed command execution
+  usage errors                              no raw command strings
   fixed-size RuntimeCommand
 
 runtime_supervisor_io                 <-    runtime_snapshot
@@ -49,73 +49,60 @@ service CLI during bring-up. Neither transport has realtime authority.
 
 Transport ownership and command grammar are separate services:
 `runtime_supervisor_io` owns ingress/framing while `runtime_command_parser`
-owns migrated command text, numeric parsing, and usage validation. This keeps
-transport code from becoming the permanent command parser and gives the legacy
-Core-1 string path a single replacement boundary.
+owns command text, numeric parsing, aliases, and usage validation. No raw command
+string or line buffer crosses into Core 1 anymore.
 
 The supervisor mailbox is depth-limited and non-blocking. When full, the newest
 command/event is rejected and the transport reports `ERR command mailbox full`
-rather than blocking either domain.
+rather than blocking either domain. Unknown commands are rejected in the
+supervisor domain with `ERR unknown command`.
 
 The snapshot channel is depth one and uses overwrite/peek semantics. Core 1
 publishes the latest complete snapshot without blocking; Core 0 reads a complete
 copy without consuming it. `attitude status`, `fault status`, `timing status`,
 and the read-only `telemetry` query are snapshot-backed on Core 0. `ble status`
-is also handled entirely on Core 0 because its authoritative state belongs to
-the BLE GATT transport itself. Static `help` formatting is supervisor-owned as
-well. The initial snapshot is published before supervisor ingress starts, so
-these commands do not race the first snapshot publication at startup.
+is handled entirely on Core 0 because its authoritative state belongs to the BLE
+GATT transport itself. Static `help` formatting is supervisor-owned as well. The
+first snapshot is published before supervisor ingress starts.
 
-`runtime_command.hpp` defines the fixed-size supervisor/realtime mutation
-contract. Commands now parsed on Core 0 and executed on Core 1 without string
-interpretation include:
+`runtime_command.hpp` now represents the complete remaining command surface that
+needs realtime-owned state. This includes motor, IMU, swing, timing-profile, and
+logger lifecycle operations plus status requests that still depend on legacy
+runtime-owned state. Numeric conversion for all payload-bearing commands occurs
+only in `runtime_command_parser` on Core 0.
 
-- no-payload commands: `motor stop`, `stop`, `swing abort`, `swing start`,
-  `timing reset`, `timing profile on`, `timing profile off`,
-  `timing profile reset`, `fault clear`, `telemetry on`, `telemetry off`;
-- payload commands: `motor vq <volts>`,
-  `motor config <pole_pairs> <sensor_dir> <offset_rad>`,
-  `motor calibrate [amplitude_v] [electrical_hz] [turns]`,
-  `field <electrical_hz> <amplitude_v>`, `attitude reset [angle_rad]`,
-  `imu calibrate [samples]`,
-  `imu map <sin_axis> <cos_axis> <gyro_axis> <sin_sign> <cos_sign> <gyro_sign>`,
-  and `swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>`.
+The original command-family aliases are preserved (`imu`, `log`, `swing`, and
+`timing profile` still resolve to their status forms; `attitude`, `timing`,
+`fault`, and `ble` status aliases remain supervisor-owned). Existing usage-error
+strings and the swing ownership policy are preserved.
 
-The payload forms use fixed-size POD fields in `RuntimeCommand`; `atoi`, `strtof`,
-`strtod` and `strtoul` parsing remains entirely in `runtime_command_parser` on
-Core 0. Realtime still performs state-dependent validation, safety admission and
-mutation so actuator/sensor ownership does not move across cores. Swing-config
-duration conversion is completed on Core 0; realtime still enforces the motor
-voltage ceiling and delegates structural validation to `SwingIdRunner`.
+## Legacy string path: removed
 
-The parser has a host-side contract test in
-`tools/tests/runtime_command_parser_test.cpp`. CI compiles the parser directly
-with the host compiler and verifies command type selection, payload conversion,
-default arguments, swing-duration conversion, usage errors, and the remaining
-legacy-not-matched boundary before the ESP-IDF build begins.
+The following transitional path has been deleted:
 
-The original swing-ownership policy is preserved. While identification owns
-realtime actuation, `swing start`, `swing config`, and `swing abort` still reach
-their existing state-dependent checks instead of being rejected by the generic
-ownership gate. Timing-profile control also remains available during an active
-identification run as before, and `telemetry off` remains allowed. Other migrated
-mutations are rejected by the same swing-ownership policy.
+```text
+SupervisorInputEventType::kCommand
+char line[128] crossing into Core 1
+handleSupervisorCommand(event.line)
+```
 
-## Remaining legacy command surface
+`SupervisorInputEvent` now carries only typed `RuntimeCommand` records or small
+supervisor bookkeeping events. CI explicitly fails if the raw string path is
+reintroduced.
 
-The raw Core-1 string path is now limited primarily to:
+## Remaining A2 debt
 
-- aggregate `status` and `motor status`;
-- `imu status`, which still performs a diagnostic WHO_AM_I I2C transaction;
-- `log status` and log lifecycle commands;
-- `swing status`;
-- `timing profile status`.
+Command parsing is no longer part of realtime execution, but A2 is not complete
+yet. Remaining work is structural and output/diagnostic ownership:
 
-This is migration debt, not a compatibility target. The remaining read-only
-commands require either richer snapshots or ownership-aware service state; log
-commands require a deliberate logger-control boundary. Once these are migrated,
-`SupervisorInputEventType::kCommand`, its raw line buffer, and
-`handleSupervisorCommand(event.line)` can be deleted together.
+- `runtime_control.cpp -> runtime_main.cpp -> app_main.cpp` source inclusion;
+- five legacy symbol-renaming shims in `runtime_main.cpp`;
+- status/IMU formatting still executed from Core 1 for commands whose state has
+  not yet been fully represented in `RuntimeSnapshot`;
+- `status` still refreshes AS5600 health and `imu status` still performs a
+  WHO_AM_I diagnostic I2C transaction in the realtime translation unit;
+- command responses and some telemetry/event formatting still originate on Core
+  1, so final single-writer supervisor egress is still pending.
 
 ## Target
 
@@ -150,7 +137,7 @@ runtime_snapshot.cpp/.hpp
   bypass the same Core-0 parser and typed command boundary used by BLE GATT;
 - command ingress is fixed-size, bounded, non-blocking, and explicitly rejects
   overflow;
-- migrated mutating commands cross as typed `RuntimeCommand` records;
+- no raw command strings cross into realtime;
 - string parsing/formatting is removed from realtime control before A2 closes;
 - read-only diagnostics consume bounded snapshot/transport state rather than
   live cross-core state;
