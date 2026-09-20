@@ -111,7 +111,9 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
     return true;
   }
 
-  if (std::strcmp(line, "ble status") == 0) {
+  const bool ble_status = std::strcmp(line, "ble") == 0 ||
+                          std::strcmp(line, "ble status") == 0;
+  if (ble_status) {
     char buffer[160];
     const int length = std::snprintf(
         buffer, sizeof(buffer),
@@ -130,9 +132,12 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
     return true;
   }
 
-  const bool attitude_status = std::strcmp(line, "attitude status") == 0;
-  const bool fault_status = std::strcmp(line, "fault status") == 0;
-  const bool timing_status = std::strcmp(line, "timing status") == 0;
+  const bool attitude_status = std::strcmp(line, "attitude") == 0 ||
+                               std::strcmp(line, "attitude status") == 0;
+  const bool fault_status = std::strcmp(line, "fault") == 0 ||
+                            std::strcmp(line, "fault status") == 0;
+  const bool timing_status = std::strcmp(line, "timing") == 0 ||
+                             std::strcmp(line, "timing status") == 0;
   const bool telemetry_status = std::strcmp(line, "telemetry") == 0;
   if (!attitude_status && !fault_status && !timing_status && !telemetry_status) {
     return false;
