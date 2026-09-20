@@ -9,7 +9,6 @@
 
 #include <cstdint>
 #include <cstring>
-#include <limits>
 
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -178,15 +177,8 @@ void triwhirlParallelControlTask(void*) {
     std::uint32_t encoder_sequence = 0U;
     const bool encoder_dispatched =
         dispatchEncoderAcquisition(&encoder_sequence);
-    const std::int64_t after_encoder_kick_us = esp_timer_get_time();
-    if (profile) {
-      // In the parallel runtime this stage is dispatch overhead, not the I2C
-      // transfer itself. encoder_i2c_raw below remains the actual bus timing.
-      recordRuntimeTimingStage(RuntimeTimingStage::kEncoder, start_us,
-                               after_encoder_kick_us);
-    }
 
-    const std::int64_t imu_begin_us = after_encoder_kick_us;
+    const std::int64_t imu_begin_us = esp_timer_get_time();
     updateImu(loop_us);
     const std::int64_t imu_end_us = esp_timer_get_time();
     if (profile) {
@@ -194,14 +186,23 @@ void triwhirlParallelControlTask(void*) {
                                imu_end_us);
     }
 
+    // Reuse the existing "encoder" profiler stage for only the post-MPU join
+    // overhead. The actual AS5600 bus duration remains independently reported
+    // as encoder_i2c_raw by the driver profiler on core 0.
+    const std::int64_t encoder_join_begin_us = imu_end_us;
     if (encoder_dispatched) {
       collectEncoderAcquisition(encoder_sequence, loop_us);
     } else {
       encoder_sample_valid = false;
       ++encoder_read_errors;
     }
+    const std::int64_t encoder_join_end_us = esp_timer_get_time();
+    if (profile) {
+      recordRuntimeTimingStage(RuntimeTimingStage::kEncoder,
+                               encoder_join_begin_us, encoder_join_end_us);
+    }
 
-    std::int64_t stage_us = esp_timer_get_time();
+    std::int64_t stage_us = encoder_join_end_us;
 
     evaluateSafety(start_us);
     updateSwingIdentification(loop_us);
