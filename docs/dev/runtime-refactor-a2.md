@@ -23,8 +23,9 @@ runtime_encoder_acquisition   ->    runtime_control
   bounded result queue              miss/safety policy
 
 runtime_supervisor_io         ->    runtime_control
-  UART/BLE byte polling              at most one queued command / RT iteration
-  line assembly                      mutating command execution (transitional)
+  UART/BLE byte polling              at most one queued event / RT iteration
+  line assembly                      typed mutation execution
+  string parsing                     legacy string fallback (transitional)
   bounded command queue
 
 runtime_supervisor_io         <-    runtime_snapshot
@@ -42,10 +43,17 @@ copy without consuming it. The first migrated read-only commands are
 `attitude status` and `fault status`, preserving their existing wire format while
 moving both formatting and live-state access out of the realtime task.
 
-This is a B2 vertical slice, not the end state. Remaining string commands still
-enter Core 1 and are interpreted by the transitional command handlers. The next
-supervisory slice converts mutating commands to typed `RuntimeCommand` records
-and migrates the remaining read-only diagnostics to the snapshot path.
+Typed command migration has also started. `runtime_command.hpp` defines the
+fixed-size supervisor/realtime mutation contract. `motor stop` and `swing abort`
+are parsed on Core 0 into `RuntimeCommand` records and executed on Core 1 without
+string interpretation. Existing swing-ownership rejection and response text are
+preserved.
+
+This remains an incremental B2 slice. Commands that are not yet migrated still
+enter Core 1 through the legacy string event, so string parsing has not yet been
+fully removed from realtime. The typed allow-list should grow command by command
+until the legacy path can be deleted, rather than adding a second broad parser
+inside realtime control.
 
 ## Target
 
@@ -62,6 +70,7 @@ Supporting bounded services may remain separate when they have one clear
 hardware/concurrency responsibility, such as:
 
 ```text
+runtime_command.hpp
 runtime_encoder_acquisition.cpp/.hpp
 runtime_supervisor_io.cpp/.hpp
 runtime_snapshot.cpp/.hpp
@@ -76,6 +85,7 @@ runtime_snapshot.cpp/.hpp
 - UART/BLE byte polling and line assembly stay outside realtime control;
 - command ingress is fixed-size, bounded, non-blocking, and explicitly rejects
   overflow;
+- migrated mutating commands cross as typed `RuntimeCommand` records;
 - string parsing/formatting is removed from realtime control before A2 closes;
 - read-only diagnostics consume a bounded runtime snapshot rather than live
   cross-core state;
