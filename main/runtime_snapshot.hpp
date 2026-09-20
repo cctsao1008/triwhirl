@@ -1,0 +1,33 @@
+#pragma once
+
+#include <cstdint>
+
+namespace triwhirl::runtime {
+
+struct RuntimeSnapshot {
+  std::uint32_t t_us = 0U;
+
+  bool attitude_initialized = false;
+  bool attitude_valid = false;
+  float attitude_angle_rad = 0.0F;
+  float attitude_rate_rad_s = 0.0F;
+  float attitude_residual_bias_rad_s = 0.0F;
+  float attitude_innovation = 0.0F;
+  float attitude_accel_weight = 0.0F;
+  float wheel_rate_rad_s = 0.0F;
+
+  bool safety_faulted = false;
+  std::uint32_t safety_fault_mask = 0U;
+  std::uint32_t safety_first_fault = 0U;
+};
+
+// Single-writer (Core 1) bounded publication. The implementation keeps only
+// the latest complete snapshot; publishing never blocks the realtime task.
+bool initRuntimeSnapshotChannel();
+void publishRuntimeSnapshot(const RuntimeSnapshot& snapshot);
+
+// Non-blocking read for supervisory code. Returns the latest complete snapshot
+// without consuming it.
+bool readLatestRuntimeSnapshot(RuntimeSnapshot* snapshot);
+
+}  // namespace triwhirl::runtime
