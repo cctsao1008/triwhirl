@@ -113,6 +113,13 @@ jobs:
             components/triwhirl_core/swing_id.cpp \
             -o /tmp/swing-id-probe-schedule-smoke
           /tmp/swing-id-probe-schedule-smoke
+      - name: Smoke-test 120-degree upright geometry
+        run: |
+          g++ -std=c++17 \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/upright_geometry_smoke.cpp \
+            -o /tmp/upright-geometry-smoke
+          /tmp/upright-geometry-smoke
       - name: Build with native ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:
