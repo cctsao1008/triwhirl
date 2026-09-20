@@ -199,6 +199,23 @@ async def _timing_profile_run(args: argparse.Namespace) -> int:
         if not saw_end:
             raise RuntimeError("timed out waiting for timing_profile_end")
 
+        # The parallel runtime emits one compact summary on the next control
+        # iteration after profiling is disabled. It includes encoder dispatch /
+        # join health, exact attitude-math timing, and a fixed period histogram.
+        # Wait for it before resetting the normal counters so the diagnostic
+        # report itself cannot contaminate the clean baseline below.
+        try:
+            parallel_line = await _wait_console(
+                transport,
+                prefixes=("parallel_profile,",),
+                timeout_s=min(max(args.timeout, 1.0), 3.0),
+            )
+            print(parallel_line)
+        except RuntimeError:
+            # Older firmware does not emit this optional line. Keep the host
+            # command backward-compatible with pre-parallel builds.
+            pass
+
         # `timing profile off` formats and queues the full stage report from the
         # control task. That diagnostic work can legitimately inflate the normal
         # timing counters, especially max_exec_us. Reset after the report and
