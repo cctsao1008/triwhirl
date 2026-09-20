@@ -7,6 +7,7 @@
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "triwhirl/attitude_estimator.hpp"
+#include "triwhirl/board.hpp"
 #include "triwhirl/drivers/as5600.hpp"
 #include "triwhirl/drivers/mpu6050.hpp"
 #include "triwhirl/motor/three_pwm_bridge.hpp"
@@ -50,7 +51,6 @@ inline constexpr std::uint32_t kTelemetryPeriodUs = 20000U;
 inline constexpr std::uint32_t kPwmFrequencyHz = 25000U;
 inline constexpr std::size_t kConsoleTxBufferBytes = 8192U;
 
-// State formerly hidden inside the legacy app_main.cpp translation-unit bridge.
 enum class MotorMode {
   kStopped,
   kOpenLoop,
