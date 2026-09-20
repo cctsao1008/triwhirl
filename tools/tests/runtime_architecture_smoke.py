@@ -56,13 +56,16 @@ SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS = (
 
 SUPERVISOR_REQUIRED_TYPED_COMMANDS = (
     'std::strcmp(line, "motor stop")',
+    'std::strcmp(line, "swing abort")',
     "RuntimeCommandType::kMotorStop",
+    "RuntimeCommandType::kSwingAbort",
     "SupervisorInputEventType::kRuntimeCommand",
 )
 
 CONTROL_REQUIRED_TYPED_COMMANDS = (
     "executeRuntimeCommand(",
     "RuntimeCommandType::kMotorStop",
+    "RuntimeCommandType::kSwingAbort",
 )
 
 CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.cpp)"', re.MULTILINE)
@@ -106,9 +109,6 @@ def main() -> None:
     if unexpected_renames:
         fail(f"unexpected symbol-renaming shim(s): {sorted(unexpected_renames)}")
 
-    # During the transition both app_main.cpp and runtime_main.cpp contain an
-    # app_main definition, but the legacy one is renamed by the tolerated shim.
-    # Do not allow a third source to acquire application-entry ownership.
     unexpected_entries = set(app_main_sources) - {"app_main.cpp", "runtime_main.cpp"}
     if unexpected_entries:
         fail(f"unexpected app_main owner(s): {sorted(unexpected_entries)}")
@@ -162,9 +162,6 @@ def main() -> None:
             f"{missing_typed_control}"
         )
 
-    # Keep the known debt explicit. As A2 removes an item, delete it from the
-    # allow-list in the same change; the test intentionally does not require all
-    # allow-listed debt to remain present.
     print("runtime architecture guard: PASS")
     print(f"  cpp_includes={sorted(cpp_includes)}")
     print(f"  renaming_shims={sorted(renaming_defines)}")
@@ -172,7 +169,7 @@ def main() -> None:
     print("  runtime_control_queue_mechanics=isolated")
     print("  runtime_control_uart_ble_polling=absent")
     print("  supervisor_snapshot_diagnostics=attitude,fault")
-    print("  typed_runtime_commands=motor_stop")
+    print("  typed_runtime_commands=motor_stop,swing_abort")
 
 
 if __name__ == "__main__":
