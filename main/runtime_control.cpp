@@ -2,9 +2,11 @@
 //
 // Core 1 owns the 1 kHz control iteration. AS5600 acquisition is delegated to
 // a dedicated Core-0 worker through runtime_encoder_acquisition; Core 1 performs
-// the blocking MPU6050 transaction and attitude update in parallel. The two
-// sensors use independent ESP32 I2C controllers.
+// the blocking MPU6050 transaction and attitude update in parallel. UART/BLE
+// byte polling and line assembly are delegated to the Core-0 supervisor I/O
+// service and enter this domain through a bounded command mailbox.
 
+#include <cstddef>
 #include <cstdint>
 
 #include "esp_timer.h"
@@ -13,11 +15,12 @@
 #include "runtime_control.hpp"
 #include "runtime_encoder_acquisition.hpp"
 #include "runtime_release.hpp"
+#include "runtime_supervisor_io.hpp"
 
 // runtime_main.cpp still owns the supervisor/swing runtime in this
 // behavior-preserving refactor slice. Task selection, I2C affinity, encoder
-// acquisition, and the GPTimer scheduler are explicit interfaces; the remaining
-// composition debt is the source inclusion itself.
+// acquisition, supervisor transport, and the GPTimer scheduler are explicit
+// interfaces; the remaining composition debt is the source inclusion itself.
 #include "runtime_main.cpp"
 
 static_assert(triwhirl::runtime::kRealtimeReleasePeriodUs == kControlPeriodUs,
@@ -45,6 +48,7 @@ struct ControlPeriodHistogram {
 
 constexpr std::uint32_t kEncoderJoinBudgetUs = 100U;
 constexpr std::uint32_t kEncoderConsecutiveMissLimit = 2U;
+constexpr unsigned kSupervisorTaskPriority = 2U;
 
 std::uint64_t encoder_acq_completions = 0U;
 std::uint32_t encoder_acq_consecutive_misses = 0U;
@@ -181,6 +185,25 @@ bool collectAndCommitEncoder(const std::uint32_t expected_sequence,
   return commitEncoderResult(result, sample_time_us);
 }
 
+void supervisorWrite(void*, const char* const data, const std::size_t length) {
+  consoleWriteBytes(data, length);
+}
+
+void processOneSupervisorInput() {
+  triwhirl::runtime::SupervisorInputEvent event{};
+  if (!triwhirl::runtime::tryReceiveSupervisorInput(&event)) {
+    return;
+  }
+
+  if (event.type == triwhirl::runtime::SupervisorInputEventType::kCommand) {
+    handleSupervisorCommand(event.line);
+  }
+
+  if (!swing_id_runner.active()) {
+    printPrompt();
+  }
+}
+
 void realtimeControlTaskImpl(void*) {
   if (!triwhirl::runtime::initEncoderAcquisition(
           readEncoderRaw, nullptr, 0,
@@ -188,6 +211,15 @@ void realtimeControlTaskImpl(void*) {
     safety_latch.trip(SafetyFault::kStartup);
     stopMotor();
     consoleWrite("FATAL fault=startup parallel encoder task creation failed\r\n");
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  if (!triwhirl::runtime::initSupervisorIo(supervisorWrite, nullptr, 0,
+                                            kSupervisorTaskPriority)) {
+    safety_latch.trip(SafetyFault::kStartup);
+    stopMotor();
+    consoleWrite("FATAL fault=startup supervisor I/O task creation failed\r\n");
     vTaskDelete(nullptr);
     return;
   }
@@ -265,11 +297,7 @@ void realtimeControlTaskImpl(void*) {
       stage_us = now;
     }
 
-    if ((loop_us - last_supervisor_console_poll_us) >=
-        kSupervisorConsolePollPeriodUs) {
-      last_supervisor_console_poll_us = loop_us;
-      pollSupervisorConsole();
-    }
+    processOneSupervisorInput();
     finalizeSwingLogIfPending();
     if (profile) {
       const std::int64_t now = esp_timer_get_time();
