@@ -13,13 +13,16 @@
 #include "triwhirl/ble_transport.hpp"
 #include "triwhirl/runtime_logger.hpp"
 #include "triwhirl/safety.hpp"
+#include "triwhirl/swing_id.hpp"
 
 namespace triwhirl::runtime {
 namespace {
 
 constexpr std::uint32_t kSupervisorPollPeriodMs = 5U;
 constexpr UBaseType_t kSupervisorQueueDepth = 4U;
-constexpr UBaseType_t kRuntimeReplyQueueDepth = 8U;
+// Timing-profile status emits a bounded burst of structured stage records.
+// Keep enough headroom for that complete burst plus ordinary command replies.
+constexpr UBaseType_t kRuntimeReplyQueueDepth = 24U;
 
 struct CommandInputState {
   char line[kSupervisorCommandBytes]{};
@@ -91,8 +94,50 @@ const char* motorModeName(const std::uint8_t mode) {
   }
 }
 
+const char* timingProfileStageName(const RuntimeTimingProfileStageId stage) {
+  switch (stage) {
+    case RuntimeTimingProfileStageId::kEncoder: return "encoder";
+    case RuntimeTimingProfileStageId::kImuAttitude: return "imu_attitude";
+    case RuntimeTimingProfileStageId::kSafetySwing: return "safety_swing";
+    case RuntimeTimingProfileStageId::kMotor: return "motor";
+    case RuntimeTimingProfileStageId::kLog: return "log";
+    case RuntimeTimingProfileStageId::kConsole: return "console";
+    case RuntimeTimingProfileStageId::kTelemetry: return "telemetry";
+    case RuntimeTimingProfileStageId::kLoop: return "loop";
+    case RuntimeTimingProfileStageId::kEncoderI2cRaw: return "encoder_i2c_raw";
+    case RuntimeTimingProfileStageId::kEncoderI2cStatus: return "encoder_i2c_status";
+    case RuntimeTimingProfileStageId::kMpuI2c: return "mpu_i2c";
+    case RuntimeTimingProfileStageId::kMpuDecode: return "mpu_decode";
+  }
+  return "unknown";
+}
+
+void formatSwingStatusPayload(const RuntimeReply& reply) {
+  char buffer[768];
+  const auto state = static_cast<triwhirl::SwingIdState>(reply.value0);
+  const auto reason = static_cast<triwhirl::SwingIdStopReason>(reply.value1);
+  const auto vertex = static_cast<triwhirl::SwingIdVertex>(reply.value5);
+  const int flags = reply.value6;
+  const int length = std::snprintf(
+      buffer, sizeof(buffer),
+      "swing,state=%s,reason=%s,captures=%lu,target=%lu,half_cycle=%lu,vertex=%s,error_deg=%.3f,vq_v=%.3f,pump=%d,probe=%d,critical=%d,event_drops=%lu,pump_low=%.3f,pump_high=%.3f,capture_deg=%.3f,exit_deg=%.3f,rearm_deg=%.3f,probe_ms=%.3f,rate_switch=%.6f,polarity=%d,vertex_a_deg=%.3f,max_s=%.3f\r\n",
+      triwhirl::swingIdStateName(state),
+      triwhirl::swingIdStopReasonName(reason),
+      static_cast<unsigned long>(reply.value2),
+      static_cast<unsigned long>(reply.value3),
+      static_cast<unsigned long>(reply.value4),
+      triwhirl::swingIdVertexName(vertex), reply.float0, reply.float1,
+      (flags & 0x01) != 0 ? 1 : 0, (flags & 0x02) != 0 ? 1 : 0,
+      (flags & 0x04) != 0 ? 1 : 0,
+      static_cast<unsigned long>(reply.value7), reply.float2, reply.float3,
+      reply.float4, reply.float5, reply.float6,
+      static_cast<float>(reply.u32_0) * 1.0e-3F, reply.float7, reply.value8,
+      reply.float8, static_cast<float>(reply.u32_1) * 1.0e-6F);
+  writeFormatted(buffer, length, sizeof(buffer));
+}
+
 void formatRuntimeReply(const RuntimeReply& reply) {
-  char buffer[256];
+  char buffer[320];
   int length = 0;
   switch (reply.code) {
     case RuntimeReplyCode::kNone:
@@ -112,11 +157,88 @@ void formatRuntimeReply(const RuntimeReply& reply) {
     case RuntimeReplyCode::kSwingAbortOk:
       writeText("OK swing abort\r\n");
       break;
+    case RuntimeReplyCode::kSwingAlreadyActive:
+      writeText("ERR swing already active\r\n");
+      break;
+    case RuntimeReplyCode::kSwingStartRequiresMotorStopped:
+      writeText("ERR swing start requires motor stopped\r\n");
+      break;
+    case RuntimeReplyCode::kSwingStartRequiresReadyState:
+      writeText("ERR swing start requires motor config, encoder/wheel, calibrated IMU, valid attitude, and clear safety\r\n");
+      break;
+    case RuntimeReplyCode::kSwingStartRequiresLogCapacity:
+      writeText("ERR swing start requires active TWLG recording with capacity for max duration\r\n");
+      break;
+    case RuntimeReplyCode::kSwingStartRejected:
+      writeText("ERR swing start rejected\r\n");
+      break;
+    case RuntimeReplyCode::kSwingStartOk:
+      writeText("OK swing start\r\n");
+      break;
+    case RuntimeReplyCode::kSwingConfigUsageError:
+      writeText("ERR usage: swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n");
+      break;
+    case RuntimeReplyCode::kSwingConfigOk:
+      writeText("OK swing config\r\n");
+      formatSwingStatusPayload(reply);
+      break;
+    case RuntimeReplyCode::kSwingStatus:
+      formatSwingStatusPayload(reply);
+      break;
+    case RuntimeReplyCode::kSwingTransitionEvent: {
+      const auto state = static_cast<triwhirl::SwingIdState>(reply.value0);
+      const auto vertex = static_cast<triwhirl::SwingIdVertex>(reply.value4);
+      const auto reason = static_cast<triwhirl::SwingIdStopReason>(reply.value5);
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "event,swing_id,state=%s,captures=%lu,target=%lu,half_cycle=%lu,vertex=%s,error_deg=%.3f,vq_v=%.3f,reason=%s,fault_mask=0x%08lx\r\n",
+          triwhirl::swingIdStateName(state),
+          static_cast<unsigned long>(reply.value1),
+          static_cast<unsigned long>(reply.value2),
+          static_cast<unsigned long>(reply.value3),
+          triwhirl::swingIdVertexName(vertex), reply.float0, reply.float1,
+          triwhirl::swingIdStopReasonName(reason),
+          static_cast<unsigned long>(reply.u32_0));
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    }
     case RuntimeReplyCode::kTimingResetOk:
       writeText("OK timing reset\r\n");
       break;
+    case RuntimeReplyCode::kTimingProfileOnOk:
+      writeText("OK timing profile on\r\n");
+      break;
+    case RuntimeReplyCode::kTimingProfileOffOk:
+      writeText("OK timing profile off\r\n");
+      break;
     case RuntimeReplyCode::kTimingProfileResetOk:
       writeText("OK timing profile reset\r\n");
+      break;
+    case RuntimeReplyCode::kTimingProfileHeader:
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "timing_profile,enabled=%d,samples=%llu,clock=esp_timer_us\r\n",
+          reply.value0, static_cast<unsigned long long>(reply.wide0));
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kTimingProfileStage: {
+      const double mean_us = reply.wide0 > 0U
+                                 ? static_cast<double>(reply.wide1) /
+                                       static_cast<double>(reply.wide0)
+                                 : 0.0;
+      const auto stage = static_cast<RuntimeTimingProfileStageId>(reply.value0);
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "timing_profile_stage,name=%s,count=%llu,mean_us=%.3f,min_us=%lu,max_us=%lu\r\n",
+          timingProfileStageName(stage),
+          static_cast<unsigned long long>(reply.wide0), mean_us,
+          static_cast<unsigned long>(reply.wide0 > 0U ? reply.u32_0 : 0U),
+          static_cast<unsigned long>(reply.wide0 > 0U ? reply.u32_1 : 0U));
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    }
+    case RuntimeReplyCode::kTimingProfileEnd:
+      writeText("timing_profile_end\r\n");
       break;
     case RuntimeReplyCode::kFaultAlreadyClear:
       writeText("OK fault already clear\r\n");
@@ -133,6 +255,20 @@ void formatRuntimeReply(const RuntimeReply& reply) {
     case RuntimeReplyCode::kTelemetryOffOk:
       writeText("OK telemetry off\r\n");
       break;
+    case RuntimeReplyCode::kSafetyFaultLatched:
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "ERR safety fault latched first=%s mask=0x%08lx; use 'fault status'\r\n",
+          triwhirl::safetyFaultName(static_cast<triwhirl::SafetyFault>(reply.value0)),
+          static_cast<unsigned long>(reply.u32_0));
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kEncoderUnavailable:
+      writeText("ERR encoder read unavailable\r\n");
+      break;
+    case RuntimeReplyCode::kInvalidRuntimeNumeric:
+      writeText("ERR invalid runtime numeric state\r\n");
+      break;
     case RuntimeReplyCode::kInvalidMotorConfig:
       writeText("ERR invalid motor config\r\n");
       break;
@@ -141,6 +277,33 @@ void formatRuntimeReply(const RuntimeReply& reply) {
           buffer, sizeof(buffer),
           "OK motor config pole_pairs=%d sensor_dir=%d offset_rad=%.6f\r\n",
           reply.value0, reply.value1, reply.float0);
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kMotorNotConfigured:
+      writeText("ERR motor is not calibrated/configured\r\n");
+      break;
+    case RuntimeReplyCode::kMotorFocOk:
+      length = std::snprintf(buffer, sizeof(buffer),
+                             "OK motor FOC vq_v=%.6f\r\n", reply.float0);
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kMotorCalibrationEncoderUnavailable:
+      writeText("ERR motor calibrate: encoder read unavailable\r\n");
+      break;
+    case RuntimeReplyCode::kMotorCalibrationStarted:
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "OK motor calibration started amp_v=%.3f e_hz=%.3f turns=%.3f\r\n",
+          reply.float0, reply.float1, reply.float2);
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kFieldStopped:
+      writeText("OK field stopped\r\n");
+      break;
+    case RuntimeReplyCode::kFieldOk:
+      length = std::snprintf(buffer, sizeof(buffer),
+                             "OK field e_hz=%.6f amp_v=%.6f\r\n",
+                             reply.float0, reply.float1);
       writeFormatted(buffer, length, sizeof(buffer));
       break;
     case RuntimeReplyCode::kAttitudeResetFromAccelOk:
@@ -155,6 +318,15 @@ void formatRuntimeReply(const RuntimeReply& reply) {
                              reply.float0);
       writeFormatted(buffer, length, sizeof(buffer));
       break;
+    case RuntimeReplyCode::kImuUnavailable:
+      writeText("ERR imu unavailable\r\n");
+      break;
+    case RuntimeReplyCode::kImuCalibrationStarted:
+      length = std::snprintf(buffer, sizeof(buffer),
+                             "OK imu gyro calibration started samples=%lu\r\n",
+                             static_cast<unsigned long>(reply.u32_0));
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
     case RuntimeReplyCode::kInvalidImuMap:
       writeText("ERR invalid imu map\r\n");
       break;
@@ -164,6 +336,58 @@ void formatRuntimeReply(const RuntimeReply& reply) {
                              reply.value0, reply.value1, reply.value2,
                              reply.value3, reply.value4, reply.value5);
       writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kLogPrepareRequiresMotorStopped:
+      writeText("ERR log prepare requires motor stopped\r\n");
+      break;
+    case RuntimeReplyCode::kLogPrepareSecondsInvalid:
+      writeText("ERR log prepare seconds must be > 0\r\n");
+      break;
+    case RuntimeReplyCode::kLogPrepareDurationOutOfRange:
+      writeText("ERR log prepare duration out of range\r\n");
+      break;
+    case RuntimeReplyCode::kLogPrepareRejected:
+      writeText("ERR log prepare rejected; check log status/capacity\r\n");
+      break;
+    case RuntimeReplyCode::kLogPrepareOk:
+      length = std::snprintf(
+          buffer, sizeof(buffer),
+          "OK log prepare records=%lu seconds=%.3f; erase in background\r\n",
+          static_cast<unsigned long>(reply.u32_0), reply.float0);
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kLogStartRequiresReady:
+      writeText("ERR log start requires state=ready\r\n");
+      break;
+    case RuntimeReplyCode::kLogStartOk:
+      writeText("OK log start sample_us=1000 record_bytes=32\r\n");
+      break;
+    case RuntimeReplyCode::kLogCriticalOnOk:
+      writeText("OK log critical on; flash programming paused\r\n");
+      break;
+    case RuntimeReplyCode::kLogCriticalOffOk:
+      writeText("OK log critical off; flash programming resumed\r\n");
+      break;
+    case RuntimeReplyCode::kLogStopRejected:
+      writeText("ERR log stop rejected; check log status\r\n");
+      break;
+    case RuntimeReplyCode::kLogStopOk:
+      writeText("OK log stopping; SRAM is draining and header will finalize\r\n");
+      break;
+    case RuntimeReplyCode::kLogDumpAlreadyActive:
+      writeText("ERR log dump already active\r\n");
+      break;
+    case RuntimeReplyCode::kLogDumpRequiresComplete:
+      writeText("ERR log dump requires state=complete\r\n");
+      break;
+    case RuntimeReplyCode::kLogDumpRequiresMotorStopped:
+      writeText("ERR log dump requires motor stopped\r\n");
+      break;
+    case RuntimeReplyCode::kLogDumpRequiresBleSubscription:
+      writeText("ERR log dump requires BLE notify subscription\r\n");
+      break;
+    case RuntimeReplyCode::kLogDumpTaskFailed:
+      writeText("ERR log dump task creation failed\r\n");
       break;
   }
 
