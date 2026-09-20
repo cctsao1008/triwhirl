@@ -6,7 +6,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
-#include "runtime_reply.hpp"
 #include "triwhirl/attitude_estimator.hpp"
 #include "triwhirl/board.hpp"
 #include "triwhirl/drivers/as5600.hpp"
@@ -110,9 +109,6 @@ struct ControlTimingStats {
   std::int64_t previous_start_us = 0;
 };
 
-using RuntimeEventSinkFn = bool (*)(void* context,
-                                    const triwhirl::runtime::RuntimeReply& event);
-
 extern As5600 encoder;
 extern Mpu6050 imu;
 extern WheelKinematics wheel_kinematics;
@@ -159,11 +155,6 @@ extern std::uint32_t console_tx_dropped_bytes;
 extern volatile bool log_critical_window;
 extern volatile bool binary_dump_active;
 extern TaskHandle_t log_dump_task;
-
-// Installs a non-blocking structured event sink after supervisor egress is
-// initialized. State/control helpers publish asynchronous events through this
-// callback and never wait for protocol output.
-void setRuntimeEventSink(RuntimeEventSinkFn sink, void* context);
 
 void consoleWriteBytes(const char* data, std::size_t length);
 void consoleWrite(const char* text);
