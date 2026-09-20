@@ -17,6 +17,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "realtime_release.hpp"
 
 namespace {
 
@@ -462,7 +463,7 @@ void triwhirlParallelControlTask(void*) {
       recordRuntimeTimingStage(RuntimeTimingStage::kLoop, start_us, end_us);
     }
     updateTimingStats(start_us, end_us);
-    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1));
+    triwhirl::runtime::waitForRealtimeRelease(&last_wake, pdMS_TO_TICKS(1));
   }
 }
 
