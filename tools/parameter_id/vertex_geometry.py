@@ -11,10 +11,16 @@ if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
 from triwhirl_tool.geometry import (
+    UPRIGHT_HALF_PERIOD_DEG,
+    UPRIGHT_HALF_PERIOD_RAD,
+    UPRIGHT_PERIOD_DEG,
+    UPRIGHT_PERIOD_RAD,
     VERTEX_IDS,
     VertexMatch,
     angle_diff_deg,
     classify_vertex_deg,
+    periodic_upright_error_deg,
+    periodic_upright_error_rad,
     vertex_centers_deg,
     wrap_deg,
 )
@@ -22,8 +28,14 @@ from triwhirl_tool.geometry import (
 __all__ = [
     "VERTEX_IDS",
     "VertexMatch",
+    "UPRIGHT_PERIOD_DEG",
+    "UPRIGHT_HALF_PERIOD_DEG",
+    "UPRIGHT_PERIOD_RAD",
+    "UPRIGHT_HALF_PERIOD_RAD",
     "wrap_deg",
     "angle_diff_deg",
+    "periodic_upright_error_deg",
+    "periodic_upright_error_rad",
     "vertex_centers_deg",
     "classify_vertex_deg",
 ]
