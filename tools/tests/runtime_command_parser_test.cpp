@@ -23,7 +23,11 @@ int main() {
   expectType("motor stop", RuntimeCommandType::kMotorStop);
   expectType("stop", RuntimeCommandType::kStop);
   expectType("swing abort", RuntimeCommandType::kSwingAbort);
+  expectType("swing start", RuntimeCommandType::kSwingStart);
   expectType("timing reset", RuntimeCommandType::kTimingReset);
+  expectType("timing profile on", RuntimeCommandType::kTimingProfileOn);
+  expectType("timing profile off", RuntimeCommandType::kTimingProfileOff);
+  expectType("timing profile reset", RuntimeCommandType::kTimingProfileReset);
   expectType("fault clear", RuntimeCommandType::kFaultClear);
   expectType("telemetry on", RuntimeCommandType::kTelemetryOn);
   expectType("telemetry off", RuntimeCommandType::kTelemetryOff);
@@ -112,6 +116,25 @@ int main() {
   }
 
   {
+    const auto parsed = parseRuntimeCommand(
+        "swing config 24 0.4 0.8 5 9 14 12.5 0.2 -1 68 20");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kSwingConfig);
+    const auto& config = parsed.command.payload.swing_config;
+    assert(config.target_captures == 24U);
+    assert(std::fabs(config.pump_v_low - 0.4F) < 1.0e-6F);
+    assert(std::fabs(config.pump_v_high - 0.8F) < 1.0e-6F);
+    assert(std::fabs(config.capture_deg - 5.0F) < 1.0e-6F);
+    assert(std::fabs(config.probe_exit_deg - 9.0F) < 1.0e-6F);
+    assert(std::fabs(config.rearm_deg - 14.0F) < 1.0e-6F);
+    assert(config.probe_duration_us == 12500U);
+    assert(std::fabs(config.rate_switch_rad_s - 0.2F) < 1.0e-6F);
+    assert(config.pump_polarity == -1);
+    assert(std::fabs(config.vertex_a_deg - 68.0F) < 1.0e-6F);
+    assert(config.max_duration_us == 20000000U);
+  }
+
+  {
     const auto parsed = parseRuntimeCommand("motor vq");
     assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
     assert(parsed.error != nullptr);
@@ -134,6 +157,22 @@ int main() {
     const auto parsed = parseRuntimeCommand("field 1.0");
     assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
     assert(parsed.error != nullptr);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("swing config 24 0.4 0.8");
+    assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
+    assert(parsed.error != nullptr);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("swing status");
+    assert(parsed.status == RuntimeCommandParseStatus::kNotMatched);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("timing profile status");
+    assert(parsed.status == RuntimeCommandParseStatus::kNotMatched);
   }
 
   {
