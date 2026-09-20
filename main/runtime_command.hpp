@@ -7,12 +7,10 @@ namespace triwhirl::runtime {
 
 // UART development CLI and BLE GATT ingress are parsed/validated in the
 // supervisor domain. Realtime receives only this fixed-size typed record.
+// Snapshot/transport-owned read-only commands are handled entirely on Core 0
+// and therefore are intentionally absent from this enum.
 enum class RuntimeCommandType : std::uint8_t {
   kNone = 0,
-  kStatus,
-  kMotorStatus,
-  kImuStatus,
-  kLogStatus,
   kSwingStatus,
   kTimingProfileStatus,
   kMotorStop,
