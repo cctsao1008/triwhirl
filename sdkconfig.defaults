@@ -11,6 +11,11 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 
+# Do not permit dynamic CPU/APB frequency scaling or automatic light sleep in
+# the realtime firmware. ESP-IDF documents extra interrupt latency when power
+# management is enabled; TriWhirl prefers fixed clocks and deterministic timing.
+# CONFIG_PM_ENABLE is not set
+
 # ESP32-WROOM-32 module flash geometry and dedicated raw binary logger region.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
