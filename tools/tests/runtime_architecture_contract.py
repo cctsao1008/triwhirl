@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-"""Fail CI if runtime composition debt grows during issue #32/A2.
-
-The active firmware still has one explicitly tolerated source-inclusion chain:
-
-    runtime_control.cpp -> runtime_main.cpp -> app_main.cpp
-
-and five symbol-renaming shims in runtime_main.cpp. A2 is removing those pieces
-incrementally. Until they are gone, CI prevents new .cpp includes, new
-symbol-renaming interception, a second application-entry owner, queue/task
-mechanics from leaking back into realtime control, UART development ingress or
-BLE GATT payload draining from returning to Core 1, migrated read-only
-diagnostics from falling back to live realtime formatting, or migrated mutating
-commands from regressing to strings.
-"""
+"""Fail CI if runtime composition debt grows during issue #32/A2."""
 
 from __future__ import annotations
 
@@ -55,7 +42,7 @@ SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS = (
     "readLatestRuntimeSnapshot(",
 )
 
-SUPERVISOR_REQUIRED_TYPED_COMMANDS = (
+PARSER_REQUIRED_TYPED_COMMANDS = (
     'std::strcmp(line, "motor stop")',
     'std::strcmp(line, "stop")',
     'std::strcmp(line, "swing abort")',
@@ -78,6 +65,11 @@ SUPERVISOR_REQUIRED_TYPED_COMMANDS = (
     "RuntimeCommandType::kField",
     "RuntimeCommandType::kAttitudeReset",
     "RuntimeCommandType::kImuCalibrate",
+)
+
+SUPERVISOR_REQUIRED_TYPED_BOUNDARY = (
+    "parseRuntimeCommand(",
+    "RuntimeCommandParseStatus::kCommand",
     "SupervisorInputEventType::kRuntimeCommand",
     "uart_development_input",
     "ble_gatt_input",
@@ -111,6 +103,12 @@ def fail(message: str) -> None:
     raise SystemExit(f"runtime architecture contract: {message}")
 
 
+def require_tokens(text: str, tokens: tuple[str, ...], message: str) -> None:
+    missing = [token for token in tokens if token not in text]
+    if missing:
+        fail(f"{message}: {missing}")
+
+
 def main() -> None:
     cpp_files = sorted(MAIN.glob("*.cpp"))
     if not cpp_files:
@@ -122,13 +120,10 @@ def main() -> None:
 
     for path in cpp_files:
         text = path.read_text(encoding="utf-8")
-
         for included in CPP_INCLUDE_RE.findall(text):
             cpp_includes.add((path.name, included))
-
         for symbol, replacement in RENAME_DEFINE_RE.findall(text):
             renaming_defines.add((path.name, symbol, replacement))
-
         if APP_MAIN_RE.search(text):
             app_main_sources.append(path.name)
 
@@ -149,49 +144,25 @@ def main() -> None:
         token for token in CONTROL_FORBIDDEN_QUEUE_MECHANICS if token in control_text
     ]
     if leaked_queue_mechanics:
-        fail(
-            "encoder/supervisor queue mechanics leaked into runtime_control.cpp: "
-            f"{leaked_queue_mechanics}"
-        )
+        fail(f"queue mechanics leaked into runtime_control.cpp: {leaked_queue_mechanics}")
 
     leaked_supervisor_io = [
         token for token in CONTROL_FORBIDDEN_SUPERVISOR_IO if token in control_text
     ]
     if leaked_supervisor_io:
-        fail(
-            "UART development/BLE GATT ingress leaked into runtime_control.cpp: "
-            f"{leaked_supervisor_io}"
-        )
+        fail(f"UART development/BLE GATT ingress leaked into runtime_control.cpp: {leaked_supervisor_io}")
 
     supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
-    missing_snapshot_commands = [
-        token
-        for token in SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS
-        if token not in supervisor_text
-    ]
-    if missing_snapshot_commands:
-        fail(
-            "snapshot-backed read-only diagnostics regressed: "
-            f"{missing_snapshot_commands}"
-        )
+    parser_text = (MAIN / "runtime_command_parser.cpp").read_text(encoding="utf-8")
 
-    missing_typed_supervisor = [
-        token for token in SUPERVISOR_REQUIRED_TYPED_COMMANDS if token not in supervisor_text
-    ]
-    if missing_typed_supervisor:
-        fail(
-            "typed supervisor command parsing regressed: "
-            f"{missing_typed_supervisor}"
-        )
-
-    missing_typed_control = [
-        token for token in CONTROL_REQUIRED_TYPED_COMMANDS if token not in control_text
-    ]
-    if missing_typed_control:
-        fail(
-            "typed realtime command execution regressed: "
-            f"{missing_typed_control}"
-        )
+    require_tokens(supervisor_text, SUPERVISOR_REQUIRED_SNAPSHOT_COMMANDS,
+                   "snapshot-backed read-only diagnostics regressed")
+    require_tokens(supervisor_text, SUPERVISOR_REQUIRED_TYPED_BOUNDARY,
+                   "supervisor typed-command boundary regressed")
+    require_tokens(parser_text, PARSER_REQUIRED_TYPED_COMMANDS,
+                   "Core0 typed command parser regressed")
+    require_tokens(control_text, CONTROL_REQUIRED_TYPED_COMMANDS,
+                   "typed realtime command execution regressed")
 
     print("runtime architecture contract: PASS")
     print(f"  cpp_includes={sorted(cpp_includes)}")
@@ -201,6 +172,7 @@ def main() -> None:
     print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
     print("  supervisor_snapshot_diagnostics=attitude,fault")
     print("  supervisor_transports=uart_dev,ble_gatt")
+    print("  command_parser=explicit_core0_service")
     print("  typed_runtime_commands=motor_stop,stop,swing_abort,timing_reset,fault_clear,telemetry_on,telemetry_off,motor_vq,field,attitude_reset,imu_calibrate")
 
 
