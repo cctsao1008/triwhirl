@@ -31,9 +31,6 @@ void encoderAcquisitionTask(void*) {
     result.sequence = request.sequence;
     result.ok = encoder_read_fn != nullptr &&
                 encoder_read_fn(encoder_read_context, &result.raw_count);
-    if (!result.ok) {
-      ++stats.read_failures;
-    }
     xQueueOverwrite(result_queue, &result);
   }
 }
@@ -96,6 +93,9 @@ bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
   do {
     while (xQueueReceive(result_queue, &candidate, 0) == pdTRUE) {
       if (candidate.sequence == expected_sequence) {
+        if (!candidate.ok) {
+          ++stats.read_failures;
+        }
         *result = candidate;
         return true;
       }
