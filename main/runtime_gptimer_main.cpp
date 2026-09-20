@@ -93,7 +93,8 @@ void triwhirlRealtimeDelayUntil(TickType_t* const previous_wake,
                                 const TickType_t increment) {
   if (!initRealtimeReleaseTimer()) {
     // Keep the established scheduler as a safe fallback if GPTimer setup ever
-    // fails on a different board/configuration.
+    // fails on a different board/configuration. At this point the original
+    // FreeRTOS macro is still in scope.
     vTaskDelayUntil(previous_wake, increment);
     return;
   }
@@ -106,8 +107,11 @@ void triwhirlRealtimeDelayUntil(TickType_t* const previous_wake,
 
 }  // namespace
 
-// All FreeRTOS/task headers are already included above, so this replacement
-// affects only runtime call sites rather than the FreeRTOS API declarations.
+// FreeRTOS defines vTaskDelayUntil as a function-like macro. Remove that public
+// macro before installing the translation-unit-local interception; otherwise
+// -Werror reports a macro redefinition. The fallback above was compiled while
+// the original FreeRTOS macro was still active.
+#undef vTaskDelayUntil
 #define vTaskDelayUntil triwhirlRealtimeDelayUntil
 #include "runtime_parallel_main.cpp"
 #undef vTaskDelayUntil
