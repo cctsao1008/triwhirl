@@ -63,6 +63,10 @@ SUPERVISOR_REQUIRED_TYPED_COMMANDS = (
     'std::strcmp(line, "fault clear")',
     'std::strcmp(line, "telemetry on")',
     'std::strcmp(line, "telemetry off")',
+    'commandArguments(line, "motor vq"',
+    'commandArguments(line, "field"',
+    'commandArguments(line, "attitude reset"',
+    'commandArguments(line, "imu calibrate"',
     "RuntimeCommandType::kMotorStop",
     "RuntimeCommandType::kStop",
     "RuntimeCommandType::kSwingAbort",
@@ -70,6 +74,10 @@ SUPERVISOR_REQUIRED_TYPED_COMMANDS = (
     "RuntimeCommandType::kFaultClear",
     "RuntimeCommandType::kTelemetryOn",
     "RuntimeCommandType::kTelemetryOff",
+    "RuntimeCommandType::kMotorVq",
+    "RuntimeCommandType::kField",
+    "RuntimeCommandType::kAttitudeReset",
+    "RuntimeCommandType::kImuCalibrate",
     "SupervisorInputEventType::kRuntimeCommand",
     "uart_development_input",
     "ble_gatt_input",
@@ -85,6 +93,10 @@ CONTROL_REQUIRED_TYPED_COMMANDS = (
     "RuntimeCommandType::kFaultClear",
     "RuntimeCommandType::kTelemetryOn",
     "RuntimeCommandType::kTelemetryOff",
+    "RuntimeCommandType::kMotorVq",
+    "RuntimeCommandType::kField",
+    "RuntimeCommandType::kAttitudeReset",
+    "RuntimeCommandType::kImuCalibrate",
 )
 
 CPP_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+\.cpp)"', re.MULTILINE)
@@ -189,7 +201,7 @@ def main() -> None:
     print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
     print("  supervisor_snapshot_diagnostics=attitude,fault")
     print("  supervisor_transports=uart_dev,ble_gatt")
-    print("  typed_runtime_commands=motor_stop,stop,swing_abort,timing_reset,fault_clear,telemetry_on,telemetry_off")
+    print("  typed_runtime_commands=motor_stop,stop,swing_abort,timing_reset,fault_clear,telemetry_on,telemetry_off,motor_vq,field,attitude_reset,imu_calibrate")
 
 
 if __name__ == "__main__":
