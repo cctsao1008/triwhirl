@@ -243,10 +243,8 @@ void consumeBytes(const std::uint8_t* input, const std::size_t received,
         state.line[state.length] = '\0';
         if (!handleSupervisorReadOnlyCommand(state.line) &&
             !handleTypedRuntimeCommand(state.line)) {
-          SupervisorInputEvent event{};
-          event.type = SupervisorInputEventType::kCommand;
-          std::memcpy(event.line, state.line, state.length + 1U);
-          publishEvent(event);
+          writeText("ERR unknown command\r\n");
+          publishSupervisorHandled();
         }
         state.length = 0U;
       }
