@@ -2,6 +2,7 @@
 
 #include "driver/i2c_master.h"
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
 
 namespace triwhirl::runtime {
 
