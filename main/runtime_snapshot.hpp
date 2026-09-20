@@ -21,6 +21,7 @@ struct RuntimeSnapshot {
   std::uint32_t safety_first_fault = 0U;
 
   bool telemetry_enabled = false;
+  bool swing_active = false;
 
   std::uint32_t timing_target_us = 0U;
   std::uint32_t timing_hard_period_us = 0U;
