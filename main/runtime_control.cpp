@@ -1,39 +1,29 @@
 // Realtime control runtime for the established supervisor/swing path.
 //
-// The control task dispatches AS5600 acquisition to core 0 while core 1
-// performs the blocking MPU6050 transaction and attitude update. The sensors
-// use independent ESP32 I2C controllers, so their bus time can overlap without
-// moving realtime control authority off the ESP32.
+// Core 1 owns the 1 kHz control iteration. AS5600 acquisition is delegated to
+// a dedicated Core-0 worker through runtime_encoder_acquisition; Core 1 performs
+// the blocking MPU6050 transaction and attitude update in parallel. The two
+// sensors use independent ESP32 I2C controllers.
 
 #include <cstdint>
 
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "runtime_control.hpp"
+#include "runtime_encoder_acquisition.hpp"
 #include "runtime_release.hpp"
 
 // runtime_main.cpp still owns the supervisor/swing runtime in this
-// behavior-preserving refactor slice. Task selection, I2C affinity, and the
-// GPTimer scheduler are explicit interfaces; the remaining composition debt is
-// the source inclusion itself.
+// behavior-preserving refactor slice. Task selection, I2C affinity, encoder
+// acquisition, and the GPTimer scheduler are explicit interfaces; the remaining
+// composition debt is the source inclusion itself.
 #include "runtime_main.cpp"
 
 static_assert(triwhirl::runtime::kRealtimeReleasePeriodUs == kControlPeriodUs,
               "GPTimer release period must match control period");
 
 namespace {
-
-struct EncoderAcquisitionRequest {
-  std::uint32_t sequence = 0U;
-};
-
-struct EncoderAcquisitionResult {
-  std::uint32_t sequence = 0U;
-  std::uint16_t raw_count = 0U;
-  bool ok = false;
-};
 
 struct LocalTimingStats {
   std::uint64_t count = 0U;
@@ -56,17 +46,7 @@ struct ControlPeriodHistogram {
 constexpr std::uint32_t kEncoderJoinBudgetUs = 100U;
 constexpr std::uint32_t kEncoderConsecutiveMissLimit = 2U;
 
-QueueHandle_t encoder_request_queue = nullptr;
-QueueHandle_t encoder_result_queue = nullptr;
-TaskHandle_t encoder_acquisition_task = nullptr;
-std::uint32_t encoder_request_sequence = 0U;
-
-std::uint64_t encoder_acq_requests = 0U;
 std::uint64_t encoder_acq_completions = 0U;
-std::uint64_t encoder_acq_dispatch_failures = 0U;
-std::uint64_t encoder_acq_read_failures = 0U;
-std::uint64_t encoder_acq_stale_results = 0U;
-std::uint64_t encoder_acq_join_timeouts = 0U;
 std::uint32_t encoder_acq_consecutive_misses = 0U;
 std::uint32_t encoder_acq_max_consecutive_misses = 0U;
 
@@ -76,12 +56,8 @@ std::int64_t control_previous_start_us = 0;
 bool control_profile_active = false;
 
 void resetControlProfileStats() {
-  encoder_acq_requests = 0U;
+  triwhirl::runtime::resetEncoderAcquisitionStats();
   encoder_acq_completions = 0U;
-  encoder_acq_dispatch_failures = 0U;
-  encoder_acq_read_failures = 0U;
-  encoder_acq_stale_results = 0U;
-  encoder_acq_join_timeouts = 0U;
   encoder_acq_consecutive_misses = 0U;
   encoder_acq_max_consecutive_misses = 0U;
   attitude_math_timing = {};
@@ -134,6 +110,7 @@ void recordControlPeriod(const std::int64_t start_us) {
 }
 
 void printControlProfileSummary() {
+  const auto encoder_stats = triwhirl::runtime::encoderAcquisitionStats();
   const double attitude_mean_us =
       attitude_math_timing.count > 0U
           ? static_cast<double>(attitude_math_timing.total_us) /
@@ -141,12 +118,12 @@ void printControlProfileSummary() {
           : 0.0;
   consolePrintf(
       "parallel_profile,requests=%llu,completions=%llu,dispatch_failures=%llu,read_failures=%llu,stale_results=%llu,join_timeouts=%llu,max_consecutive_misses=%lu,attitude_count=%llu,attitude_mean_us=%.3f,attitude_min_us=%lu,attitude_max_us=%lu,period_lt900=%llu,period_900_949=%llu,period_950_999=%llu,period_1000_1049=%llu,period_1050_1099=%llu,period_1100_1249=%llu,period_1250_1499=%llu,period_ge1500=%llu\r\n",
-      static_cast<unsigned long long>(encoder_acq_requests),
+      static_cast<unsigned long long>(encoder_stats.requests),
       static_cast<unsigned long long>(encoder_acq_completions),
-      static_cast<unsigned long long>(encoder_acq_dispatch_failures),
-      static_cast<unsigned long long>(encoder_acq_read_failures),
-      static_cast<unsigned long long>(encoder_acq_stale_results),
-      static_cast<unsigned long long>(encoder_acq_join_timeouts),
+      static_cast<unsigned long long>(encoder_stats.dispatch_failures),
+      static_cast<unsigned long long>(encoder_stats.read_failures),
+      static_cast<unsigned long long>(encoder_stats.stale_results),
+      static_cast<unsigned long long>(encoder_stats.join_timeouts),
       static_cast<unsigned long>(encoder_acq_max_consecutive_misses),
       static_cast<unsigned long long>(attitude_math_timing.count),
       attitude_mean_us,
@@ -174,54 +151,14 @@ void noteEncoderMiss() {
   }
 }
 
-void encoderAcquisitionTask(void*) {
-  EncoderAcquisitionRequest request{};
-  while (true) {
-    if (xQueueReceive(encoder_request_queue, &request, portMAX_DELAY) != pdTRUE) {
-      continue;
-    }
-
-    EncoderAcquisitionResult result{};
-    result.sequence = request.sequence;
-    result.ok = encoder.readRawAngle(&result.raw_count);
-    xQueueOverwrite(encoder_result_queue, &result);
-  }
+bool readEncoderRaw(void*, std::uint16_t* const raw_count) {
+  return encoder.readRawAngle(raw_count);
 }
 
-bool initParallelEncoderAcquisition() {
-  encoder_request_queue = xQueueCreate(1U, sizeof(EncoderAcquisitionRequest));
-  encoder_result_queue = xQueueCreate(1U, sizeof(EncoderAcquisitionResult));
-  if (encoder_request_queue == nullptr || encoder_result_queue == nullptr) {
-    return false;
-  }
-
-  return xTaskCreatePinnedToCore(
-             encoderAcquisitionTask, "triwhirl_encoder", 4096, nullptr,
-             configMAX_PRIORITIES - 1, &encoder_acquisition_task, 0) == pdPASS;
-}
-
-bool dispatchEncoderAcquisition(std::uint32_t* const sequence) {
-  if (sequence == nullptr || encoder_request_queue == nullptr ||
-      encoder_acquisition_task == nullptr) {
-    return false;
-  }
-
-  EncoderAcquisitionRequest request{};
-  request.sequence = ++encoder_request_sequence;
-  if (xQueueSend(encoder_request_queue, &request, 0) != pdTRUE) {
-    ++encoder_acq_dispatch_failures;
-    return false;
-  }
-
-  ++encoder_acq_requests;
-  *sequence = request.sequence;
-  return true;
-}
-
-bool commitEncoderResult(const EncoderAcquisitionResult& result,
-                         const std::uint32_t sample_time_us) {
+bool commitEncoderResult(
+    const triwhirl::runtime::EncoderAcquisitionResult& result,
+    const std::uint32_t sample_time_us) {
   if (!result.ok) {
-    ++encoder_acq_read_failures;
     noteEncoderMiss();
     return false;
   }
@@ -233,33 +170,21 @@ bool commitEncoderResult(const EncoderAcquisitionResult& result,
   return true;
 }
 
-bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
-                               const std::uint32_t sample_time_us) {
-  if (encoder_result_queue == nullptr) {
+bool collectAndCommitEncoder(const std::uint32_t expected_sequence,
+                             const std::uint32_t sample_time_us) {
+  triwhirl::runtime::EncoderAcquisitionResult result{};
+  if (!triwhirl::runtime::collectEncoderAcquisition(
+          expected_sequence, kEncoderJoinBudgetUs, &result)) {
     noteEncoderMiss();
     return false;
   }
-
-  const std::int64_t deadline_us =
-      esp_timer_get_time() + static_cast<std::int64_t>(kEncoderJoinBudgetUs);
-  EncoderAcquisitionResult result{};
-
-  do {
-    while (xQueueReceive(encoder_result_queue, &result, 0) == pdTRUE) {
-      if (result.sequence == expected_sequence) {
-        return commitEncoderResult(result, sample_time_us);
-      }
-      ++encoder_acq_stale_results;
-    }
-  } while (esp_timer_get_time() < deadline_us);
-
-  ++encoder_acq_join_timeouts;
-  noteEncoderMiss();
-  return false;
+  return commitEncoderResult(result, sample_time_us);
 }
 
 void realtimeControlTaskImpl(void*) {
-  if (!initParallelEncoderAcquisition()) {
+  if (!triwhirl::runtime::initEncoderAcquisition(
+          readEncoderRaw, nullptr, 0,
+          static_cast<unsigned>(configMAX_PRIORITIES - 1))) {
     safety_latch.trip(SafetyFault::kStartup);
     stopMotor();
     consoleWrite("FATAL fault=startup parallel encoder task creation failed\r\n");
@@ -286,7 +211,7 @@ void realtimeControlTaskImpl(void*) {
 
     std::uint32_t encoder_sequence = 0U;
     const bool encoder_dispatched =
-        dispatchEncoderAcquisition(&encoder_sequence);
+        triwhirl::runtime::dispatchEncoderAcquisition(&encoder_sequence);
 
     const std::int64_t imu_begin_us = esp_timer_get_time();
     const bool imu_sampled = sampleImu();
@@ -305,7 +230,7 @@ void realtimeControlTaskImpl(void*) {
 
     const std::int64_t encoder_join_begin_us = imu_end_us;
     if (encoder_dispatched) {
-      collectEncoderAcquisition(encoder_sequence, loop_us);
+      collectAndCommitEncoder(encoder_sequence, loop_us);
     } else {
       noteEncoderMiss();
     }
