@@ -55,9 +55,12 @@ PARSER_REQUIRED_TYPED_COMMANDS = (
     'std::strcmp(line, "telemetry on")',
     'std::strcmp(line, "telemetry off")',
     'commandArguments(line, "motor vq"',
+    'commandArguments(line, "motor config"',
+    'commandArguments(line, "motor calibrate"',
     'commandArguments(line, "field"',
     'commandArguments(line, "attitude reset"',
     'commandArguments(line, "imu calibrate"',
+    'commandArguments(line, "imu map"',
     "RuntimeCommandType::kMotorStop",
     "RuntimeCommandType::kStop",
     "RuntimeCommandType::kSwingAbort",
@@ -66,9 +69,12 @@ PARSER_REQUIRED_TYPED_COMMANDS = (
     "RuntimeCommandType::kTelemetryOn",
     "RuntimeCommandType::kTelemetryOff",
     "RuntimeCommandType::kMotorVq",
+    "RuntimeCommandType::kMotorConfig",
+    "RuntimeCommandType::kMotorCalibrate",
     "RuntimeCommandType::kField",
     "RuntimeCommandType::kAttitudeReset",
     "RuntimeCommandType::kImuCalibrate",
+    "RuntimeCommandType::kImuMap",
 )
 
 SUPERVISOR_REQUIRED_TYPED_BOUNDARY = (
@@ -90,17 +96,23 @@ CONTROL_REQUIRED_TYPED_COMMANDS = (
     "RuntimeCommandType::kTelemetryOn",
     "RuntimeCommandType::kTelemetryOff",
     "RuntimeCommandType::kMotorVq",
+    "RuntimeCommandType::kMotorConfig",
+    "RuntimeCommandType::kMotorCalibrate",
     "RuntimeCommandType::kField",
     "RuntimeCommandType::kAttitudeReset",
     "RuntimeCommandType::kImuCalibrate",
+    "RuntimeCommandType::kImuMap",
 )
 
 PARSER_TEST_REQUIRED_TOKENS = (
     'expectType("motor stop", RuntimeCommandType::kMotorStop)',
     'parseRuntimeCommand("motor vq -0.625")',
+    'parseRuntimeCommand("motor config 7 -1 1.25")',
+    'parseRuntimeCommand("motor calibrate 0.9 0.7 6")',
     'parseRuntimeCommand("field 3.5 0.8")',
     'parseRuntimeCommand("attitude reset -1.25")',
     'parseRuntimeCommand("imu calibrate 750")',
+    'parseRuntimeCommand("imu map 0 1 2 1 -1 1")',
     'RuntimeCommandParseStatus::kUsageError',
     'RuntimeCommandParseStatus::kNotMatched',
 )
@@ -194,7 +206,7 @@ def main() -> None:
     print("  supervisor_transports=uart_dev,ble_gatt")
     print("  command_parser=explicit_core0_service")
     print("  command_parser_contract_test=present")
-    print("  typed_runtime_commands=motor_stop,stop,swing_abort,timing_reset,fault_clear,telemetry_on,telemetry_off,motor_vq,field,attitude_reset,imu_calibrate")
+    print("  typed_runtime_commands=motor_stop,stop,swing_abort,timing_reset,fault_clear,telemetry_on,telemetry_off,motor_vq,motor_config,motor_calibrate,field,attitude_reset,imu_calibrate,imu_map")
 
 
 if __name__ == "__main__":
