@@ -1,5 +1,5 @@
 // Transitional runtime integration for the firmware-owned swing-identification
-// experiment.  Keep the established bring-up runtime intact while #31 is
+// experiment. Keep the established bring-up runtime intact while #31 is
 // validated on hardware; the legacy app_main symbol is renamed inside this
 // translation unit, and the real app_main below adds the swing supervisor.
 #define app_main triwhirl_legacy_app_main
@@ -18,6 +18,8 @@ using triwhirl::SwingIdRunner;
 using triwhirl::SwingIdState;
 using triwhirl::SwingIdStopReason;
 using triwhirl::SwingIdVertex;
+
+constexpr std::uint32_t kSupervisorConsolePollPeriodUs = 5000U;
 
 struct SwingEvent {
   SwingIdOutput output{};
@@ -54,6 +56,7 @@ QueueHandle_t swing_event_queue = nullptr;
 std::uint32_t swing_event_drops = 0U;
 bool swing_log_finalize_pending = false;
 RuntimeTimingProfile runtime_timing_profile{};
+std::uint32_t last_supervisor_console_poll_us = 0U;
 
 void printSwingHelp();
 
@@ -81,10 +84,28 @@ const char* runtimeTimingStageName(const RuntimeTimingStage stage) {
   return "unknown";
 }
 
+void printTimingProfileStage(const char* const name,
+                             const std::uint64_t count,
+                             const std::uint64_t total_us,
+                             const std::uint32_t min_us,
+                             const std::uint32_t max_us) {
+  const double mean_us = count > 0U
+                             ? static_cast<double>(total_us) /
+                                   static_cast<double>(count)
+                             : 0.0;
+  consolePrintf(
+      "timing_profile_stage,name=%s,count=%llu,mean_us=%.3f,min_us=%lu,max_us=%lu\r\n",
+      name, static_cast<unsigned long long>(count), mean_us,
+      static_cast<unsigned long>(count > 0U ? min_us : 0U),
+      static_cast<unsigned long>(count > 0U ? max_us : 0U));
+}
+
 void resetRuntimeTimingProfile() {
   const bool enabled = runtime_timing_profile.enabled;
   runtime_timing_profile = {};
   runtime_timing_profile.enabled = enabled;
+  encoder.resetTimingProfile();
+  imu.resetTimingProfile();
 }
 
 void recordRuntimeTimingStage(const RuntimeTimingStage stage,
@@ -120,18 +141,29 @@ void printRuntimeTimingProfile() {
        index < static_cast<std::size_t>(RuntimeTimingStage::kCount); ++index) {
     const RuntimeTimingStage stage = static_cast<RuntimeTimingStage>(index);
     const RuntimeTimingStageStats& stats = runtime_timing_profile.stages[index];
-    const double mean_us = stats.count > 0U
-                               ? static_cast<double>(stats.total_us) /
-                                     static_cast<double>(stats.count)
-                               : 0.0;
-    const std::uint32_t min_us = stats.count > 0U ? stats.min_us : 0U;
-    consolePrintf(
-        "timing_profile_stage,name=%s,count=%llu,mean_us=%.3f,min_us=%lu,max_us=%lu\r\n",
-        runtimeTimingStageName(stage),
-        static_cast<unsigned long long>(stats.count), mean_us,
-        static_cast<unsigned long>(min_us),
-        static_cast<unsigned long>(stats.max_us));
+    printTimingProfileStage(runtimeTimingStageName(stage), stats.count,
+                            stats.total_us, stats.min_us, stats.max_us);
   }
+
+  const auto encoder_timing = encoder.timingProfile();
+  printTimingProfileStage("encoder_i2c_raw", encoder_timing.raw_reads,
+                          encoder_timing.raw_total_us,
+                          encoder_timing.raw_min_us,
+                          encoder_timing.raw_max_us);
+  printTimingProfileStage("encoder_i2c_status", encoder_timing.status_reads,
+                          encoder_timing.status_total_us,
+                          encoder_timing.status_min_us,
+                          encoder_timing.status_max_us);
+
+  const auto imu_timing = imu.timingProfile();
+  printTimingProfileStage("mpu_i2c", imu_timing.sample_reads,
+                          imu_timing.transfer_total_us,
+                          imu_timing.transfer_min_us,
+                          imu_timing.transfer_max_us);
+  printTimingProfileStage("mpu_decode", imu_timing.sample_reads,
+                          imu_timing.decode_total_us,
+                          imu_timing.decode_min_us,
+                          imu_timing.decode_max_us);
   consoleWrite("timing_profile_end\r\n");
 }
 
@@ -157,13 +189,19 @@ void handleRuntimeTimingProfileCommand(char* line) {
   }
   if (std::strcmp(action, "on") == 0) {
     runtime_timing_profile.enabled = false;
+    encoder.setTimingProfileEnabled(false);
+    imu.setTimingProfileEnabled(false);
     resetRuntimeTimingProfile();
+    encoder.setTimingProfileEnabled(true);
+    imu.setTimingProfileEnabled(true);
     runtime_timing_profile.enabled = true;
     consoleWrite("OK timing profile on\r\n");
     return;
   }
   if (std::strcmp(action, "off") == 0) {
     runtime_timing_profile.enabled = false;
+    encoder.setTimingProfileEnabled(false);
+    imu.setTimingProfileEnabled(false);
     consoleWrite("OK timing profile off\r\n");
     printRuntimeTimingProfile();
     return;
@@ -610,7 +648,11 @@ void swingControlTask(void*) {
       stage_us = now;
     }
 
-    pollSupervisorConsole();
+    if ((loop_us - last_supervisor_console_poll_us) >=
+        kSupervisorConsolePollPeriodUs) {
+      last_supervisor_console_poll_us = loop_us;
+      pollSupervisorConsole();
+    }
     finalizeSwingLogIfPending();
     if (profile) {
       const std::int64_t now = esp_timer_get_time();
@@ -708,6 +750,7 @@ extern "C" void app_main(void) {
   last_encoder_health_us = now_us;
   last_imu_sample_us = now_us;
   last_telemetry_us = now_us;
+  last_supervisor_console_poll_us = now_us;
 
   consoleWrite("TriWhirl deterministic motor + IMU + attitude runtime ready\r\n");
   consoleWrite("ESP32 owns swing-identification realtime decisions; host/BLE is supervisory only\r\n");
