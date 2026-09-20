@@ -111,6 +111,25 @@ bool handleReadOnlySnapshotCommand(const char* const line) {
   return true;
 }
 
+bool handleTypedRuntimeCommand(const char* const line) {
+  if (line == nullptr) {
+    return false;
+  }
+
+  RuntimeCommand command{};
+  if (std::strcmp(line, "motor stop") == 0) {
+    command.type = RuntimeCommandType::kMotorStop;
+  } else {
+    return false;
+  }
+
+  SupervisorInputEvent event{};
+  event.type = SupervisorInputEventType::kRuntimeCommand;
+  event.runtime_command = command;
+  publishEvent(event);
+  return true;
+}
+
 void consumeBytes(const std::uint8_t* input, const std::size_t received,
                   CommandInputState& state) {
   if (input == nullptr) {
@@ -124,7 +143,8 @@ void consumeBytes(const std::uint8_t* input, const std::size_t received,
       if (state.length > 0U) {
         writeBytes("\r\n", 2U);
         state.line[state.length] = '\0';
-        if (!handleReadOnlySnapshotCommand(state.line)) {
+        if (!handleReadOnlySnapshotCommand(state.line) &&
+            !handleTypedRuntimeCommand(state.line)) {
           SupervisorInputEvent event{};
           event.type = SupervisorInputEventType::kCommand;
           std::memcpy(event.line, state.line, state.length + 1U);
