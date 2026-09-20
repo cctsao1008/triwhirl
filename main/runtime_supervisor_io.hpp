@@ -3,18 +3,22 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "runtime_command.hpp"
+
 namespace triwhirl::runtime {
 
 constexpr std::size_t kSupervisorCommandBytes = 128U;
 
 enum class SupervisorInputEventType : std::uint8_t {
   kCommand,
+  kRuntimeCommand,
   kReadOnlyHandled,
   kLineOverflow,
 };
 
 struct SupervisorInputEvent {
   SupervisorInputEventType type = SupervisorInputEventType::kCommand;
+  RuntimeCommand runtime_command{};
   char line[kSupervisorCommandBytes]{};
 };
 
@@ -23,8 +27,9 @@ using SupervisorWriteFn = void (*)(void* context, const char* data,
 
 // Starts the non-realtime UART/BLE input task. The task owns byte polling and
 // line assembly. Selected read-only commands are answered from the latest
-// bounded runtime snapshot without entering the realtime domain; mutating or
-// not-yet-migrated commands cross through a fixed-size bounded queue.
+// bounded runtime snapshot without entering the realtime domain. Migrated
+// mutating commands are parsed into RuntimeCommand records; not-yet-migrated
+// commands remain temporarily available through the legacy string event.
 bool initSupervisorIo(SupervisorWriteFn write_fn, void* write_context,
                       int core_id, unsigned task_priority);
 
