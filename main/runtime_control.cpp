@@ -228,6 +228,11 @@ bool typedCommandAllowedDuringSwing(
     return true;
   }
   return type == triwhirl::runtime::RuntimeCommandType::kSwingAbort ||
+         type == triwhirl::runtime::RuntimeCommandType::kSwingStart ||
+         type == triwhirl::runtime::RuntimeCommandType::kSwingConfig ||
+         type == triwhirl::runtime::RuntimeCommandType::kTimingProfileOn ||
+         type == triwhirl::runtime::RuntimeCommandType::kTimingProfileOff ||
+         type == triwhirl::runtime::RuntimeCommandType::kTimingProfileReset ||
          type == triwhirl::runtime::RuntimeCommandType::kTelemetryOff;
 }
 
@@ -256,9 +261,96 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       finishSwingRun(
           swing_id_runner.abort(SwingIdStopReason::kExternalAbort));
       return;
+    case triwhirl::runtime::RuntimeCommandType::kSwingStart: {
+      if (swing_id_runner.active()) {
+        consoleWrite("ERR swing already active\r\n");
+        return;
+      }
+      if (motorActive()) {
+        consoleWrite("ERR swing start requires motor stopped\r\n");
+        return;
+      }
+      if (!motor_config_valid || !encoder_sample_valid ||
+          !wheel_state.velocity_valid || !imu_sample_valid || !gyro_bias_valid ||
+          !attitude_state.valid || safety_latch.faulted()) {
+        consoleWrite(
+            "ERR swing start requires motor config, encoder/wheel, calibrated IMU, valid attitude, and clear safety\r\n");
+        return;
+      }
+      const LoggerStatus log_status = runtime_logger.status();
+      const std::uint32_t needed_records =
+          (swing_id_runner.config().max_duration_us +
+           triwhirl::log::kTwLogSamplePeriodUs - 1U) /
+          triwhirl::log::kTwLogSamplePeriodUs;
+      if (log_status.state != triwhirl::log::LoggerState::kRecording ||
+          log_status.max_records < needed_records) {
+        consoleWrite(
+            "ERR swing start requires active TWLG recording with capacity for max duration\r\n");
+        return;
+      }
+      const std::uint32_t now_us =
+          static_cast<std::uint32_t>(esp_timer_get_time());
+      if (!swing_id_runner.start(currentSwingInput(now_us))) {
+        consoleWrite("ERR swing start rejected\r\n");
+        return;
+      }
+      setSwingCriticalWindow(false);
+      vq_command_v = clampFinite(swing_id_runner.output().desired_vq_v,
+                                 -kMotorVectorLimitV, kMotorVectorLimitV);
+      motor_mode = MotorMode::kFoc;
+      consoleWrite("OK swing start\r\n");
+      queueSwingEvent(swing_id_runner.output());
+      return;
+    }
+    case triwhirl::runtime::RuntimeCommandType::kSwingConfig: {
+      const auto& payload = command.payload.swing_config;
+      SwingIdConfig config{};
+      config.target_captures = payload.target_captures;
+      config.pump_v_low = payload.pump_v_low;
+      config.pump_v_high = payload.pump_v_high;
+      config.capture_deg = payload.capture_deg;
+      config.probe_exit_deg = payload.probe_exit_deg;
+      config.rearm_deg = payload.rearm_deg;
+      config.probe_duration_us = payload.probe_duration_us;
+      config.rate_switch_rad_s = payload.rate_switch_rad_s;
+      config.pump_polarity = payload.pump_polarity;
+      config.vertex_a_deg = payload.vertex_a_deg;
+      config.max_duration_us = payload.max_duration_us;
+      if (config.pump_v_high > kMotorVectorLimitV ||
+          config.pump_v_low > kMotorVectorLimitV ||
+          !swing_id_runner.configure(config)) {
+        consoleWrite(
+            "ERR usage: swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n");
+        return;
+      }
+      consoleWrite("OK swing config\r\n");
+      printSwingStatus();
+      return;
+    }
     case triwhirl::runtime::RuntimeCommandType::kTimingReset:
       resetTimingStats();
       consoleWrite("OK timing reset\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kTimingProfileOn:
+      runtime_timing_profile.enabled = false;
+      encoder.setTimingProfileEnabled(false);
+      imu.setTimingProfileEnabled(false);
+      resetRuntimeTimingProfile();
+      encoder.setTimingProfileEnabled(true);
+      imu.setTimingProfileEnabled(true);
+      runtime_timing_profile.enabled = true;
+      consoleWrite("OK timing profile on\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kTimingProfileOff:
+      runtime_timing_profile.enabled = false;
+      encoder.setTimingProfileEnabled(false);
+      imu.setTimingProfileEnabled(false);
+      consoleWrite("OK timing profile off\r\n");
+      printRuntimeTimingProfile();
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kTimingProfileReset:
+      resetRuntimeTimingProfile();
+      consoleWrite("OK timing profile reset\r\n");
       return;
     case triwhirl::runtime::RuntimeCommandType::kFaultClear:
       stopMotor();
