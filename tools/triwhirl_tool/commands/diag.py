@@ -53,6 +53,15 @@ def _timing_profile_parser() -> argparse.ArgumentParser:
         default=5.0,
         help="profiling interval [s]",
     )
+    parser.add_argument(
+        "--baseline-seconds",
+        type=float,
+        default=2.0,
+        help=(
+            "after stage profiling, reset counters and measure an unprofiled "
+            "steady-state baseline for this many seconds [default: 2]"
+        ),
+    )
     return parser
 
 
@@ -134,6 +143,8 @@ def timing_test_main(argv: Sequence[str]) -> int:
 async def _timing_profile_run(args: argparse.Namespace) -> int:
     if not math.isfinite(args.seconds) or args.seconds <= 0.0:
         raise RuntimeError("seconds must be finite and > 0")
+    if not math.isfinite(args.baseline_seconds) or args.baseline_seconds <= 0.0:
+        raise RuntimeError("baseline-seconds must be finite and > 0")
 
     client, transport = await _open_line_transport(args)
     try:
@@ -188,13 +199,30 @@ async def _timing_profile_run(args: argparse.Namespace) -> int:
         if not saw_end:
             raise RuntimeError("timed out waiting for timing_profile_end")
 
+        # `timing profile off` formats and queues the full stage report from the
+        # control task. That diagnostic work can legitimately inflate the normal
+        # timing counters, especially max_exec_us. Reset after the report and
+        # collect a short unprofiled baseline so one command returns both the
+        # detailed stage breakdown and a clean steady-state timing snapshot.
+        await transport.send("timing reset")
+        print(
+            await _wait_console(
+                transport,
+                prefixes=("OK timing reset",),
+                timeout_s=args.timeout,
+            )
+        )
+        print(
+            f"measuring unprofiled baseline for {args.baseline_seconds:.3f} seconds..."
+        )
+        await asyncio.sleep(args.baseline_seconds)
         await transport.send("timing status")
         timing_line = await _wait_console(
             transport,
             prefixes=("timing,",),
             timeout_s=args.timeout,
         )
-        print(timing_line)
+        print("baseline_" + timing_line)
         return 0
     finally:
         await _close_line_transport(client, transport)
