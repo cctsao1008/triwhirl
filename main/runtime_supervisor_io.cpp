@@ -11,6 +11,7 @@
 #include "runtime_diagnostics.hpp"
 #include "runtime_snapshot.hpp"
 #include "triwhirl/ble_transport.hpp"
+#include "triwhirl/runtime_logger.hpp"
 #include "triwhirl/safety.hpp"
 
 namespace triwhirl::runtime {
@@ -77,16 +78,11 @@ void writeRuntimeSnapshotUnavailable() {
 
 const char* motorModeName(const std::uint8_t mode) {
   switch (mode) {
-    case 0U:
-      return "stopped";
-    case 1U:
-      return "open_loop";
-    case 2U:
-      return "foc";
-    case 3U:
-      return "calibrating";
-    default:
-      return "unknown";
+    case 0U: return "stopped";
+    case 1U: return "open_loop";
+    case 2U: return "foc";
+    case 3U: return "calibrating";
+    default: return "unknown";
   }
 }
 
@@ -158,6 +154,8 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
                                 std::strcmp(line, "motor status") == 0;
   const bool imu_status = std::strcmp(line, "imu") == 0 ||
                           std::strcmp(line, "imu status") == 0;
+  const bool log_status = std::strcmp(line, "log") == 0 ||
+                          std::strcmp(line, "log status") == 0;
   const bool attitude_status = std::strcmp(line, "attitude") == 0 ||
                                std::strcmp(line, "attitude status") == 0;
   const bool fault_status = std::strcmp(line, "fault") == 0 ||
@@ -165,8 +163,8 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
   const bool timing_status = std::strcmp(line, "timing") == 0 ||
                              std::strcmp(line, "timing status") == 0;
   const bool telemetry_status = std::strcmp(line, "telemetry") == 0;
-  if (!aggregate_status && !imu_status && !attitude_status && !fault_status &&
-      !timing_status && !telemetry_status) {
+  if (!aggregate_status && !imu_status && !log_status && !attitude_status &&
+      !fault_status && !timing_status && !telemetry_status) {
     return false;
   }
 
@@ -227,6 +225,24 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         snapshot.imu_map_gyro_axis, snapshot.imu_map_sin_sign,
         snapshot.imu_map_cos_sign, snapshot.imu_map_gyro_sign,
         static_cast<unsigned long>(snapshot.imu_read_errors));
+    writeFormatted(buffer, length, sizeof(buffer));
+  } else if (log_status) {
+    char buffer[512];
+    const int length = std::snprintf(
+        buffer, sizeof(buffer),
+        "log,state=%s,partition_bytes=%lu,prepared_bytes=%lu,max_records=%lu,buffered_bytes=%lu,records_written=%lu,dropped_records=%lu,logical_bytes=%lu,flash_write=%d,critical=%d,dump_active=%d\r\n",
+        triwhirl::log::loggerStateName(
+            static_cast<triwhirl::log::LoggerState>(snapshot.log_state)),
+        static_cast<unsigned long>(snapshot.log_partition_bytes),
+        static_cast<unsigned long>(snapshot.log_prepared_bytes),
+        static_cast<unsigned long>(snapshot.log_max_records),
+        static_cast<unsigned long>(snapshot.log_buffered_bytes),
+        static_cast<unsigned long>(snapshot.log_records_written),
+        static_cast<unsigned long>(snapshot.log_dropped_records),
+        static_cast<unsigned long>(snapshot.log_logical_bytes),
+        snapshot.log_flash_writes_allowed ? 1 : 0,
+        snapshot.log_critical_window ? 1 : 0,
+        snapshot.log_dump_active ? 1 : 0);
     writeFormatted(buffer, length, sizeof(buffer));
   } else if (attitude_status) {
     char buffer[320];
