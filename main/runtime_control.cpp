@@ -4,7 +4,7 @@
 // a dedicated Core-0 worker through runtime_encoder_acquisition; Core 1 performs
 // the blocking MPU6050 transaction and attitude update in parallel. UART0 is a
 // wired development/service ingress and BLE commands arrive through NimBLE GATT;
-// both are parsed in the Core-0 supervisor domain before typed mutations enter
+// both are parsed in the Core-0 supervisor domain before typed commands enter
 // this domain through a bounded command mailbox.
 
 #include <cstddef>
@@ -227,7 +227,12 @@ bool typedCommandAllowedDuringSwing(
   if (!swing_id_runner.active()) {
     return true;
   }
-  return type == triwhirl::runtime::RuntimeCommandType::kSwingAbort ||
+  return type == triwhirl::runtime::RuntimeCommandType::kStatus ||
+         type == triwhirl::runtime::RuntimeCommandType::kImuStatus ||
+         type == triwhirl::runtime::RuntimeCommandType::kLogStatus ||
+         type == triwhirl::runtime::RuntimeCommandType::kSwingStatus ||
+         type == triwhirl::runtime::RuntimeCommandType::kTimingProfileStatus ||
+         type == triwhirl::runtime::RuntimeCommandType::kSwingAbort ||
          type == triwhirl::runtime::RuntimeCommandType::kSwingStart ||
          type == triwhirl::runtime::RuntimeCommandType::kSwingConfig ||
          type == triwhirl::runtime::RuntimeCommandType::kTimingProfileOn ||
@@ -244,6 +249,22 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
   }
 
   switch (command.type) {
+    case triwhirl::runtime::RuntimeCommandType::kStatus:
+    case triwhirl::runtime::RuntimeCommandType::kMotorStatus:
+      printStatus();
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kImuStatus:
+      printImuStatus();
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kLogStatus:
+      printLogStatus();
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kSwingStatus:
+      printSwingStatus();
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kTimingProfileStatus:
+      printRuntimeTimingProfile();
+      return;
     case triwhirl::runtime::RuntimeCommandType::kMotorStop:
       stopMotor();
       consoleWrite("OK motor stop\r\n");
@@ -505,6 +526,88 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
                     imu_map.accel_cos_sign, imu_map.gyro_sign);
       return;
     }
+    case triwhirl::runtime::RuntimeCommandType::kLogPrepare: {
+      const float seconds = command.payload.log_prepare.seconds;
+      if (motorActive()) {
+        consoleWrite("ERR log prepare requires motor stopped\r\n");
+        return;
+      }
+      if (!std::isfinite(seconds) || seconds <= 0.0F) {
+        consoleWrite("ERR log prepare seconds must be > 0\r\n");
+        return;
+      }
+      const double records_d = std::ceil(
+          static_cast<double>(seconds) * 1000000.0 /
+          static_cast<double>(triwhirl::log::kTwLogSamplePeriodUs));
+      if (records_d < 1.0 ||
+          records_d > static_cast<double>(std::numeric_limits<std::uint32_t>::max())) {
+        consoleWrite("ERR log prepare duration out of range\r\n");
+        return;
+      }
+      const std::uint32_t records = static_cast<std::uint32_t>(records_d);
+      if (!runtime_logger.prepare(records)) {
+        consoleWrite("ERR log prepare rejected; check log status/capacity\r\n");
+        return;
+      }
+      log_critical_window = false;
+      consolePrintf(
+          "OK log prepare records=%lu seconds=%.3f; erase in background\r\n",
+          static_cast<unsigned long>(records), seconds);
+      return;
+    }
+    case triwhirl::runtime::RuntimeCommandType::kLogStart:
+      if (!runtime_logger.start()) {
+        consoleWrite("ERR log start requires state=ready\r\n");
+        return;
+      }
+      log_critical_window = false;
+      consoleWrite("OK log start sample_us=1000 record_bytes=32\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kLogCriticalOn:
+      log_critical_window = true;
+      runtime_logger.setFlashWritesAllowed(false);
+      consoleWrite("OK log critical on; flash programming paused\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kLogCriticalOff:
+      log_critical_window = false;
+      runtime_logger.setFlashWritesAllowed(true);
+      consoleWrite("OK log critical off; flash programming resumed\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kLogStop:
+      log_critical_window = false;
+      runtime_logger.setFlashWritesAllowed(true);
+      if (!runtime_logger.stop()) {
+        consoleWrite("ERR log stop rejected; check log status\r\n");
+        return;
+      }
+      consoleWrite("OK log stopping; SRAM is draining and header will finalize\r\n");
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kLogDump:
+      if (binary_dump_active || log_dump_task != nullptr) {
+        consoleWrite("ERR log dump already active\r\n");
+        return;
+      }
+      if (!runtime_logger.complete()) {
+        consoleWrite("ERR log dump requires state=complete\r\n");
+        return;
+      }
+      if (motorActive()) {
+        consoleWrite("ERR log dump requires motor stopped\r\n");
+        return;
+      }
+      if (!triwhirl::ble::connected() || !triwhirl::ble::subscribed()) {
+        consoleWrite("ERR log dump requires BLE notify subscription\r\n");
+        return;
+      }
+      telemetry_enabled = false;
+      binary_dump_active = true;
+      if (xTaskCreatePinnedToCore(logDumpTask, "triwhirl_log_dump", 4096, nullptr,
+                                  1, &log_dump_task, 0) != pdPASS) {
+        binary_dump_active = false;
+        log_dump_task = nullptr;
+        consoleWrite("ERR log dump task creation failed\r\n");
+      }
+      return;
     case triwhirl::runtime::RuntimeCommandType::kNone:
       return;
   }
@@ -518,8 +621,6 @@ void processOneSupervisorInput() {
 
   if (event.type == triwhirl::runtime::SupervisorInputEventType::kRuntimeCommand) {
     executeRuntimeCommand(event.runtime_command);
-  } else if (event.type == triwhirl::runtime::SupervisorInputEventType::kCommand) {
-    handleSupervisorCommand(event.line);
   }
 
   if (!swing_id_runner.active()) {
