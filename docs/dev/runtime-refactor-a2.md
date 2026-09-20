@@ -90,13 +90,20 @@ handleSupervisorCommand(event.line)
 supervisor bookkeeping events. CI explicitly fails if the raw string path is
 reintroduced.
 
+The obsolete string bridge inside `runtime_main.cpp` has also been deleted:
+`handleSupervisorCommand`, `consumeSupervisorBytes`, `pollSupervisorConsole`,
+legacy swing parsing, and legacy timing-profile parsing are gone. The redundant
+`updateEncoder` / `updateImu` rename shims were removed with those dead paths.
+Only three source-inclusion shims remain: `app_main`, `initEncoderBus`, and
+`initImuBus`.
+
 ## Remaining A2 debt
 
 Command parsing is no longer part of realtime execution, but A2 is not complete
 yet. Remaining work is structural and output/diagnostic ownership:
 
 - `runtime_control.cpp -> runtime_main.cpp -> app_main.cpp` source inclusion;
-- five legacy symbol-renaming shims in `runtime_main.cpp`;
+- three legacy symbol-renaming shims in `runtime_main.cpp`;
 - status/IMU formatting still executed from Core 1 for commands whose state has
   not yet been fully represented in `RuntimeSnapshot`;
 - `status` still refreshes AS5600 health and `imu status` still performs a
