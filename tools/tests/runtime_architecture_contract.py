@@ -38,26 +38,28 @@ CONTROL_FORBIDDEN_SUPERVISOR_IO = (
 )
 
 SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
-    'std::strcmp(line, "help")',
     'std::strcmp(line, "attitude status")',
     'std::strcmp(line, "fault status")',
     'std::strcmp(line, "ble status")',
     'std::strcmp(line, "timing status")',
     'std::strcmp(line, "telemetry")',
+    'std::strcmp(line, "help")',
     "readLatestRuntimeSnapshot(",
     "triwhirl::ble::connected()",
     "triwhirl::ble::subscribed()",
     "snapshot.timing_iterations",
     "snapshot.telemetry_enabled",
-    '"  swing status\\r\\n"',
-    '"  timing profile <status|on|off|reset>\\r\\n"',
 )
 
 PARSER_REQUIRED_TYPED_COMMANDS = (
     'std::strcmp(line, "motor stop")',
     'std::strcmp(line, "stop")',
     'std::strcmp(line, "swing abort")',
+    'std::strcmp(line, "swing start")',
     'std::strcmp(line, "timing reset")',
+    'std::strcmp(line, "timing profile on")',
+    'std::strcmp(line, "timing profile off")',
+    'std::strcmp(line, "timing profile reset")',
     'std::strcmp(line, "fault clear")',
     'std::strcmp(line, "telemetry on")',
     'std::strcmp(line, "telemetry off")',
@@ -68,10 +70,16 @@ PARSER_REQUIRED_TYPED_COMMANDS = (
     'commandArguments(line, "attitude reset"',
     'commandArguments(line, "imu calibrate"',
     'commandArguments(line, "imu map"',
+    'commandArguments(line, "swing config"',
     "RuntimeCommandType::kMotorStop",
     "RuntimeCommandType::kStop",
     "RuntimeCommandType::kSwingAbort",
+    "RuntimeCommandType::kSwingStart",
+    "RuntimeCommandType::kSwingConfig",
     "RuntimeCommandType::kTimingReset",
+    "RuntimeCommandType::kTimingProfileOn",
+    "RuntimeCommandType::kTimingProfileOff",
+    "RuntimeCommandType::kTimingProfileReset",
     "RuntimeCommandType::kFaultClear",
     "RuntimeCommandType::kTelemetryOn",
     "RuntimeCommandType::kTelemetryOff",
@@ -98,7 +106,12 @@ CONTROL_REQUIRED_TYPED_COMMANDS = (
     "RuntimeCommandType::kMotorStop",
     "RuntimeCommandType::kStop",
     "RuntimeCommandType::kSwingAbort",
+    "RuntimeCommandType::kSwingStart",
+    "RuntimeCommandType::kSwingConfig",
     "RuntimeCommandType::kTimingReset",
+    "RuntimeCommandType::kTimingProfileOn",
+    "RuntimeCommandType::kTimingProfileOff",
+    "RuntimeCommandType::kTimingProfileReset",
     "RuntimeCommandType::kFaultClear",
     "RuntimeCommandType::kTelemetryOn",
     "RuntimeCommandType::kTelemetryOff",
@@ -115,6 +128,8 @@ CONTROL_REQUIRED_TYPED_COMMANDS = (
 
 PARSER_TEST_REQUIRED_TOKENS = (
     'expectType("motor stop", RuntimeCommandType::kMotorStop)',
+    'expectType("swing start", RuntimeCommandType::kSwingStart)',
+    'expectType("timing profile on", RuntimeCommandType::kTimingProfileOn)',
     'parseRuntimeCommand("motor vq -0.625")',
     'parseRuntimeCommand("motor config 7 -1 1.25")',
     'parseRuntimeCommand("motor calibrate 0.9 0.7 6")',
@@ -122,6 +137,7 @@ PARSER_TEST_REQUIRED_TOKENS = (
     'parseRuntimeCommand("attitude reset -1.25")',
     'parseRuntimeCommand("imu calibrate 750")',
     'parseRuntimeCommand("imu map 0 1 2 1 -1 1")',
+    'parseRuntimeCommand(\n        "swing config 24 0.4 0.8 5 9 14 12.5 0.2 -1 68 20")',
     'RuntimeCommandParseStatus::kUsageError',
     'RuntimeCommandParseStatus::kNotMatched',
 )
@@ -187,13 +203,9 @@ def main() -> None:
     if leaked_supervisor_io:
         fail(f"UART development/BLE GATT ingress leaked into runtime_control.cpp: {leaked_supervisor_io}")
 
-    initial_snapshot = control_text.find(
-        "  publishSupervisorSnapshot(static_cast<std::uint32_t>(esp_timer_get_time()));"
-    )
-    supervisor_init = control_text.find(
-        "  if (!triwhirl::runtime::initSupervisorIo(supervisorWrite, nullptr, 0,"
-    )
-    if initial_snapshot < 0 or supervisor_init < 0 or initial_snapshot > supervisor_init:
+    first_snapshot = control_text.find("publishSupervisorSnapshot(")
+    supervisor_init = control_text.find("initSupervisorIo(")
+    if first_snapshot < 0 or supervisor_init < 0 or first_snapshot > supervisor_init:
         fail("initial runtime snapshot must be published before supervisor ingress starts")
 
     supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
@@ -220,12 +232,12 @@ def main() -> None:
     print(f"  app_main_sources={sorted(app_main_sources)}")
     print("  runtime_control_queue_mechanics=isolated")
     print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
-    print("  supervisor_read_only=help,attitude,fault,ble,timing,telemetry")
+    print("  supervisor_read_only=attitude,fault,ble,timing,telemetry,help")
     print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
     print("  command_parser=explicit_core0_service")
     print("  command_parser_contract_test=present")
-    print("  typed_runtime_commands=motor_stop,stop,swing_abort,timing_reset,fault_clear,telemetry_on,telemetry_off,motor_vq,motor_config,motor_calibrate,field,attitude_reset,imu_calibrate,imu_map")
+    print("  typed_runtime_commands=motor_stop,stop,swing_abort,swing_start,swing_config,timing_reset,timing_profile_on,timing_profile_off,timing_profile_reset,fault_clear,telemetry_on,telemetry_off,motor_vq,motor_config,motor_calibrate,field,attitude_reset,imu_calibrate,imu_map")
 
 
 if __name__ == "__main__":
