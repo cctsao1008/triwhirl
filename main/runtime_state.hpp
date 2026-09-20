@@ -58,6 +58,13 @@ enum class MotorMode {
   kCalibrating,
 };
 
+enum class MotorStartFailure : std::uint8_t {
+  kNone = 0,
+  kSafetyFault,
+  kEncoderUnavailable,
+  kInvalidNumeric,
+};
+
 enum class CalibrationStage {
   kIdle,
   kAlign,
@@ -162,11 +169,13 @@ bool sampleEncoder(std::uint32_t sample_time_us);
 float correctedGyro(int axis);
 void resetAttitudeFromAccel();
 void updateAttitude(std::uint32_t now_us);
-void startGyroCalibration(std::uint32_t samples);
+// Starts a calibration without producing protocol text. Returns the clamped
+// sample count, or zero when the IMU is unavailable.
+std::uint32_t startGyroCalibration(std::uint32_t samples);
 bool sampleImu();
 void stopMotor();
 bool motorActive();
-bool motorStartAllowed();
+MotorStartFailure motorStartFailure();
 bool faultClearReady();
 void evaluateSafety(std::int64_t start_us);
 void updateMotor(std::uint32_t now_us);
