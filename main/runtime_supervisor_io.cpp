@@ -45,8 +45,6 @@ bool publishEvent(const SupervisorInputEvent& event) {
   if (input_queue == nullptr) {
     return false;
   }
-  // Command traffic is supervisory. If the bounded mailbox is full, reject the
-  // newest event rather than ever blocking this task or the realtime consumer.
   if (xQueueSend(input_queue, &event, 0) != pdTRUE) {
     writeText("ERR command mailbox full\r\n");
     return false;
@@ -119,6 +117,8 @@ bool handleTypedRuntimeCommand(const char* const line) {
   RuntimeCommand command{};
   if (std::strcmp(line, "motor stop") == 0) {
     command.type = RuntimeCommandType::kMotorStop;
+  } else if (std::strcmp(line, "swing abort") == 0) {
+    command.type = RuntimeCommandType::kSwingAbort;
   } else {
     return false;
   }
@@ -186,8 +186,7 @@ void supervisorIoTask(void*) {
   std::uint8_t input[64];
 
   while (true) {
-    const int uart_received =
-        uart_read_bytes(UART_NUM_0, input, sizeof(input), 0);
+    const int uart_received = uart_read_bytes(UART_NUM_0, input, sizeof(input), 0);
     if (uart_received > 0) {
       consumeBytes(input, static_cast<std::size_t>(uart_received), uart_input);
     }
