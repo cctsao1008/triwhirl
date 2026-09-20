@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 namespace triwhirl::runtime {
 
@@ -116,5 +117,12 @@ struct RuntimeCommand {
   RuntimeCommandType type = RuntimeCommandType::kNone;
   RuntimeCommandPayload payload{};
 };
+
+// FreeRTOS queues copy records by value. Keep this boundary POD-like and small
+// enough that command publication remains deterministic and bounded.
+static_assert(std::is_trivially_copyable_v<RuntimeCommand>,
+              "RuntimeCommand must remain trivially copyable");
+static_assert(sizeof(RuntimeCommand) <= 64U,
+              "RuntimeCommand grew beyond the bounded mailbox budget");
 
 }  // namespace triwhirl::runtime
