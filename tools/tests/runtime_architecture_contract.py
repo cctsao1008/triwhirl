@@ -11,7 +11,6 @@ MAIN = ROOT / "main"
 TESTS = ROOT / "tools" / "tests"
 
 ALLOWED_CPP_INCLUDES = {
-    ("runtime_control.cpp", "runtime_main.cpp"),
     ("runtime_main.cpp", "app_main.cpp"),
 }
 
@@ -19,10 +18,6 @@ ALLOWED_RENAMING_DEFINES = {
     ("runtime_main.cpp", "app_main", "triwhirl_legacy_app_main"),
 }
 
-CONTROL_FORBIDDEN_QUEUE_MECHANICS = (
-    '"freertos/queue.h"', "xQueueCreate(", "xQueueSend(",
-    "xQueueReceive(", "xQueueOverwrite(",
-)
 CONTROL_FORBIDDEN_SUPERVISOR_IO = ("uart_read_bytes(", "triwhirl::ble::read(")
 
 SUPERVISOR_REQUIRED_READ_ONLY_COMMANDS = (
@@ -93,16 +88,13 @@ def main() -> None:
         if APP_MAIN_RE.search(text):
             app_main_sources.append(path.name)
 
-    unexpected_includes = cpp_includes - ALLOWED_CPP_INCLUDES
-    if unexpected_includes:
-        fail(f"unexpected .cpp inclusion(s): {sorted(unexpected_includes)}")
-    unexpected_renames = renaming_defines - ALLOWED_RENAMING_DEFINES
-    if unexpected_renames:
-        fail(f"unexpected symbol-renaming shim(s): {sorted(unexpected_renames)}")
+    if cpp_includes != ALLOWED_CPP_INCLUDES:
+        fail(f"source-inclusion bridge set changed unexpectedly: {sorted(cpp_includes)}")
     if renaming_defines != ALLOWED_RENAMING_DEFINES:
         fail(f"legacy renaming shim set changed unexpectedly: {sorted(renaming_defines)}")
+    if (MAIN / "runtime_control.cpp").exists():
+        fail("obsolete runtime_control.cpp wrapper returned")
 
-    control_text = (MAIN / "runtime_control.cpp").read_text(encoding="utf-8")
     runtime_main_text = (MAIN / "runtime_main.cpp").read_text(encoding="utf-8")
     supervisor_text = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
     supervisor_header = (MAIN / "runtime_supervisor_io.hpp").read_text(encoding="utf-8")
@@ -110,20 +102,17 @@ def main() -> None:
     parser_text = (MAIN / "runtime_command_parser.cpp").read_text(encoding="utf-8")
     parser_test_text = (TESTS / "runtime_command_parser_test.cpp").read_text(encoding="utf-8")
 
-    leaked_queue = [x for x in CONTROL_FORBIDDEN_QUEUE_MECHANICS if x in control_text]
-    if leaked_queue:
-        fail(f"queue mechanics leaked into runtime_control.cpp: {leaked_queue}")
-    leaked_io = [x for x in CONTROL_FORBIDDEN_SUPERVISOR_IO if x in control_text]
+    leaked_io = [x for x in CONTROL_FORBIDDEN_SUPERVISOR_IO if x in runtime_main_text]
     if leaked_io:
-        fail(f"UART development/BLE GATT ingress leaked into runtime_control.cpp: {leaked_io}")
+        fail(f"UART development/BLE GATT ingress leaked into realtime runtime: {leaked_io}")
 
     # A supervisor-local line buffer is intentional for transport framing. What
     # is forbidden is carrying raw line text across the supervisor/realtime API.
-    if "SupervisorInputEventType::kCommand" in control_text or \
+    if "SupervisorInputEventType::kCommand" in runtime_main_text or \
        "SupervisorInputEventType::kCommand" in supervisor_text or \
        "SupervisorInputEventType::kCommand" in supervisor_header:
         fail("legacy raw command event remains")
-    if "handleSupervisorCommand(event.line)" in control_text:
+    if "handleSupervisorCommand(event.line)" in runtime_main_text:
         fail("realtime still dispatches raw command strings")
     if "char line[kSupervisorCommandBytes]" in supervisor_header:
         fail("SupervisorInputEvent still carries a raw command line")
@@ -141,11 +130,13 @@ def main() -> None:
         fail(f"obsolete runtime string/startup bridge remains: {leaked_bridge}")
 
     require_tokens(runtime_main_text,
-                   ("initRuntimeEncoderBus(", "initRuntimeImuBus("),
-                   "explicit runtime I2C startup ownership regressed")
+                   ("initRuntimeEncoderBus(", "initRuntimeImuBus(",
+                    "void triwhirl::runtime::realtimeControlTask(",
+                    "initEncoderAcquisition(", "waitForNextRealtimeRelease("),
+                   "explicit realtime/startup ownership regressed")
 
-    first_snapshot = control_text.find("publishSupervisorSnapshot(")
-    supervisor_init = control_text.find("initSupervisorIo(")
+    first_snapshot = runtime_main_text.find("publishSupervisorSnapshot(")
+    supervisor_init = runtime_main_text.find("initSupervisorIo(")
     if first_snapshot < 0 or supervisor_init < 0 or first_snapshot > supervisor_init:
         fail("initial runtime snapshot must be published before supervisor ingress starts")
 
@@ -159,7 +150,7 @@ def main() -> None:
                    "typed command contract is incomplete")
     require_tokens(parser_text, tuple(f"RuntimeCommandType::{x}" for x in REQUIRED_TYPES),
                    "Core0 typed command parser is incomplete")
-    require_tokens(control_text, tuple(f"RuntimeCommandType::{x}" for x in REQUIRED_TYPES),
+    require_tokens(runtime_main_text, tuple(f"RuntimeCommandType::{x}" for x in REQUIRED_TYPES),
                    "typed realtime command execution is incomplete")
     require_tokens(parser_test_text, PARSER_TEST_REQUIRED_TOKENS,
                    "runtime command parser contract coverage regressed")
@@ -168,10 +159,11 @@ def main() -> None:
     print(f"  cpp_includes={sorted(cpp_includes)}")
     print(f"  renaming_shims={sorted(renaming_defines)}")
     print(f"  app_main_sources={sorted(app_main_sources)}")
+    print("  runtime_control_wrapper=absent")
     print("  raw_command_strings_cross_realtime=no")
     print("  obsolete_runtime_string_bridge=absent")
     print("  runtime_i2c_startup=explicit_named_helpers")
-    print("  runtime_control_uart_dev_ble_gatt_ingress=absent")
+    print("  runtime_uart_dev_ble_gatt_ingress=absent")
     print("  supervisor_read_only=attitude,fault,ble,timing,telemetry,help")
     print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
