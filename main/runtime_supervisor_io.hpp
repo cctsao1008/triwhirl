@@ -12,7 +12,7 @@ constexpr std::size_t kSupervisorCommandBytes = 128U;
 enum class SupervisorInputEventType : std::uint8_t {
   kCommand,
   kRuntimeCommand,
-  kReadOnlyHandled,
+  kSupervisorHandled,
   kLineOverflow,
 };
 
