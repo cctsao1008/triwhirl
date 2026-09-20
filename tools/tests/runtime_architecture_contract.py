@@ -43,11 +43,27 @@ REQUIRED_TYPES = (
 
 REQUIRED_REPLY_CODES = (
     "kSwingOwnsRealtime", "kMotorStopOk", "kStopOk", "kSwingAlreadyInactive",
-    "kSwingAbortOk", "kTimingResetOk", "kTimingProfileResetOk",
-    "kFaultAlreadyClear", "kFaultClearRejected", "kFaultClearOk",
-    "kTelemetryOnOk", "kTelemetryOffOk", "kInvalidMotorConfig",
-    "kMotorConfigOk", "kAttitudeResetFromAccelOk", "kInvalidAttitudeAngle",
-    "kAttitudeResetAngleOk", "kInvalidImuMap", "kImuMapOk",
+    "kSwingAbortOk", "kSwingAlreadyActive", "kSwingStartRequiresMotorStopped",
+    "kSwingStartRequiresReadyState", "kSwingStartRequiresLogCapacity",
+    "kSwingStartRejected", "kSwingStartOk", "kSwingConfigUsageError",
+    "kSwingConfigOk", "kSwingStatus", "kSwingTransitionEvent",
+    "kTimingResetOk", "kTimingProfileOnOk", "kTimingProfileOffOk",
+    "kTimingProfileResetOk", "kTimingProfileHeader", "kTimingProfileStage",
+    "kTimingProfileEnd", "kFaultAlreadyClear", "kFaultClearRejected",
+    "kFaultClearOk", "kTelemetryOnOk", "kTelemetryOffOk",
+    "kSafetyFaultLatched", "kEncoderUnavailable", "kInvalidRuntimeNumeric",
+    "kInvalidMotorConfig", "kMotorConfigOk", "kMotorNotConfigured",
+    "kMotorFocOk", "kMotorCalibrationEncoderUnavailable",
+    "kMotorCalibrationStarted", "kFieldStopped", "kFieldOk",
+    "kAttitudeResetFromAccelOk", "kInvalidAttitudeAngle",
+    "kAttitudeResetAngleOk", "kImuUnavailable", "kImuCalibrationStarted",
+    "kInvalidImuMap", "kImuMapOk", "kLogPrepareRequiresMotorStopped",
+    "kLogPrepareSecondsInvalid", "kLogPrepareDurationOutOfRange",
+    "kLogPrepareRejected", "kLogPrepareOk", "kLogStartRequiresReady",
+    "kLogStartOk", "kLogCriticalOnOk", "kLogCriticalOffOk",
+    "kLogStopRejected", "kLogStopOk", "kLogDumpAlreadyActive",
+    "kLogDumpRequiresComplete", "kLogDumpRequiresMotorStopped",
+    "kLogDumpRequiresBleSubscription", "kLogDumpTaskFailed",
 )
 
 PARSER_TEST_REQUIRED_TOKENS = (
@@ -161,13 +177,18 @@ def main() -> None:
                    ("namespace triwhirl::runtime::state", "extern As5600 encoder",
                     "extern Mpu6050 imu", "extern SafetyLatch safety_latch",
                     "extern RuntimeLogger runtime_logger", "void updateMotor(",
-                    "bool sampleImu(", "void consoleWriteBytes("),
+                    "bool sampleImu(", "MotorStartFailure motorStartFailure(",
+                    "std::uint32_t startGyroCalibration(",
+                    "void consoleWriteBytes("),
                    "runtime state contract is incomplete")
     require_tokens(runtime_state_text,
                    ("As5600 encoder;", "Mpu6050 imu;", "void updateMotor(",
                     "void evaluateSafety(", "void emitTelemetry(",
-                    "bool initConsole("),
+                    "MotorStartFailure motorStartFailure(",
+                    "std::uint32_t startGyroCalibration(", "bool initConsole("),
                    "runtime state implementation is incomplete")
+    if "motorStartAllowed(" in runtime_state_header or "motorStartAllowed(" in runtime_state_text:
+        fail("text-producing motor command admission helper returned")
     if '"runtime_state.cpp"' not in cmake_text:
         fail("runtime_state.cpp is not compiled explicitly")
 
@@ -212,7 +233,8 @@ def main() -> None:
     require_tokens(supervisor_text,
                    ("parseRuntimeCommand(", "SupervisorInputEvent",
                     "ERR unknown command", "uart_development_input", "ble_gatt_input",
-                    "kRuntimeReplyQueueDepth", "formatRuntimeReply(",
+                    "kRuntimeReplyQueueDepth = 24U", "formatRuntimeReply(",
+                    "formatSwingStatusPayload(", "timingProfileStageName(",
                     "drainRuntimeReplies(", "writePromptFromSnapshot("),
                    "supervisor typed-command/reply boundary regressed")
     require_tokens(supervisor_header,
@@ -223,16 +245,48 @@ def main() -> None:
                    "structured runtime reply contract is incomplete")
     require_tokens(reply_header,
                    ("std::is_trivially_copyable_v<RuntimeReply>",
-                    "sizeof(RuntimeReply) <= 40U"),
+                    "sizeof(RuntimeReply) <= 104U",
+                    "RuntimeTimingProfileStageId"),
                    "runtime reply mailbox bounds regressed")
+
     require_tokens(runtime_main_text,
                    ("deferRuntimeReply(", "publishRuntimeReply(",
                     "command_reply_deferred", "snapshot.swing_active",
-                    "RuntimeReplyCode::kMotorStopOk",
-                    "RuntimeReplyCode::kMotorConfigOk",
-                    "RuntimeReplyCode::kAttitudeResetAngleOk",
-                    "RuntimeReplyCode::kImuMapOk"),
+                    "makeSwingStatusReply(", "publishRuntimeTimingProfile(",
+                    "RuntimeReplyCode::kSwingTransitionEvent",
+                    "RuntimeReplyCode::kMotorFocOk",
+                    "RuntimeReplyCode::kMotorCalibrationStarted",
+                    "RuntimeReplyCode::kFieldOk",
+                    "RuntimeReplyCode::kImuCalibrationStarted",
+                    "RuntimeReplyCode::kLogPrepareOk",
+                    "RuntimeReplyCode::kLogStartOk",
+                    "RuntimeReplyCode::kLogStopOk"),
                    "realtime structured reply migration regressed")
+
+    obsolete_swing_output = (
+        "struct SwingEvent", "swing_event_queue", "swingEventTask(",
+        'xTaskCreatePinnedToCore(swingEventTask',
+    )
+    leaked_swing_output = [x for x in obsolete_swing_output if x in runtime_main_text]
+    if leaked_swing_output:
+        fail(f"obsolete separate swing output path remains: {leaked_swing_output}")
+
+    # Synchronous command responses should be represented as structured codes,
+    # not constructed as protocol text in the realtime command executor.
+    realtime_sync_text = (
+        'consoleWrite("OK swing start',
+        'consoleWrite("OK timing profile on',
+        'consolePrintf("OK motor FOC',
+        'consolePrintf("OK motor calibration started',
+        'consolePrintf("OK field ',
+        'consolePrintf("OK imu map ',
+        'consolePrintf("OK log prepare',
+        'consoleWrite("OK log start',
+        'consoleWrite("OK log stopping',
+    )
+    leaked_sync_text = [x for x in realtime_sync_text if x in runtime_main_text]
+    if leaked_sync_text:
+        fail(f"synchronous command formatting leaked back into realtime: {leaked_sync_text}")
 
     require_tokens(command_header, REQUIRED_TYPES,
                    "typed command contract is incomplete")
@@ -262,6 +316,9 @@ def main() -> None:
     print("  supervisor_snapshot_ready_before_ingress=yes")
     print("  supervisor_transports=uart_dev,ble_gatt")
     print("  runtime_reply_egress=bounded_structured_core1_to_core0")
+    print("  synchronous_command_formatting=core0")
+    print("  swing_transition_formatting=core0")
+    print("  timing_profile_status_formatting=core0")
     print("  supervisor_prompt_bookkeeping=core0")
     print("  command_parser=complete_core0_grammar")
     print("  command_parser_contract_test=present")
