@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "runtime_egress.hpp"
+#include "runtime_release.hpp"
 #include "runtime_state.hpp"
 #include "triwhirl/safety.hpp"
 
@@ -53,6 +54,7 @@ bool configureRuntimeBalance(const triwhirl::BalanceControllerConfig& config) {
 BalanceStartFailure startRuntimeBalance(float* const initial_vq_v) {
   if (balance_active) return BalanceStartFailure::kAlreadyActive;
   if (state::motorActive()) return BalanceStartFailure::kMotorActive;
+  if (!realtimeReleaseReady()) return BalanceStartFailure::kReleaseClock;
   if (!balance_config_valid ||
       !triwhirl::validBalanceControllerConfig(balance_config) ||
       balance_config.vq_limit_v > state::kMotorVectorLimitV) {
@@ -102,6 +104,10 @@ void stopRuntimeBalance() {
 void updateRuntimeBalance() {
   if (!balance_active) return;
 
+  if (!realtimeReleaseReady()) {
+    tripBalanceFault(triwhirl::SafetyFault::kTiming);
+    return;
+  }
   if (state::safety_latch.faulted()) {
     balance_active = false;
     state::stopMotor();
@@ -162,6 +168,7 @@ const char* balanceStartFailureName(const BalanceStartFailure failure) {
     case BalanceStartFailure::kNone: return "none";
     case BalanceStartFailure::kAlreadyActive: return "already_active";
     case BalanceStartFailure::kMotorActive: return "motor_active";
+    case BalanceStartFailure::kReleaseClock: return "release_clock";
     case BalanceStartFailure::kControllerConfig: return "controller_config";
     case BalanceStartFailure::kMotorConfig: return "motor_config";
     case BalanceStartFailure::kEncoder: return "encoder";
