@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MAIN = ROOT / "main"
 HW = ROOT / "components" / "triwhirl_hw"
+TOOLS = ROOT / "tools" / "triwhirl_tool" / "commands"
 
 
 def fail(message: str) -> None:
@@ -32,10 +33,12 @@ def main() -> None:
     pipeline_h = (MAIN / "runtime_sensor_pipeline.hpp").read_text(encoding="utf-8")
     pipeline_cpp = (MAIN / "runtime_sensor_pipeline.cpp").read_text(encoding="utf-8")
     sensor_state = (MAIN / "runtime_sensor_state.cpp").read_text(encoding="utf-8")
+    supervisor = (MAIN / "runtime_supervisor_io.cpp").read_text(encoding="utf-8")
     cmake = (MAIN / "CMakeLists.txt").read_text(encoding="utf-8")
     board_h = (HW / "include" / "triwhirl" / "board.hpp").read_text(encoding="utf-8")
     mpu_h = (HW / "include" / "triwhirl" / "drivers" / "mpu6050.hpp").read_text(encoding="utf-8")
     mpu_cpp = (HW / "mpu6050.cpp").read_text(encoding="utf-8")
+    realtime_tool = (TOOLS / "realtime.py").read_text(encoding="utf-8")
 
     # Both hardware I2C controllers are allocated from Core 0. I2C0/AS5600 and
     # I2C1/MPU6050 remain separate controllers; only their ownership moved.
@@ -82,7 +85,7 @@ def main() -> None:
             "AS5600 non-blocking result probe is missing")
     require(imu_h,
             ("tryCollectImuAcquisition(", "drdy_edges", "drdy_consumed",
-             "drdy_fallback_reads"),
+             "drdy_fallback_reads", "drdy_gpio", "drdy_probe_only"),
             "MPU6050 acquisition/DRDY observability contract is incomplete")
     require(encoder_cpp,
             ("request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
@@ -96,7 +99,8 @@ def main() -> None:
              "result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
              "tryCollectImuAcquisition(", "gpio_isr_handler_add(",
              "vTaskNotifyGiveFromISR(", "drdy_fallback_reads",
-             "kMpu6050IntRoutingVerified"),
+             "kMpu6050IntRoutingVerified", "kMpu6050IntProbeGpio",
+             "if (drdy_probe_only)"),
             "MPU6050 physical acquisition/DRDY contract regressed")
 
     require(frame_h,
@@ -156,12 +160,24 @@ def main() -> None:
             ("trans_queue_depth", "kDefaultAsyncI2cQueueDepth = 4U"),
             "I2C bus no longer reserves a bounded async transaction queue")
     require(board_h,
-            ("kMpu6050IntGpio = -1", "kMpu6050IntRoutingVerified = false"),
-            "unverified production-board MPU_INT routing must remain disabled")
+            ("kMpu6050IntGpio = -1", "kMpu6050IntProbeGpio = 21",
+             "kMpu6050IntRoutingVerified = false"),
+            "unverified production-board MPU_INT route/probe policy regressed")
     if "kMpu6050IntGpio = 21" in board_h or "kMpu6050IntRequiresJumper" in board_h:
-        fail("vendor-schematic P4/IO21 assumption leaked back into board mapping")
+        fail("vendor-schematic P4/IO21 assumption leaked back into authoritative mapping")
     if "esp_driver_gpio" not in cmake:
         fail("main component is missing explicit GPIO dependency for optional MPU DRDY")
+
+    # The passive candidate must be visible without becoming realtime authority.
+    require(supervisor,
+            ('#include "runtime_imu_acquisition.hpp"', "imuAcquisitionStats()",
+             "drdy_gpio=%d", "drdy_probe_only=%d", "drdy_edges=%llu",
+             "drdy_consumed=%llu", "drdy_fallback_reads=%llu"),
+            "supervisor does not expose passive DRDY observability")
+    require(realtime_tool,
+            ("_classify_drdy_probe(", "edge_request_ratio", "classification=",
+             'transport.send("imu status")', 'return "MATCH"'),
+            "host realtime check does not classify passive DRDY evidence")
 
     print("runtime sensor-domain contract: PASS")
     print("  sensor_i2c_irq_domain=core0")
@@ -170,7 +186,8 @@ def main() -> None:
     print("  imu_worker=core0")
     print("  mpu_runtime_source=fifo_accel_xyz_gyro_xyz")
     print("  mpu_i2c=asynchronous_callback")
-    print("  mpu_drdy_route=unverified_disabled")
+    print("  mpu_drdy_authority=disabled_unverified")
+    print("  mpu_drdy_probe=io21_observation_only")
     print("  sensor_frame_coordinator=core0")
     print("  realtime_sensor_join=none")
     print("  blocking_mpu_i2c_in_realtime=no")
