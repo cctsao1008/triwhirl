@@ -171,6 +171,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
         script="parameter_id/body_active_fit.py",
         description="Fit active A/B/C upright vertex models.",
     ),
+    ToolCommand(
+        group="fit",
+        name="hinf",
+        script="synthesis/hinf/run_pipeline.py",
+        description="Fit active data, build the robust plant, synthesize H-infinity gains, and emit balance config.",
+    ),
 )
 
 
