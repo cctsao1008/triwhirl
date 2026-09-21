@@ -24,15 +24,18 @@ struct ImuAcquisitionStats {
   std::uint64_t read_failures = 0U;
   std::uint64_t stale_results = 0U;
   std::uint64_t join_timeouts = 0U;
+  std::uint64_t drdy_edges = 0U;
+  std::uint64_t drdy_consumed = 0U;
+  std::uint64_t drdy_fallback_reads = 0U;
 };
 
-// Runs the blocking MPU6050 transfer on the selected I/O core. The realtime
-// caller only publishes a fixed-size request and joins a fixed-size result.
+// Runtime I2C is asynchronous inside the MPU6050 driver. The Core-0 worker
+// remains the single sample consumer and records MPU_INT edges when the optional
+// TRC-V1.0 MPU_INT->IO21 bring-up jumper is populated. Until the jumper exists,
+// FIFO reads remain request-driven and drdy_fallback_reads makes that explicit.
 bool initImuAcquisition(ImuReadFn read_fn, void* context, int core_id,
                         unsigned task_priority);
 bool dispatchImuAcquisition(std::uint32_t* sequence);
-// Non-blocking result probe used by the shared Core-0 frame coordinator. It
-// drains stale generations but does not count an absent result as a timeout.
 bool tryCollectImuAcquisition(std::uint32_t expected_sequence,
                               ImuAcquisitionResult* result);
 bool collectImuAcquisition(std::uint32_t expected_sequence,

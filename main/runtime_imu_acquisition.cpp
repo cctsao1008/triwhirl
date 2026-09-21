@@ -1,9 +1,12 @@
 #include "runtime_imu_acquisition.hpp"
 
+#include "driver/gpio.h"
+#include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "triwhirl/board.hpp"
 
 namespace triwhirl::runtime {
 namespace {
@@ -21,6 +24,7 @@ void* imu_read_context = nullptr;
 std::uint32_t request_sequence = 0U;
 portMUX_TYPE stats_mux = portMUX_INITIALIZER_UNLOCKED;
 ImuAcquisitionStats stats{};
+bool drdy_irq_enabled = false;
 
 void incrementStat(std::uint64_t ImuAcquisitionStats::* const field) {
   portENTER_CRITICAL(&stats_mux);
@@ -28,11 +32,66 @@ void incrementStat(std::uint64_t ImuAcquisitionStats::* const field) {
   portEXIT_CRITICAL(&stats_mux);
 }
 
+void mpuDataReadyIsr(void*) {
+  portENTER_CRITICAL_ISR(&stats_mux);
+  ++stats.drdy_edges;
+  portEXIT_CRITICAL_ISR(&stats_mux);
+
+  BaseType_t task_woken = pdFALSE;
+  if (acquisition_task != nullptr) {
+    vTaskNotifyGiveFromISR(acquisition_task, &task_woken);
+  }
+  if (task_woken == pdTRUE) {
+    portYIELD_FROM_ISR();
+  }
+}
+
+bool initDataReadyInput() {
+  if (triwhirl::board::kMpu6050IntGpio < 0) {
+    return false;
+  }
+
+  gpio_config_t config{};
+  config.pin_bit_mask =
+      1ULL << static_cast<unsigned>(triwhirl::board::kMpu6050IntGpio);
+  config.mode = GPIO_MODE_INPUT;
+  config.pull_up_en = GPIO_PULLUP_DISABLE;
+  // TRC-V1.0 leaves MPU_INT unconnected. A pull-down keeps IO21 quiet until the
+  // documented bring-up jumper is populated; MPU INT itself is push-pull.
+  config.pull_down_en = GPIO_PULLDOWN_ENABLE;
+  config.intr_type = GPIO_INTR_POSEDGE;
+  if (gpio_config(&config) != ESP_OK) {
+    return false;
+  }
+
+  const esp_err_t install = gpio_install_isr_service(0);
+  if (install != ESP_OK && install != ESP_ERR_INVALID_STATE) {
+    return false;
+  }
+  if (gpio_isr_handler_add(
+          static_cast<gpio_num_t>(triwhirl::board::kMpu6050IntGpio),
+          mpuDataReadyIsr, nullptr) != ESP_OK) {
+    return false;
+  }
+  return true;
+}
+
 void imuAcquisitionTask(void*) {
   ImuAcquisitionRequest request{};
   while (true) {
     if (xQueueReceive(request_queue, &request, portMAX_DELAY) != pdTRUE) {
       continue;
+    }
+
+    // Consume an already-latched DRDY edge if the optional jumper is present.
+    // The first FIFO/async-I2C cut keeps the existing generation request as the
+    // scheduling authority; a later cut can promote DRDY to the producer clock
+    // once hardware wiring is validated. Unmodified boards are explicitly
+    // counted as fallback reads instead of silently pretending DRDY exists.
+    if (drdy_irq_enabled && ulTaskNotifyTake(pdTRUE, 0) > 0U) {
+      incrementStat(&ImuAcquisitionStats::drdy_consumed);
+    } else {
+      incrementStat(&ImuAcquisitionStats::drdy_fallback_reads);
     }
 
     ImuAcquisitionResult result{};
@@ -63,10 +122,16 @@ bool initImuAcquisition(const ImuReadFn read_fn, void* const context,
 
   imu_read_fn = read_fn;
   imu_read_context = context;
-  return xTaskCreatePinnedToCore(
-             imuAcquisitionTask, "triwhirl_imu", 4096, nullptr,
-             static_cast<UBaseType_t>(task_priority), &acquisition_task,
-             core_id) == pdPASS;
+  if (xTaskCreatePinnedToCore(
+          imuAcquisitionTask, "triwhirl_imu", 4096, nullptr,
+          static_cast<UBaseType_t>(task_priority), &acquisition_task,
+          core_id) != pdPASS) {
+    acquisition_task = nullptr;
+    return false;
+  }
+
+  drdy_irq_enabled = initDataReadyInput();
+  return true;
 }
 
 bool dispatchImuAcquisition(std::uint32_t* const sequence) {

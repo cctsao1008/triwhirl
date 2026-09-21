@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "runtime_main.cpp" "runtime_state.cpp" "runtime_balance.cpp" "runtime_command_parser.cpp" "runtime_encoder_acquisition.cpp" "runtime_imu_acquisition.cpp" "runtime_sensor_pipeline.cpp" "runtime_sensor_state.cpp" "runtime_supervisor_io.cpp" "runtime_snapshot.cpp" "runtime_diagnostics.cpp" "runtime_release.cpp" "runtime_platform.cpp"
     INCLUDE_DIRS "."
-    REQUIRES triwhirl_core triwhirl_hw triwhirl_ble triwhirl_log esp_driver_uart esp_driver_gptimer esp_timer freertos
+    REQUIRES triwhirl_core triwhirl_hw triwhirl_ble triwhirl_log esp_driver_uart esp_driver_gptimer esp_driver_gpio esp_timer freertos
 )
 
 # Realtime/startup ownership, shared runtime state, guarded balance control,
