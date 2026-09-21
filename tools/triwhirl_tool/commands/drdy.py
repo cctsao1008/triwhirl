@@ -86,8 +86,19 @@ async def _run(args: argparse.Namespace) -> int:
     try:
         first_line, first = await _read_imu_status(transport, args.timeout)
         print(first_line)
+        imu_ready = _int_field(first, "ready")
+        if imu_ready == 0:
+            print(
+                "DRDY_PROBE_NOTE imu_ready=0; GPIO observation is still useful, "
+                "but Balance remains blocked until MPU6050 I2C initialization succeeds"
+            )
+
         gpio = _int_field(first, "drdy_gpio")
         probe_only = _int_field(first, "drdy_probe_only")
+        if gpio < 0:
+            print("DRDY_PROBE_DISABLED")
+            return 2
+
         print(
             f"observing MPU6050 DRDY candidate gpio={gpio} "
             f"probe_only={probe_only} for {args.seconds:.3f} seconds..."
