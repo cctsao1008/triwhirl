@@ -70,6 +70,7 @@ void sensorFramePipelineTask(void*) {
     const std::int64_t join_deadline_us =
         esp_timer_get_time() +
         static_cast<std::int64_t>(kSensorWorkerJoinBudgetUs);
+    bool coordinator_blocked_once = false;
     while (esp_timer_get_time() < join_deadline_us) {
       if (encoder_dispatched && !frame.encoder_received) {
         frame.encoder_received = tryCollectEncoderAcquisition(
@@ -83,7 +84,21 @@ void sensorFramePipelineTask(void*) {
           (!pipeline_imu_enabled || !imu_dispatched || frame.imu_received)) {
         break;
       }
-      taskYIELD();
+
+      // Both physical sensor workers run above the coordinator on Core 0. A
+      // taskYIELD() here only yields to equal/higher-priority ready tasks; when
+      // the synchronous I2C workers are blocked in the driver it immediately
+      // reschedules this coordinator and can starve IDLE0 indefinitely. That is
+      // exactly the task-WDT failure seen on the physical unit. Block once for
+      // one 1-kHz RTOS tick instead. The workers and IDLE0 then get real CPU
+      // time, while the existing shared 1.5-ms generation deadline remains the
+      // hard upper bound for accepting results.
+      if (!coordinator_blocked_once) {
+        coordinator_blocked_once = true;
+        vTaskDelay(pdMS_TO_TICKS(1));
+        continue;
+      }
+      break;
     }
 
     // One final zero-budget probe closes the deadline race and records the
