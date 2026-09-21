@@ -18,10 +18,13 @@ enum class RuntimeStateEventType : std::uint8_t {
   kImuCalibrationComplete,
 };
 
+static_assert(sizeof(int) == sizeof(std::int32_t),
+              "Runtime state-event integer slots require a 32-bit int ABI");
+
 struct RuntimeStateEvent {
   RuntimeStateEventType type = RuntimeStateEventType::kNone;
-  std::int32_t value0 = 0;
-  std::int32_t value1 = 0;
+  int value0 = 0;
+  int value1 = 0;
   std::uint32_t u32_0 = 0U;
   float float0 = 0.0F;
   float float1 = 0.0F;

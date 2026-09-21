@@ -9,6 +9,7 @@ namespace {
 
 using triwhirl::runtime::RuntimeCommandParseStatus;
 using triwhirl::runtime::RuntimeCommandType;
+using triwhirl::runtime::normalizeRuntimeCommandLine;
 using triwhirl::runtime::parseRuntimeCommand;
 
 void expectType(const char* text, const RuntimeCommandType type) {
@@ -20,6 +21,22 @@ void expectType(const char* text, const RuntimeCommandType type) {
 }  // namespace
 
 int main() {
+  {
+    char normalized[64]{};
+    const std::size_t length = normalizeRuntimeCommandLine(
+        " \t motor   status \t ", normalized, sizeof(normalized));
+    assert(length == std::strlen("motor status"));
+    assert(std::strcmp(normalized, "motor status") == 0);
+  }
+
+  {
+    char normalized[8]{};
+    const std::size_t length = normalizeRuntimeCommandLine(
+        "   motor stop   ", normalized, sizeof(normalized));
+    assert(length == 7U);
+    assert(std::strcmp(normalized, "motor s") == 0);
+  }
+
   expectType("status", RuntimeCommandType::kStatus);
   expectType("motor status", RuntimeCommandType::kMotorStatus);
   expectType("imu status", RuntimeCommandType::kImuStatus);

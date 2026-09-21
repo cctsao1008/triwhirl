@@ -18,33 +18,6 @@ constexpr float kDefaultLogSeconds = 45.0F;
 constexpr const char* kSwingConfigUsage =
     "ERR usage: swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n";
 
-void normalizeCommandLine(const char* input, char* output,
-                          const std::size_t output_bytes) {
-  if (output == nullptr || output_bytes == 0U) {
-    return;
-  }
-  output[0] = '\0';
-  if (input == nullptr) {
-    return;
-  }
-
-  std::size_t written = 0U;
-  bool pending_space = false;
-  while (*input != '\0' && written + 1U < output_bytes) {
-    if (*input == ' ' || *input == '\t') {
-      pending_space = written > 0U;
-      ++input;
-      continue;
-    }
-    if (pending_space && written + 1U < output_bytes) {
-      output[written++] = ' ';
-    }
-    pending_space = false;
-    output[written++] = *input++;
-  }
-  output[written] = '\0';
-}
-
 bool commandArguments(const char* const line, const char* const command,
                       const char** const arguments) {
   if (line == nullptr || command == nullptr || arguments == nullptr) {
@@ -103,13 +76,41 @@ RuntimeCommandParseResult usageError(const char* const error) {
 
 }  // namespace
 
+std::size_t normalizeRuntimeCommandLine(const char* input, char* output,
+                                        const std::size_t output_bytes) {
+  if (output == nullptr || output_bytes == 0U) {
+    return 0U;
+  }
+  output[0] = '\0';
+  if (input == nullptr) {
+    return 0U;
+  }
+
+  std::size_t written = 0U;
+  bool pending_space = false;
+  while (*input != '\0' && written + 1U < output_bytes) {
+    if (*input == ' ' || *input == '\t') {
+      pending_space = written > 0U;
+      ++input;
+      continue;
+    }
+    if (pending_space && written + 1U < output_bytes) {
+      output[written++] = ' ';
+    }
+    pending_space = false;
+    output[written++] = *input++;
+  }
+  output[written] = '\0';
+  return written;
+}
+
 RuntimeCommandParseResult parseRuntimeCommand(const char* const input) {
   if (input == nullptr) {
     return {};
   }
 
   char normalized[kCommandTextBytes]{};
-  normalizeCommandLine(input, normalized, sizeof(normalized));
+  normalizeRuntimeCommandLine(input, normalized, sizeof(normalized));
   const char* const line = normalized;
 
   if (std::strcmp(line, "status") == 0) return commandResult(RuntimeCommandType::kStatus);

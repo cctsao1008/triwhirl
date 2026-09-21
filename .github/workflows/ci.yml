@@ -19,6 +19,13 @@ jobs:
             main/runtime_command_parser.cpp \
             -o /tmp/runtime-command-parser-test
           /tmp/runtime-command-parser-test
+      - name: "test: runtime protocol integer contract"
+        run: |
+          g++ -std=c++17 \
+            -Imain \
+            tools/tests/runtime_protocol_int_contract.cpp \
+            -o /tmp/runtime-protocol-int-contract
+          /tmp/runtime-protocol-int-contract
       - name: "test: host toolbox routing"
         run: |
           python tools/twtool.py --help

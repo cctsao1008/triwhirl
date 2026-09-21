@@ -85,6 +85,12 @@ enum class RuntimeTimingProfileStageId : std::uint8_t {
   kMpuDecode,
 };
 
+// These signed slots are intentionally `int`: the wire formatter uses `%d` and
+// ESP-IDF's std::int32_t is a `long` typedef on Xtensa. Keep the mailbox ABI
+// explicitly 32-bit while matching the variadic formatter's promoted type.
+static_assert(sizeof(int) == sizeof(std::int32_t),
+              "Runtime reply integer slots require a 32-bit int ABI");
+
 struct RuntimeReply {
   RuntimeReplyCode code = RuntimeReplyCode::kNone;
   bool prompt_after = false;
@@ -92,15 +98,15 @@ struct RuntimeReply {
   // Shared fixed-size payload slots. Individual reply codes define their
   // interpretation. Keeping one POD-like record avoids variable-size messages
   // or heap ownership at the realtime/supervisor boundary.
-  std::int32_t value0 = 0;
-  std::int32_t value1 = 0;
-  std::int32_t value2 = 0;
-  std::int32_t value3 = 0;
-  std::int32_t value4 = 0;
-  std::int32_t value5 = 0;
-  std::int32_t value6 = 0;
-  std::int32_t value7 = 0;
-  std::int32_t value8 = 0;
+  int value0 = 0;
+  int value1 = 0;
+  int value2 = 0;
+  int value3 = 0;
+  int value4 = 0;
+  int value5 = 0;
+  int value6 = 0;
+  int value7 = 0;
+  int value8 = 0;
   std::uint32_t u32_0 = 0U;
   std::uint32_t u32_1 = 0U;
   std::uint64_t wide0 = 0U;
