@@ -30,6 +30,13 @@ std::uint32_t request_sequence = 0U;
 portMUX_TYPE stats_mux = portMUX_INITIALIZER_UNLOCKED;
 RuntimeSensorPipelineStats stats{};
 
+// `readLatestSensorFrame()` and `readLastConsumedSensorFrame()` are both called
+// only by the Core-1 control task. Keeping this copy outside the Core-0 mailbox
+// closes the race where the coordinator could overwrite the queue between the
+// control task committing a frame and Balance validating that same generation.
+RuntimeSensorFrame last_consumed_frame{};
+bool last_consumed_frame_valid = false;
+
 void noteFrameResult(const bool complete, const std::uint32_t sequence) {
   portENTER_CRITICAL(&stats_mux);
   if (complete) {
@@ -98,7 +105,7 @@ void sensorFramePipelineTask(void*) {
 
     // Publish every acquisition attempt as one coherent generation. Core 1 may
     // continue using an independently valid member in bring-up modes, while
-    // complete=false is an explicit safety input for future Balance mode.
+    // complete=false is an explicit safety input for Balance mode.
     xQueueOverwrite(frame_queue, &frame);
     noteFrameResult(frame.complete, frame.sequence);
   }
@@ -122,6 +129,8 @@ bool initSensorFramePipeline(const bool imu_enabled, const int core_id,
   }
 
   pipeline_imu_enabled = imu_enabled;
+  last_consumed_frame = {};
+  last_consumed_frame_valid = false;
   return xTaskCreatePinnedToCore(
              sensorFramePipelineTask, "triwhirl_sensor_frame", 4096, nullptr,
              static_cast<UBaseType_t>(task_priority), &pipeline_task, core_id) ==
@@ -156,8 +165,21 @@ bool dispatchSensorFrameAcquisition(std::uint32_t* const sequence) {
 }
 
 bool readLatestSensorFrame(RuntimeSensorFrame* const frame) {
-  return frame != nullptr && frame_queue != nullptr &&
-         xQueuePeek(frame_queue, frame, 0) == pdTRUE;
+  if (frame == nullptr || frame_queue == nullptr ||
+      xQueuePeek(frame_queue, frame, 0) != pdTRUE) {
+    return false;
+  }
+  last_consumed_frame = *frame;
+  last_consumed_frame_valid = true;
+  return true;
+}
+
+bool readLastConsumedSensorFrame(RuntimeSensorFrame* const frame) {
+  if (frame == nullptr || !last_consumed_frame_valid) {
+    return false;
+  }
+  *frame = last_consumed_frame;
+  return true;
 }
 
 RuntimeSensorPipelineStats sensorFramePipelineStats() {

@@ -25,14 +25,14 @@ triwhirl::BalanceControllerInput currentBalanceInput() {
   return input;
 }
 
-bool latestBalanceSensorFrame(RuntimeSensorFrame* const frame) {
-  RuntimeSensorFrame latest{};
-  if (!readLatestSensorFrame(&latest) || !latest.complete ||
-      !latest.imu_expected) {
-    if (frame != nullptr) *frame = latest;
+bool consumedBalanceSensorFrame(RuntimeSensorFrame* const frame) {
+  RuntimeSensorFrame consumed{};
+  if (!readLastConsumedSensorFrame(&consumed) || !consumed.complete ||
+      !consumed.imu_expected) {
+    if (frame != nullptr) *frame = consumed;
     return false;
   }
-  if (frame != nullptr) *frame = latest;
+  if (frame != nullptr) *frame = consumed;
   return true;
 }
 
@@ -92,7 +92,7 @@ BalanceStartFailure startRuntimeBalance(float* const initial_vq_v) {
     return BalanceStartFailure::kAttitude;
   }
   if (state::safety_latch.faulted()) return BalanceStartFailure::kSafetyFault;
-  if (!latestBalanceSensorFrame(nullptr)) return BalanceStartFailure::kSensorFrame;
+  if (!consumedBalanceSensorFrame(nullptr)) return BalanceStartFailure::kSensorFrame;
 
   const triwhirl::BalanceControllerInput input = currentBalanceInput();
   const triwhirl::BalanceControllerOutput output =
@@ -153,12 +153,13 @@ void updateRuntimeBalance() {
     return;
   }
 
-  // Balance never combines independently fresh members from different sensor
-  // generations. The latest Core-0 frame must contain successful AS5600 and
-  // MPU6050 results from the same bounded acquisition request. Bring-up modes
-  // may continue using partial frames, but closed-loop Balance fails closed.
+  // Balance validates the exact sensor generation already consumed and committed
+  // by this Core-1 iteration. It never peeks the Core-0 mailbox a second time,
+  // so an asynchronous overwrite cannot turn a partial committed state into an
+  // apparently complete one. Bring-up modes may use partial frames; Balance
+  // fails closed.
   RuntimeSensorFrame sensor_frame{};
-  if (!latestBalanceSensorFrame(&sensor_frame)) {
+  if (!consumedBalanceSensorFrame(&sensor_frame)) {
     tripIncompleteBalanceSensorFrame(sensor_frame);
     return;
   }

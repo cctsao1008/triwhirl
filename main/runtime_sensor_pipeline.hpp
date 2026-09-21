@@ -23,7 +23,14 @@ struct RuntimeSensorPipelineStats {
 bool initSensorFramePipeline(bool imu_enabled, int core_id,
                              unsigned task_priority);
 bool dispatchSensorFrameAcquisition(std::uint32_t* sequence);
+
+// Core 1 is the sole runtime consumer of the latest-frame mailbox. Every
+// successful read also records the exact frame consumed by that control
+// iteration. Balance queries that consumed copy rather than peeking the mailbox
+// a second time, so a concurrent Core-0 overwrite cannot create a TOCTOU gap.
 bool readLatestSensorFrame(RuntimeSensorFrame* frame);
+bool readLastConsumedSensorFrame(RuntimeSensorFrame* frame);
+
 RuntimeSensorPipelineStats sensorFramePipelineStats();
 void resetSensorFramePipelineStats();
 
