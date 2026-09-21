@@ -113,6 +113,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
     ),
     ToolCommand(
         group="diag",
+        name="drdy-probe",
+        handler="commands.drdy:drdy_probe_main",
+        description="Measure the candidate MPU6050 DATA_RDY GPIO edge rate without granting control authority.",
+    ),
+    ToolCommand(
+        group="diag",
         name="imu",
         handler="commands.diag:imu_main",
         description="Read IMU and attitude-estimator health over BLE.",
