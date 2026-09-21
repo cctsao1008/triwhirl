@@ -42,6 +42,9 @@ int main() {
   expectType("imu status", RuntimeCommandType::kImuStatus);
   expectType("log status", RuntimeCommandType::kLogStatus);
   expectType("swing status", RuntimeCommandType::kSwingStatus);
+  expectType("balance status", RuntimeCommandType::kBalanceStatus);
+  expectType("balance start", RuntimeCommandType::kBalanceStart);
+  expectType("balance stop", RuntimeCommandType::kBalanceStop);
   expectType("timing profile status", RuntimeCommandType::kTimingProfileStatus);
   expectType("motor stop", RuntimeCommandType::kMotorStop);
   expectType("stop", RuntimeCommandType::kStop);
@@ -66,6 +69,7 @@ int main() {
   expectType("   motor\t\tstop   ", RuntimeCommandType::kMotorStop);
   expectType("\t timing   profile\tstatus \t", RuntimeCommandType::kTimingProfileStatus);
   expectType("  imu   status  ", RuntimeCommandType::kImuStatus);
+  expectType("  balance\t start ", RuntimeCommandType::kBalanceStart);
 
   {
     const auto parsed = parseRuntimeCommand("motor vq -0.625");
@@ -159,6 +163,22 @@ int main() {
 
   {
     const auto parsed = parseRuntimeCommand(
+        "balance config 12.5 1.2 -0.08 68 6 24 1.2 40");
+    assert(parsed.status == RuntimeCommandParseStatus::kCommand);
+    assert(parsed.command.type == RuntimeCommandType::kBalanceConfig);
+    const auto& config = parsed.command.payload.balance_config;
+    assert(std::fabs(config.k_theta - 12.5F) < 1.0e-6F);
+    assert(std::fabs(config.k_rate - 1.2F) < 1.0e-6F);
+    assert(std::fabs(config.k_wheel + 0.08F) < 1.0e-6F);
+    assert(std::fabs(config.theta_reference_deg - 68.0F) < 1.0e-6F);
+    assert(std::fabs(config.capture_deg - 6.0F) < 1.0e-6F);
+    assert(std::fabs(config.fall_deg - 24.0F) < 1.0e-6F);
+    assert(std::fabs(config.vq_limit_v - 1.2F) < 1.0e-6F);
+    assert(std::fabs(config.wheel_rate_limit_rad_s - 40.0F) < 1.0e-6F);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand(
         "swing config 24 0.4 0.8 5 9 14 12.5 0.2 -1 68 20");
     assert(parsed.status == RuntimeCommandParseStatus::kCommand);
     assert(parsed.command.type == RuntimeCommandType::kSwingConfig);
@@ -219,6 +239,11 @@ int main() {
 
   {
     const auto parsed = parseRuntimeCommand("field 1.0");
+    assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
+  }
+
+  {
+    const auto parsed = parseRuntimeCommand("balance config 1 2 3 68 6 24 1.2");
     assert(parsed.status == RuntimeCommandParseStatus::kUsageError);
   }
 
