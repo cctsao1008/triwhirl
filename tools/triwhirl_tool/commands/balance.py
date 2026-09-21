@@ -8,7 +8,11 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from ...synthesis.hinf.balance_command import load_command_values, render_balance_command
+try:
+    from tools.synthesis.hinf.balance_command import load_command_values, render_balance_command
+except ModuleNotFoundError:
+    from synthesis.hinf.balance_command import load_command_values, render_balance_command
+
 from ..ble import DEVICE_NAME
 from ..host_log import host_print as print
 from ..host_log import print_session_header
