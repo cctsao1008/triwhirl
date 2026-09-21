@@ -18,6 +18,10 @@ enum class RuntimeCommandType : std::uint8_t {
   kLogStatus,
   kSwingStatus,
   kTimingProfileStatus,
+  kBalanceStatus,
+  kBalanceConfig,
+  kBalanceStart,
+  kBalanceStop,
   kMotorStop,
   kStop,
   kSwingAbort,
@@ -98,6 +102,17 @@ struct SwingConfigPayload {
   std::uint32_t max_duration_us = 0U;
 };
 
+struct BalanceConfigPayload {
+  float k_theta = 0.0F;
+  float k_rate = 0.0F;
+  float k_wheel = 0.0F;
+  float theta_reference_deg = 0.0F;
+  float capture_deg = 0.0F;
+  float fall_deg = 0.0F;
+  float vq_limit_v = 0.0F;
+  float wheel_rate_limit_rad_s = 0.0F;
+};
+
 struct LogPreparePayload {
   float seconds = 0.0F;
 };
@@ -111,6 +126,7 @@ union RuntimeCommandPayload {
   ImuCalibratePayload imu_calibrate;
   ImuMapPayload imu_map;
   SwingConfigPayload swing_config;
+  BalanceConfigPayload balance_config;
   LogPreparePayload log_prepare;
 
   constexpr RuntimeCommandPayload() : motor_vq{} {}
