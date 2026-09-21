@@ -31,10 +31,11 @@ struct ImuAcquisitionStats {
   bool drdy_probe_only = false;
 };
 
-// Runtime I2C is asynchronous inside the MPU6050 driver. The Core-0 worker
-// remains the single sample consumer. If the production-board MPU_INT route is
-// not verified, an explicitly marked passive GPIO hypothesis may count edges,
-// but those edges are never used as an acquisition clock or Balance authority.
+// The Core-0 worker is the sole MPU FIFO consumer. When a production-board
+// MPU_INT route is explicitly verified, DATA_RDY owns acquisition timing: the
+// ISR wakes the worker and dispatchImuAcquisition() merely asks the coordinator
+// to wait for the next IRQ-produced sample. With no verified route, the worker
+// retains the request-driven FIFO fallback; Core 1 never performs MPU I2C.
 bool initImuAcquisition(ImuReadFn read_fn, void* context, int core_id,
                         unsigned task_priority);
 bool dispatchImuAcquisition(std::uint32_t* sequence);

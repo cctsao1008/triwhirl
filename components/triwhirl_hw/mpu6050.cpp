@@ -210,31 +210,13 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
       }
       ESP_LOGI(kTag, "init attempt=%u stage=fifo_config ok", attempt + 1U);
 
-      i2c_master_event_callbacks_t callbacks{};
-      callbacks.on_trans_done = &Mpu6050::asyncTransactionDone;
-      const esp_err_t callback_result =
-          i2c_master_register_event_callbacks(device_, &callbacks, this);
-      if (callback_result != ESP_OK) {
-        // Do not throw away a healthy MPU + FIFO merely because this ESP-IDF /
-        // target combination rejects asynchronous callbacks. Synchronous FIFO
-        // transfers preserve the FIFO acquisition architecture and keep
-        // DATA_RDY enabled so the GPIO routing probe remains meaningful.
-        async_i2c_enabled_ = false;
-        ESP_LOGW(kTag,
-                 "init attempt=%u stage=async_callback result=%s mode=sync_fifo",
-                 attempt + 1U, esp_err_to_name(callback_result));
-        vTaskDelay(pdMS_TO_TICKS(kFifoPrimeMs));
-        ESP_LOGI(kTag, "init ready addr=0x%02x fifo=1 async=0",
-                 static_cast<unsigned>(candidate));
-        return true;
-      }
-      async_i2c_enabled_ = true;
-      ESP_LOGI(kTag, "init attempt=%u stage=async_callback ok", attempt + 1U);
-
-      // Give the 1 kHz hardware sampler time to place at least one complete
-      // accel+gyro packet into FIFO before startup calibration probes it.
+      // Keep the validated physical-board baseline synchronous. DATA_RDY IRQ,
+      // not the ESP-IDF I2C completion callback, is the hardware acquisition
+      // trigger. Core-0 owns the blocking FIFO transfers, so Core 1 remains free
+      // of MPU I2C while we avoid re-entering the async-bus probe regression.
+      async_i2c_enabled_ = false;
       vTaskDelay(pdMS_TO_TICKS(kFifoPrimeMs));
-      ESP_LOGI(kTag, "init ready addr=0x%02x fifo=1 async=1",
+      ESP_LOGI(kTag, "init ready addr=0x%02x fifo=1 async=0 mode=sync_fifo",
                static_cast<unsigned>(candidate));
       return true;
     }

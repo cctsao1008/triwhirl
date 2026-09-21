@@ -85,7 +85,8 @@ def main() -> None:
             "AS5600 non-blocking result probe is missing")
     require(imu_h,
             ("tryCollectImuAcquisition(", "drdy_edges", "drdy_consumed",
-             "drdy_fallback_reads", "drdy_gpio", "drdy_probe_only"),
+             "drdy_fallback_reads", "drdy_gpio", "drdy_probe_only",
+             "DATA_RDY owns acquisition timing"),
             "MPU6050 acquisition/DRDY observability contract is incomplete")
     require(encoder_cpp,
             ("request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
@@ -94,14 +95,14 @@ def main() -> None:
              "tryCollectEncoderAcquisition("),
             "AS5600 physical acquisition/result-probe contract regressed")
     require(imu_cpp,
-            ("request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
-             "result.started_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
-             "result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
-             "tryCollectImuAcquisition(", "gpio_isr_handler_add(",
-             "vTaskNotifyGiveFromISR(", "drdy_fallback_reads",
-             "kMpu6050IntRoutingVerified", "kMpu6050IntProbeGpio",
-             "if (drdy_probe_only)"),
-            "MPU6050 physical acquisition/DRDY contract regressed")
+            ("runIrqDrivenAcquisition(", "runRequestDrivenFallback(",
+             "ulTaskNotifyTake(pdTRUE, portMAX_DELAY)",
+             "drdy_sequence.fetch_add(", "drdy_authoritative.store(",
+             "xQueuePeek(result_queue", "tryCollectImuAcquisition(",
+             "gpio_isr_handler_add(", "vTaskNotifyGiveFromISR(",
+             "drdy_fallback_reads", "kMpu6050IntRoutingVerified",
+             "kMpu6050IntProbeGpio", "xSemaphoreTake(worker_ready, portMAX_DELAY)"),
+            "MPU6050 IRQ-owned acquisition contract regressed")
 
     require(frame_h,
             ("struct RuntimeSensorFrame", "encoder_received", "imu_expected",
@@ -138,25 +139,26 @@ def main() -> None:
              "RuntimeStateEventType::kImuCalibrationComplete"),
             "Core-1 IMU state commit path is incomplete")
 
-    # MPU6050 runtime acquisition remains FIFO-backed. The async implementation
-    # is retained behind the driver fallback, but the shared platform helper must
-    # not force trans_queue_depth != 0: ESP-IDF then places the bus into async
-    # mode before the synchronous probe/configuration sequence runs. With the
-    # default synchronous bus, callback registration is rejected and the driver
-    # deliberately continues with synchronous FIFO transactions on Core 0.
+    # MPU6050 runtime acquisition remains FIFO-backed and synchronous on Core 0.
+    # DATA_RDY is the intended hardware trigger; ESP-IDF I2C callbacks must not
+    # be required for the validated physical-board baseline.
     require(mpu_h,
-            ("kFifoSampleBytes = 12U", "asyncTransactionDone(",
-             "asyncRead(", "fifoEnabled()", "asyncI2cEnabled()",
+            ("kFifoSampleBytes = 12U", "fifoEnabled()", "asyncI2cEnabled()",
              "std::atomic<bool> timing_profile_enabled_", "portMUX_TYPE timing_mux_"),
             "MPU FIFO interface contract is incomplete")
     require(mpu_cpp,
             ("kRuntimeFifoSources = 0x78U", "kRegFifoCountHigh = 0x72U",
              "kRegFifoReadWrite = 0x74U", "configureRuntimeFifo()",
-             "i2c_master_register_event_callbacks(",
-             "mode=sync_fifo", "async_i2c_enabled_ = false;",
-             "i2c_master_transmit_receive(", "xSemaphoreGiveFromISR(",
+             "kIntEnableDataReady", "mode=sync_fifo",
+             "async_i2c_enabled_ = false;", "i2c_master_transmit_receive(",
              "portENTER_CRITICAL(&timing_mux_)", "portEXIT_CRITICAL(&timing_mux_)"),
-            "MPU FIFO/synchronous-fallback implementation regressed")
+            "MPU FIFO/synchronous implementation regressed")
+    init_begin = mpu_cpp.find("bool Mpu6050::init(")
+    init_end = mpu_cpp.find("bool Mpu6050::writeRegister(")
+    if init_begin < 0 or init_end <= init_begin:
+        fail("cannot isolate MPU init")
+    if "i2c_master_register_event_callbacks(" in mpu_cpp[init_begin:init_end]:
+        fail("synchronous MPU startup must not attempt async callback registration")
     if "kRegAccelXoutH, data, sizeof(data)" in mpu_cpp:
         fail("runtime MPU sampling regressed to direct 14-byte register polling")
 
@@ -167,24 +169,23 @@ def main() -> None:
         fail("platform helper must not force an async I2C transaction queue")
 
     require(board_h,
-            ("kMpu6050IntGpio = -1", "kMpu6050IntProbeGpio = 21",
-             "kMpu6050IntRoutingVerified = false"),
-            "unverified production-board MPU_INT route/probe policy regressed")
-    if "kMpu6050IntGpio = 21" in board_h or "kMpu6050IntRequiresJumper" in board_h:
-        fail("vendor-schematic P4/IO21 assumption leaked back into authoritative mapping")
+            ("kMpu6050IntGpio = -1", "kMpu6050IntProbeGpio = -1",
+             "kMpu6050IntRoutingVerified = false", "GPIO21 is a separate P4 net"),
+            "observed production-board MPU_INT route policy regressed")
+    if "kMpu6050IntGpio = 21" in board_h or "kMpu6050IntProbeGpio = 21" in board_h:
+        fail("rejected GPIO21 MPU_INT hypothesis leaked back into board mapping")
     if "esp_driver_gpio" not in cmake:
-        fail("main component is missing explicit GPIO dependency for optional MPU DRDY")
+        fail("main component is missing explicit GPIO dependency for MPU DATA_RDY")
 
-    # The passive candidate must be visible without becoming realtime authority.
     require(supervisor,
             ('#include "runtime_imu_acquisition.hpp"', "imuAcquisitionStats()",
              "drdy_gpio=%d", "drdy_probe_only=%d", "drdy_edges=%llu",
              "drdy_consumed=%llu", "drdy_fallback_reads=%llu"),
-            "supervisor does not expose passive DRDY observability")
+            "supervisor does not expose DRDY observability")
     require(realtime_tool,
             ("_classify_drdy_probe(", "edge_request_ratio", "classification=",
              'transport.send("imu status")', 'return "MATCH"'),
-            "host realtime check does not classify passive DRDY evidence")
+            "host realtime check does not classify DRDY evidence")
 
     print("runtime sensor-domain contract: PASS")
     print("  sensor_i2c_irq_domain=core0")
@@ -193,8 +194,8 @@ def main() -> None:
     print("  imu_worker=core0")
     print("  mpu_runtime_source=fifo_accel_xyz_gyro_xyz")
     print("  mpu_i2c=synchronous_fifo")
-    print("  mpu_drdy_authority=disabled_unverified")
-    print("  mpu_drdy_probe=io21_observation_only")
+    print("  mpu_drdy_authority=irq_when_route_verified")
+    print("  mpu_drdy_probe=disabled_gpio21_rejected")
     print("  sensor_frame_coordinator=core0")
     print("  realtime_sensor_join=none")
     print("  blocking_mpu_i2c_in_realtime=no")

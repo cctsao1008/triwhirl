@@ -1,10 +1,13 @@
 #include "runtime_imu_acquisition.hpp"
 
+#include <atomic>
+
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "triwhirl/board.hpp"
 
@@ -19,9 +22,12 @@ struct ImuAcquisitionRequest {
 QueueHandle_t request_queue = nullptr;
 QueueHandle_t result_queue = nullptr;
 TaskHandle_t acquisition_task = nullptr;
+SemaphoreHandle_t worker_ready = nullptr;
 ImuReadFn imu_read_fn = nullptr;
 void* imu_read_context = nullptr;
 std::uint32_t request_sequence = 0U;
+std::atomic<std::uint32_t> drdy_sequence{0U};
+std::atomic<bool> drdy_authoritative{false};
 portMUX_TYPE stats_mux = portMUX_INITIALIZER_UNLOCKED;
 ImuAcquisitionStats stats{};
 bool drdy_irq_enabled = false;
@@ -34,13 +40,25 @@ void incrementStat(std::uint64_t ImuAcquisitionStats::* const field) {
   portEXIT_CRITICAL(&stats_mux);
 }
 
+void addStat(std::uint64_t ImuAcquisitionStats::* const field,
+             const std::uint32_t amount) {
+  portENTER_CRITICAL(&stats_mux);
+  stats.*field += amount;
+  portEXIT_CRITICAL(&stats_mux);
+}
+
+bool sequenceReached(const std::uint32_t candidate,
+                     const std::uint32_t expected) {
+  return static_cast<std::int32_t>(candidate - expected) >= 0;
+}
+
 void mpuDataReadyIsr(void*) {
   portENTER_CRITICAL_ISR(&stats_mux);
   ++stats.drdy_edges;
   portEXIT_CRITICAL_ISR(&stats_mux);
 
-  // An unverified GPIO is observation-only: never let a guessed route become a
-  // scheduling authority. A verified route may wake the worker directly later.
+  // An unverified GPIO is observation-only. Only an explicitly verified route
+  // may become MPU acquisition authority.
   if (drdy_probe_only) {
     return;
   }
@@ -55,10 +73,6 @@ void mpuDataReadyIsr(void*) {
 }
 
 bool initDataReadyInput() {
-  if (drdy_gpio >= 0) {
-    return drdy_irq_enabled;
-  }
-
   if (triwhirl::board::kMpu6050IntRoutingVerified &&
       triwhirl::board::kMpu6050IntGpio >= 0) {
     drdy_gpio = triwhirl::board::kMpu6050IntGpio;
@@ -67,13 +81,14 @@ bool initDataReadyInput() {
     drdy_gpio = triwhirl::board::kMpu6050IntProbeGpio;
     drdy_probe_only = true;
   } else {
+    drdy_gpio = -1;
+    drdy_probe_only = false;
     return false;
   }
 
   gpio_config_t config{};
   config.pin_bit_mask = 1ULL << static_cast<unsigned>(drdy_gpio);
   config.mode = GPIO_MODE_INPUT;
-  // Do not bias an unknown production-board net while probing.
   config.pull_up_en = GPIO_PULLUP_DISABLE;
   config.pull_down_en = GPIO_PULLDOWN_DISABLE;
   config.intr_type = GPIO_INTR_POSEDGE;
@@ -82,6 +97,9 @@ bool initDataReadyInput() {
     return false;
   }
 
+  // initImuAcquisition() creates this worker on the I/O core before waiting for
+  // worker_ready, so GPIO ISR allocation occurs in the same Core-0 domain as
+  // MPU I2C rather than on realtime Core 1.
   const esp_err_t install = gpio_install_isr_service(0);
   if (install != ESP_OK && install != ESP_ERR_INVALID_STATE) {
     drdy_gpio = -1;
@@ -92,23 +110,44 @@ bool initDataReadyInput() {
     drdy_gpio = -1;
     return false;
   }
-  drdy_irq_enabled = true;
   return true;
 }
 
-void imuAcquisitionTask(void*) {
+void runIrqDrivenAcquisition() {
+  while (true) {
+    const std::uint32_t notifications =
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (notifications == 0U) {
+      continue;
+    }
+
+    addStat(&ImuAcquisitionStats::drdy_consumed, notifications);
+
+    ImuAcquisitionResult result{};
+    result.sequence =
+        drdy_sequence.fetch_add(notifications, std::memory_order_acq_rel) +
+        notifications;
+    result.requested_at_us =
+        static_cast<std::uint32_t>(esp_timer_get_time());
+    result.started_at_us = result.requested_at_us;
+    result.ok = imu_read_fn != nullptr &&
+                imu_read_fn(imu_read_context, &result.sample);
+    result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
+    if (!result.ok) {
+      incrementStat(&ImuAcquisitionStats::read_failures);
+    }
+    xQueueOverwrite(result_queue, &result);
+  }
+}
+
+void runRequestDrivenFallback() {
   ImuAcquisitionRequest request{};
   while (true) {
     if (xQueueReceive(request_queue, &request, portMAX_DELAY) != pdTRUE) {
       continue;
     }
 
-    if (drdy_irq_enabled && !drdy_probe_only &&
-        ulTaskNotifyTake(pdTRUE, 0) > 0U) {
-      incrementStat(&ImuAcquisitionStats::drdy_consumed);
-    } else {
-      incrementStat(&ImuAcquisitionStats::drdy_fallback_reads);
-    }
+    incrementStat(&ImuAcquisitionStats::drdy_fallback_reads);
 
     ImuAcquisitionResult result{};
     result.sequence = request.sequence;
@@ -121,18 +160,38 @@ void imuAcquisitionTask(void*) {
   }
 }
 
+void imuAcquisitionTask(void*) {
+  drdy_irq_enabled = initDataReadyInput();
+  const bool authoritative =
+      drdy_irq_enabled && !drdy_probe_only &&
+      triwhirl::board::kMpu6050IntRoutingVerified;
+  drdy_authoritative.store(authoritative, std::memory_order_release);
+
+  if (worker_ready != nullptr) {
+    xSemaphoreGive(worker_ready);
+  }
+
+  if (authoritative) {
+    runIrqDrivenAcquisition();
+  } else {
+    runRequestDrivenFallback();
+  }
+}
+
 }  // namespace
 
 bool initImuAcquisition(const ImuReadFn read_fn, void* const context,
                         const int core_id, const unsigned task_priority) {
   if (read_fn == nullptr || request_queue != nullptr || result_queue != nullptr ||
-      acquisition_task != nullptr) {
+      acquisition_task != nullptr || worker_ready != nullptr) {
     return false;
   }
 
   request_queue = xQueueCreate(1U, sizeof(ImuAcquisitionRequest));
   result_queue = xQueueCreate(1U, sizeof(ImuAcquisitionResult));
-  if (request_queue == nullptr || result_queue == nullptr) {
+  worker_ready = xSemaphoreCreateBinary();
+  if (request_queue == nullptr || result_queue == nullptr ||
+      worker_ready == nullptr) {
     return false;
   }
 
@@ -143,16 +202,36 @@ bool initImuAcquisition(const ImuReadFn read_fn, void* const context,
           static_cast<UBaseType_t>(task_priority), &acquisition_task,
           core_id) != pdPASS) {
     acquisition_task = nullptr;
+    vSemaphoreDelete(worker_ready);
+    worker_ready = nullptr;
     return false;
   }
 
-  drdy_irq_enabled = initDataReadyInput();
+  // The worker performs GPIO/ISR setup on its pinned I/O core, then releases
+  // startup. This avoids allocating the DATA_RDY interrupt from Core 1.
+  xSemaphoreTake(worker_ready, portMAX_DELAY);
+  vSemaphoreDelete(worker_ready);
+  worker_ready = nullptr;
   return true;
 }
 
 bool dispatchImuAcquisition(std::uint32_t* const sequence) {
-  if (sequence == nullptr || request_queue == nullptr ||
+  if (sequence == nullptr || result_queue == nullptr ||
       acquisition_task == nullptr) {
+    incrementStat(&ImuAcquisitionStats::dispatch_failures);
+    return false;
+  }
+
+  if (drdy_authoritative.load(std::memory_order_acquire)) {
+    // Do not trigger an MPU read from the sensor-frame request. The IRQ-owned
+    // worker is already waiting for DATA_RDY; the coordinator waits for the
+    // first hardware-produced sample newer than this snapshot.
+    *sequence = drdy_sequence.load(std::memory_order_acquire) + 1U;
+    incrementStat(&ImuAcquisitionStats::requests);
+    return true;
+  }
+
+  if (request_queue == nullptr) {
     incrementStat(&ImuAcquisitionStats::dispatch_failures);
     return false;
   }
@@ -177,6 +256,17 @@ bool tryCollectImuAcquisition(const std::uint32_t expected_sequence,
   }
 
   ImuAcquisitionResult candidate{};
+  if (drdy_authoritative.load(std::memory_order_acquire)) {
+    // IRQ mode uses result_queue as a latest-sample mailbox. Do not consume a
+    // pre-request sample; the next IRQ overwrites it and satisfies expected.
+    if (xQueuePeek(result_queue, &candidate, 0) != pdTRUE ||
+        !sequenceReached(candidate.sequence, expected_sequence)) {
+      return false;
+    }
+    *result = candidate;
+    return true;
+  }
+
   while (xQueueReceive(result_queue, &candidate, 0) == pdTRUE) {
     if (candidate.sequence == expected_sequence) {
       if (!candidate.ok) {
@@ -211,14 +301,6 @@ bool collectImuAcquisition(const std::uint32_t expected_sequence,
 }
 
 ImuAcquisitionStats imuAcquisitionStats() {
-  // Keep the passive MPU_INT hypothesis observable even when MPU6050 register
-  // initialization fails. This probe is deliberately non-authoritative: with
-  // an unverified route the ISR only counts rising edges and never wakes the
-  // acquisition worker or influences Balance scheduling.
-  if (drdy_gpio < 0) {
-    initDataReadyInput();
-  }
-
   portENTER_CRITICAL(&stats_mux);
   ImuAcquisitionStats copy = stats;
   portEXIT_CRITICAL(&stats_mux);
