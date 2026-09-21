@@ -36,6 +36,21 @@ kMpu6050IntRoutingVerified = false
 
 Observed edges are diagnostics only. A stable edge rate near the configured MPU6050 1 kHz DATA_RDY rate would strongly support the hypothesis; zero or unrelated-rate activity would reject it. FIFO + asynchronous I2C remain valid independent of this probe.
 
+The preferred software-only check is:
+
+```text
+python tools/twtool.py diag drdy-probe 5
+```
+
+The command snapshots `imu status`, observes for the requested interval, then reports the **counter delta** rather than a lifetime count. A result such as:
+
+```text
+drdy_probe,state=CANDIDATE_1KHZ,gpio=21,probe_only=1,seconds=5.000,edges=5001,rate_hz=1000.200,...
+DRDY_PROBE_MATCH
+```
+
+is strong evidence that GPIO21 receives MPU6050 DATA_RDY, but it still does not grant the pin realtime scheduling authority. Use `--require-1khz` when the probe is part of an automated hardware acceptance check.
+
 ## How to establish the interrupt route
 
 Preferred order:
