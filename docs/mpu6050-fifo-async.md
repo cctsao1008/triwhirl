@@ -8,11 +8,7 @@ TriWhirl's MPU6050 runtime path now uses the sensor FIFO and ESP-IDF asynchronou
 MPU6050 internal sampler @ 1 kHz
         |
         +-- accel XYZ + gyro XYZ -> hardware FIFO (12 bytes/sample)
-        +-- DATA_RDY -> MPU_INT
-                         |
-                         | optional TRC-V1.0 jumper
-                         v
-                       IO21
+        +-- DATA_RDY -> MPU_INT (physical destination currently unknown)
         |
         v
 Core-0 IMU acquisition worker
@@ -26,17 +22,20 @@ RuntimeSensorFrame -> Core 1 estimator / Balance
 
 Temperature is intentionally excluded from FIFO because it is not part of the Balance state. All three gyro axes remain in FIFO so the runtime `imu map` command can still select the planar gyro axis without changing the hardware FIFO layout.
 
-## TRC-V1.0 hardware note
+## Actual TRC-V1.0 hardware note
 
-The schematic names MPU6050 pin 12 `MPU_INT`, but that net is not routed to an ESP32 GPIO. GPIO21 is exposed on P4 and otherwise unused by the current runtime, so firmware configures IO21 as the bring-up DRDY input with an internal pull-down.
+The vendor schematic names MPU6050 pin 12 `MPU_INT` and also shows a 2x10 `P4` header. Photographs of the actual board, despite the `TRC-V1.0` silkscreen, do not show that header or a matching populated footprint. The board instead exposes small production/test-pad arrays on the back side whose net assignments are not known from photographs alone.
 
-To validate hardware DRDY, add a temporary jumper:
+Therefore the physical destination of `MPU_INT` is **unverified**. Firmware deliberately keeps:
 
 ```text
-MPU6050 pin 12 / MPU_INT  ->  ESP32 IO21 / P4 IO21
+kMpu6050IntGpio = -1
+kMpu6050IntRoutingVerified = false
 ```
 
-Without that jumper the FIFO + asynchronous-I2C path still operates from the existing sensor-generation requests. DRDY statistics remain zero/fallback and make the missing physical connection explicit. Do not interpret an unmodified board as DRDY-driven.
+No GPIO jumper should be added based only on the vendor schematic. FIFO + asynchronous I2C remain active without DRDY; the current sensor-generation request remains the scheduling authority.
+
+See `docs/hardware-observed-trc-v1.md` for the physical-board evidence and the continuity/probing plan.
 
 ## Why not DMP
 
@@ -52,4 +51,4 @@ After flashing, repeat `twtool diag realtime-check`. Compare the previous direct
 - Core-1 execution time and period jitter;
 - sensor freshness during short Balance trials.
 
-The next sensor-domain cut is to make a validated MPU_INT edge the generation clock rather than merely observing it alongside the existing request clock.
+Hardware DRDY becomes eligible as the generation clock only after the actual `MPU_INT` PCB route is electrically verified.
