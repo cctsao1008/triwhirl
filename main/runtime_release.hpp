@@ -21,6 +21,10 @@ struct RealtimeReleaseStats {
 // Returns false if the GPTimer release clock could not be initialized.
 bool waitForNextRealtimeRelease();
 
+// True only after the 1 kHz GPTimer clock has been created and started. Balance
+// admission uses this to refuse closed-loop operation on the vTaskDelay fallback.
+bool realtimeReleaseReady();
+
 // Scheduler counters are updated by the realtime control task itself from the
 // task-notification counts returned by FreeRTOS. This avoids inferring missed
 // releases from execution-time histograms. Read/reset these from the realtime
