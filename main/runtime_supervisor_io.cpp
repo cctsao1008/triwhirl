@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "runtime_balance.hpp"
 #include "runtime_command_parser.hpp"
 #include "runtime_diagnostics.hpp"
 #include "runtime_snapshot.hpp"
@@ -172,6 +173,17 @@ void formatSwingStatusPayload(const RuntimeReply& reply) {
   writeFormatted(buffer, length, sizeof(buffer));
 }
 
+void formatBalanceStatusPayload(const RuntimeReply& reply) {
+  char buffer[512];
+  const int length = std::snprintf(
+      buffer, sizeof(buffer),
+      "balance,configured=%d,active=%d,k_theta=%.9g,k_rate=%.9g,k_wheel=%.9g,theta_ref_deg=%.3f,capture_deg=%.3f,fall_deg=%.3f,vq_limit_v=%.3f,wheel_limit_rad_s=%.3f,error_deg=%.3f\r\n",
+      reply.value0, reply.value1, reply.float0, reply.float1, reply.float2,
+      reply.float3, reply.float4, reply.float5, reply.float6, reply.float7,
+      reply.float8);
+  writeFormatted(buffer, length, sizeof(buffer));
+}
+
 void formatRuntimeReply(const RuntimeReply& reply) {
   char buffer[320];
   int length = 0;
@@ -238,6 +250,31 @@ void formatRuntimeReply(const RuntimeReply& reply) {
       writeFormatted(buffer, length, sizeof(buffer));
       break;
     }
+    case RuntimeReplyCode::kBalanceConfigRejected:
+      writeText("ERR balance config rejected; motor must be stopped and parameters must be finite/in range\r\n");
+      break;
+    case RuntimeReplyCode::kBalanceConfigOk:
+      writeText("OK balance config\r\n");
+      formatBalanceStatusPayload(reply);
+      break;
+    case RuntimeReplyCode::kBalanceStartRejected:
+      length = std::snprintf(
+          buffer, sizeof(buffer), "ERR balance start rejected reason=%s\r\n",
+          balanceStartFailureName(
+              static_cast<BalanceStartFailure>(reply.value0)));
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kBalanceStartOk:
+      length = std::snprintf(buffer, sizeof(buffer),
+                             "OK balance start vq_v=%.6f\r\n", reply.float0);
+      writeFormatted(buffer, length, sizeof(buffer));
+      break;
+    case RuntimeReplyCode::kBalanceStopOk:
+      writeText("OK balance stop\r\n");
+      break;
+    case RuntimeReplyCode::kBalanceStatus:
+      formatBalanceStatusPayload(reply);
+      break;
     case RuntimeReplyCode::kTimingResetOk:
       writeText("OK timing reset\r\n");
       break;
@@ -600,6 +637,10 @@ void writeHelp() {
       "  swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n"
       "  swing start\r\n"
       "  swing abort\r\n"
+      "  balance status\r\n"
+      "  balance config <k_theta> <k_rate> <k_wheel> <theta_ref_deg> <capture_deg> <fall_deg> <vq_limit_v> <wheel_limit_rad_s>\r\n"
+      "  balance start\r\n"
+      "  balance stop\r\n"
       "  timing profile <status|on|off|reset>\r\n";
   writeText(kHelp);
 }
