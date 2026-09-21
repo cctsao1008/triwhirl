@@ -8,6 +8,7 @@ enum class BalanceStartFailure : int {
   kNone = 0,
   kAlreadyActive,
   kMotorActive,
+  kReleaseClock,
   kControllerConfig,
   kMotorConfig,
   kEncoder,
