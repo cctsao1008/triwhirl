@@ -55,6 +55,10 @@ void mpuDataReadyIsr(void*) {
 }
 
 bool initDataReadyInput() {
+  if (drdy_gpio >= 0) {
+    return drdy_irq_enabled;
+  }
+
   if (triwhirl::board::kMpu6050IntRoutingVerified &&
       triwhirl::board::kMpu6050IntGpio >= 0) {
     drdy_gpio = triwhirl::board::kMpu6050IntGpio;
@@ -88,6 +92,7 @@ bool initDataReadyInput() {
     drdy_gpio = -1;
     return false;
   }
+  drdy_irq_enabled = true;
   return true;
 }
 
@@ -206,6 +211,14 @@ bool collectImuAcquisition(const std::uint32_t expected_sequence,
 }
 
 ImuAcquisitionStats imuAcquisitionStats() {
+  // Keep the passive MPU_INT hypothesis observable even when MPU6050 register
+  // initialization fails. This probe is deliberately non-authoritative: with
+  // an unverified route the ISR only counts rising edges and never wakes the
+  // acquisition worker or influences Balance scheduling.
+  if (drdy_gpio < 0) {
+    initDataReadyInput();
+  }
+
   portENTER_CRITICAL(&stats_mux);
   ImuAcquisitionStats copy = stats;
   portEXIT_CRITICAL(&stats_mux);
