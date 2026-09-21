@@ -95,7 +95,8 @@ def main() -> None:
              "result.started_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
              "result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
              "tryCollectImuAcquisition(", "gpio_isr_handler_add(",
-             "vTaskNotifyGiveFromISR(", "drdy_fallback_reads"),
+             "vTaskNotifyGiveFromISR(", "drdy_fallback_reads",
+             "kMpu6050IntRoutingVerified"),
             "MPU6050 physical acquisition/DRDY contract regressed")
 
     require(frame_h,
@@ -155,10 +156,12 @@ def main() -> None:
             ("trans_queue_depth", "kDefaultAsyncI2cQueueDepth = 4U"),
             "I2C bus no longer reserves a bounded async transaction queue")
     require(board_h,
-            ("kMpu6050IntGpio = 21", "kMpu6050IntRequiresJumper = true"),
-            "TRC-V1.0 MPU_INT bring-up wiring contract is missing")
+            ("kMpu6050IntGpio = -1", "kMpu6050IntRoutingVerified = false"),
+            "unverified production-board MPU_INT routing must remain disabled")
+    if "kMpu6050IntGpio = 21" in board_h or "kMpu6050IntRequiresJumper" in board_h:
+        fail("vendor-schematic P4/IO21 assumption leaked back into board mapping")
     if "esp_driver_gpio" not in cmake:
-        fail("main component is missing explicit GPIO dependency for MPU DRDY")
+        fail("main component is missing explicit GPIO dependency for optional MPU DRDY")
 
     print("runtime sensor-domain contract: PASS")
     print("  sensor_i2c_irq_domain=core0")
@@ -167,7 +170,7 @@ def main() -> None:
     print("  imu_worker=core0")
     print("  mpu_runtime_source=fifo_accel_xyz_gyro_xyz")
     print("  mpu_i2c=asynchronous_callback")
-    print("  mpu_drdy_gpio=io21_requires_trc_v1_jumper")
+    print("  mpu_drdy_route=unverified_disabled")
     print("  sensor_frame_coordinator=core0")
     print("  realtime_sensor_join=none")
     print("  blocking_mpu_i2c_in_realtime=no")
