@@ -11,6 +11,7 @@
 #include "runtime_balance.hpp"
 #include "runtime_command_parser.hpp"
 #include "runtime_diagnostics.hpp"
+#include "runtime_imu_acquisition.hpp"
 #include "runtime_snapshot.hpp"
 #include "triwhirl/ble_transport.hpp"
 #include "triwhirl/runtime_logger.hpp"
@@ -731,10 +732,11 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         triwhirl::safetyFaultName(first_fault));
     writeFormatted(buffer, length, sizeof(buffer));
   } else if (imu_status) {
-    char buffer[640];
+    const ImuAcquisitionStats imu_acq = imuAcquisitionStats();
+    char buffer[896];
     const int length = std::snprintf(
         buffer, sizeof(buffer),
-        "imu,ready=%d,sample_ok=%d,who_ok=%d,who=0x%02x,bias_valid=%d,calibrating=%d,ax=%.6f,ay=%.6f,az=%.6f,gx=%.6f,gy=%.6f,gz=%.6f,temp_c=%.3f,bx=%.6f,by=%.6f,bz=%.6f,map=%d:%d:%d:%d:%d:%d,read_errors=%lu\r\n",
+        "imu,ready=%d,sample_ok=%d,who_ok=%d,who=0x%02x,bias_valid=%d,calibrating=%d,ax=%.6f,ay=%.6f,az=%.6f,gx=%.6f,gy=%.6f,gz=%.6f,temp_c=%.3f,bx=%.6f,by=%.6f,bz=%.6f,map=%d:%d:%d:%d:%d:%d,read_errors=%lu,drdy_gpio=%d,drdy_probe_only=%d,drdy_edges=%llu,drdy_consumed=%llu,drdy_fallback_reads=%llu\r\n",
         snapshot.imu_ready ? 1 : 0, snapshot.imu_sample_valid ? 1 : 0,
         snapshot.imu_identity_valid ? 1 : 0,
         static_cast<unsigned>(snapshot.imu_who_am_i),
@@ -746,7 +748,11 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         snapshot.imu_map_sin_axis, snapshot.imu_map_cos_axis,
         snapshot.imu_map_gyro_axis, snapshot.imu_map_sin_sign,
         snapshot.imu_map_cos_sign, snapshot.imu_map_gyro_sign,
-        static_cast<unsigned long>(snapshot.imu_read_errors));
+        static_cast<unsigned long>(snapshot.imu_read_errors), imu_acq.drdy_gpio,
+        imu_acq.drdy_probe_only ? 1 : 0,
+        static_cast<unsigned long long>(imu_acq.drdy_edges),
+        static_cast<unsigned long long>(imu_acq.drdy_consumed),
+        static_cast<unsigned long long>(imu_acq.drdy_fallback_reads));
     writeFormatted(buffer, length, sizeof(buffer));
   } else if (log_status) {
     char buffer[512];
