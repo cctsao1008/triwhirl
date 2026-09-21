@@ -1,14 +1,10 @@
 #include "runtime_platform.hpp"
 
-#include <cstddef>
-
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
 namespace triwhirl::runtime {
 namespace {
-
-constexpr std::size_t kDefaultAsyncI2cQueueDepth = 4U;
 
 struct I2cBusCreateContext {
   i2c_master_bus_config_t config{};
@@ -39,20 +35,16 @@ esp_err_t createI2cMasterBusOnCore(
     return ESP_ERR_INVALID_ARG;
   }
 
-  // ESP-IDF requires a non-zero transaction queue when a device later opts
-  // into asynchronous master callbacks. Reserve a small bounded queue on both
-  // sensor buses; synchronous devices simply leave it unused.
-  i2c_master_bus_config_t effective = *config;
-  if (effective.trans_queue_depth == 0U) {
-    effective.trans_queue_depth = kDefaultAsyncI2cQueueDepth;
-  }
-
+  // Preserve the caller's bus mode exactly. In particular, do not force a
+  // non-zero trans_queue_depth here. ESP-IDF uses that queue for asynchronous
+  // transactions, and enabling it globally changes the behavior of the
+  // synchronous probe/configuration sequence used during sensor bring-up.
   if (xPortGetCoreID() == target_core) {
-    return i2c_new_master_bus(&effective, output);
+    return i2c_new_master_bus(config, output);
   }
 
   I2cBusCreateContext context{};
-  context.config = effective;
+  context.config = *config;
   context.output = output;
   context.done = xSemaphoreCreateBinary();
   if (context.done == nullptr) {
