@@ -40,6 +40,11 @@ class Mpu6050 {
   // pure cached read, so diagnostic status commands never issue live I2C.
   bool readWhoAmI(std::uint8_t* who_am_i);
 
+  // Preserve the last identity value observed during init even when a later
+  // configuration stage fails and the temporary device handle is discarded.
+  // This is diagnostic-only and never performs I2C.
+  bool lastInitWhoAmI(std::uint8_t* who_am_i) const;
+
   // Runtime samples come from the MPU hardware FIFO. FIFO_COUNT and FIFO_R_W
   // transfers are submitted through ESP-IDF's asynchronous I2C master path;
   // this caller sleeps on an ISR-signalled semaphore instead of occupying CPU
@@ -80,6 +85,8 @@ class Mpu6050 {
   i2c_master_dev_handle_t device_ = nullptr;
   std::uint8_t who_am_i_ = 0U;
   bool who_am_i_valid_ = false;
+  std::uint8_t last_init_who_am_i_ = 0U;
+  bool last_init_who_am_i_valid_ = false;
   bool fifo_enabled_ = false;
   bool async_i2c_enabled_ = false;
 
