@@ -19,9 +19,13 @@ constexpr std::uint8_t kMpu6050I2cAddress = 0x68U;
 
 // The vendor TRC-V1.0 schematic shows MPU_INT and a P4 header, but photographs
 // of the actual TRC-V1.0 production board do not show that header and do not
-// establish which ESP32 GPIO, if any, receives MPU6050 pin 12. Keep DRDY
-// disabled until continuity/probing verifies the physical net.
+// establish which ESP32 GPIO, if any, receives MPU6050 pin 12. The vendor V1.1
+// source also never consumes MPU_INT; GPIO21 is unused there. Treat IO21 only as
+// a non-authoritative passive probe hypothesis until a ~1 kHz DATA_RDY waveform
+// is observed or continuity confirms the route. Balance never depends on this
+// probe while routing remains unverified.
 constexpr int kMpu6050IntGpio = -1;
+constexpr int kMpu6050IntProbeGpio = 21;
 constexpr bool kMpu6050IntRoutingVerified = false;
 
 // Additional schematic-defined board interfaces. These are named here so a
