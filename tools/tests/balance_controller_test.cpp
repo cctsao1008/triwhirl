@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cmath>
+#include <initializer_list>
 
 #include "triwhirl/balance_controller.hpp"
 #include "triwhirl/upright_geometry.hpp"
