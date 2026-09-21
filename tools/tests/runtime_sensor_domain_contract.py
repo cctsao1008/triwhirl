@@ -23,6 +23,7 @@ def require(text: str, tokens: tuple[str, ...], message: str) -> None:
 
 def main() -> None:
     runtime = (MAIN / "runtime_main.cpp").read_text(encoding="utf-8")
+    platform_cpp = (MAIN / "runtime_platform.cpp").read_text(encoding="utf-8")
     encoder_h = (MAIN / "runtime_encoder_acquisition.hpp").read_text(encoding="utf-8")
     encoder_cpp = (MAIN / "runtime_encoder_acquisition.cpp").read_text(encoding="utf-8")
     imu_h = (MAIN / "runtime_imu_acquisition.hpp").read_text(encoding="utf-8")
@@ -32,6 +33,7 @@ def main() -> None:
     pipeline_cpp = (MAIN / "runtime_sensor_pipeline.cpp").read_text(encoding="utf-8")
     sensor_state = (MAIN / "runtime_sensor_state.cpp").read_text(encoding="utf-8")
     cmake = (MAIN / "CMakeLists.txt").read_text(encoding="utf-8")
+    board_h = (HW / "include" / "triwhirl" / "board.hpp").read_text(encoding="utf-8")
     mpu_h = (HW / "include" / "triwhirl" / "drivers" / "mpu6050.hpp").read_text(encoding="utf-8")
     mpu_cpp = (HW / "mpu6050.cpp").read_text(encoding="utf-8")
 
@@ -78,8 +80,10 @@ def main() -> None:
 
     require(encoder_h, ("tryCollectEncoderAcquisition(",),
             "AS5600 non-blocking result probe is missing")
-    require(imu_h, ("tryCollectImuAcquisition(",),
-            "MPU6050 non-blocking result probe is missing")
+    require(imu_h,
+            ("tryCollectImuAcquisition(", "drdy_edges", "drdy_consumed",
+             "drdy_fallback_reads"),
+            "MPU6050 acquisition/DRDY observability contract is incomplete")
     require(encoder_cpp,
             ("request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
              "result.started_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
@@ -90,8 +94,9 @@ def main() -> None:
             ("request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
              "result.started_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
              "result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
-             "tryCollectImuAcquisition("),
-            "MPU6050 physical acquisition/result-probe contract regressed")
+             "tryCollectImuAcquisition(", "gpio_isr_handler_add(",
+             "vTaskNotifyGiveFromISR(", "drdy_fallback_reads"),
+            "MPU6050 physical acquisition/DRDY contract regressed")
 
     require(frame_h,
             ("struct RuntimeSensorFrame", "encoder_received", "imu_expected",
@@ -128,18 +133,41 @@ def main() -> None:
              "RuntimeStateEventType::kImuCalibrationComplete"),
             "Core-1 IMU state commit path is incomplete")
 
+    # MPU6050 runtime acquisition is FIFO-backed and uses ESP-IDF asynchronous
+    # master callbacks. Temperature is deliberately not in the runtime FIFO;
+    # accel + all gyro axes preserve runtime axis remapping in a 12-byte packet.
     require(mpu_h,
-            ("std::atomic<bool> timing_profile_enabled_", "portMUX_TYPE timing_mux_"),
-            "MPU timing-profile state is not cross-core safe")
+            ("kFifoSampleBytes = 12U", "asyncTransactionDone(",
+             "asyncRead(", "fifoEnabled()", "asyncI2cEnabled()",
+             "std::atomic<bool> timing_profile_enabled_", "portMUX_TYPE timing_mux_"),
+            "MPU FIFO/async-I2C interface contract is incomplete")
     require(mpu_cpp,
-            ("portENTER_CRITICAL(&timing_mux_)", "portEXIT_CRITICAL(&timing_mux_)"),
-            "MPU timing-profile implementation lost cross-core synchronization")
+            ("kRuntimeFifoSources = 0x78U", "kRegFifoCountHigh = 0x72U",
+             "kRegFifoReadWrite = 0x74U", "configureRuntimeFifo()",
+             "i2c_master_register_event_callbacks(",
+             "i2c_master_transmit_receive(", "xSemaphoreGiveFromISR(",
+             "portENTER_CRITICAL(&timing_mux_)", "portEXIT_CRITICAL(&timing_mux_)"),
+            "MPU FIFO/async-I2C implementation regressed")
+    if "kRegAccelXoutH, data, sizeof(data)" in mpu_cpp:
+        fail("runtime MPU sampling regressed to direct 14-byte register polling")
+
+    require(platform_cpp,
+            ("trans_queue_depth", "kDefaultAsyncI2cQueueDepth = 4U"),
+            "I2C bus no longer reserves a bounded async transaction queue")
+    require(board_h,
+            ("kMpu6050IntGpio = 21", "kMpu6050IntRequiresJumper = true"),
+            "TRC-V1.0 MPU_INT bring-up wiring contract is missing")
+    if "esp_driver_gpio" not in cmake:
+        fail("main component is missing explicit GPIO dependency for MPU DRDY")
 
     print("runtime sensor-domain contract: PASS")
     print("  sensor_i2c_irq_domain=core0")
     print("  sensor_controllers=i2c0_as5600,i2c1_mpu6050")
     print("  encoder_worker=core0")
     print("  imu_worker=core0")
+    print("  mpu_runtime_source=fifo_accel_xyz_gyro_xyz")
+    print("  mpu_i2c=asynchronous_callback")
+    print("  mpu_drdy_gpio=io21_requires_trc_v1_jumper")
     print("  sensor_frame_coordinator=core0")
     print("  realtime_sensor_join=none")
     print("  blocking_mpu_i2c_in_realtime=no")
