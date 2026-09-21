@@ -36,6 +36,8 @@ jobs:
             components/triwhirl_core/balance_controller.cpp \
             -o /tmp/balance-controller-test
           /tmp/balance-controller-test
+      - name: "test: H-infinity balance deployment command"
+        run: python tools/tests/hinf_balance_command_test.py
       - name: "test: host toolbox routing"
         run: |
           python tools/twtool.py --help
