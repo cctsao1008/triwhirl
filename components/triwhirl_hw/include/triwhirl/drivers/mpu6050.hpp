@@ -45,10 +45,11 @@ class Mpu6050 {
   // This is diagnostic-only and never performs I2C.
   bool lastInitWhoAmI(std::uint8_t* who_am_i) const;
 
-  // Runtime samples come from the MPU hardware FIFO. FIFO_COUNT and FIFO_R_W
-  // transfers are submitted through ESP-IDF's asynchronous I2C master path;
-  // this caller sleeps on an ISR-signalled semaphore instead of occupying CPU
-  // while SCL/SDA shift the bytes.
+  // Runtime samples come from the MPU hardware FIFO. The known-good baseline
+  // keeps the I2C bus synchronous during probe/configuration and therefore uses
+  // synchronous FIFO_COUNT/FIFO_R_W transfers on the Core-0 acquisition worker.
+  // The optional async machinery remains available for a future, separately
+  // validated ESP-IDF path; it is not required for Balance correctness.
   bool readSample(Mpu6050Sample* sample);
 
   bool fifoEnabled() const { return fifo_enabled_; }
