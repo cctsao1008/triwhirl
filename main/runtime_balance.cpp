@@ -105,7 +105,7 @@ void updateRuntimeBalance() {
   if (!balance_active) return;
 
   if (!realtimeReleaseReady()) {
-    tripBalanceFault(triwhirl::SafetyFault::kTiming);
+    tripBalanceFault(triwhirl::SafetyFault::kControlTiming);
     return;
   }
   if (state::safety_latch.faulted()) {
