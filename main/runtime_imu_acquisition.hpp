@@ -31,6 +31,10 @@ struct ImuAcquisitionStats {
 bool initImuAcquisition(ImuReadFn read_fn, void* context, int core_id,
                         unsigned task_priority);
 bool dispatchImuAcquisition(std::uint32_t* sequence);
+// Non-blocking result probe used by the shared Core-0 frame coordinator. It
+// drains stale generations but does not count an absent result as a timeout.
+bool tryCollectImuAcquisition(std::uint32_t expected_sequence,
+                              ImuAcquisitionResult* result);
 bool collectImuAcquisition(std::uint32_t expected_sequence,
                            std::uint32_t join_budget_us,
                            ImuAcquisitionResult* result);

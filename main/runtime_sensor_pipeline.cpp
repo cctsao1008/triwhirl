@@ -12,9 +12,9 @@ namespace {
 
 constexpr UBaseType_t kSensorFrameRequestDepth = 1U;
 constexpr UBaseType_t kSensorFrameMailboxDepth = 1U;
-// This wait is owned by the Core-0 coordinator, not by the 1 kHz realtime
-// control task. A slow/stuck transfer therefore produces an incomplete frame
-// and eventually a freshness failure rather than extending the Core-1 deadline.
+// One shared Core-0 join deadline bounds the complete generation. Encoder and
+// IMU workers run independently, but the coordinator never spends a full join
+// budget on each sensor sequentially.
 constexpr std::uint32_t kSensorWorkerJoinBudgetUs = 1500U;
 
 struct SensorFrameRequest {
@@ -60,13 +60,34 @@ void sensorFramePipelineTask(void*) {
     const bool imu_dispatched =
         !pipeline_imu_enabled || dispatchImuAcquisition(&imu_sequence);
 
-    if (encoder_dispatched) {
-      frame.encoder_received = collectEncoderAcquisition(
-          encoder_sequence, kSensorWorkerJoinBudgetUs, &frame.encoder);
+    const std::int64_t join_deadline_us =
+        esp_timer_get_time() +
+        static_cast<std::int64_t>(kSensorWorkerJoinBudgetUs);
+    while (esp_timer_get_time() < join_deadline_us) {
+      if (encoder_dispatched && !frame.encoder_received) {
+        frame.encoder_received = tryCollectEncoderAcquisition(
+            encoder_sequence, &frame.encoder);
+      }
+      if (pipeline_imu_enabled && imu_dispatched && !frame.imu_received) {
+        frame.imu_received =
+            tryCollectImuAcquisition(imu_sequence, &frame.imu);
+      }
+      if ((!encoder_dispatched || frame.encoder_received) &&
+          (!pipeline_imu_enabled || !imu_dispatched || frame.imu_received)) {
+        break;
+      }
+      taskYIELD();
     }
-    if (pipeline_imu_enabled && imu_dispatched) {
+
+    // One final zero-budget probe closes the deadline race and records the
+    // worker join timeout exactly once when a dispatched result is still absent.
+    if (encoder_dispatched && !frame.encoder_received) {
+      frame.encoder_received = collectEncoderAcquisition(
+          encoder_sequence, 0U, &frame.encoder);
+    }
+    if (pipeline_imu_enabled && imu_dispatched && !frame.imu_received) {
       frame.imu_received = collectImuAcquisition(
-          imu_sequence, kSensorWorkerJoinBudgetUs, &frame.imu);
+          imu_sequence, 0U, &frame.imu);
     }
 
     const bool encoder_valid = frame.encoder_received && frame.encoder.ok;

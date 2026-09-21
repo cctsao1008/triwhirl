@@ -26,6 +26,10 @@ struct EncoderAcquisitionStats {
 bool initEncoderAcquisition(EncoderReadFn read_fn, void* context, int core_id,
                             unsigned task_priority);
 bool dispatchEncoderAcquisition(std::uint32_t* sequence);
+// Non-blocking result probe used by the shared Core-0 frame coordinator. It
+// drains stale generations but does not count an absent result as a timeout.
+bool tryCollectEncoderAcquisition(std::uint32_t expected_sequence,
+                                  EncoderAcquisitionResult* result);
 bool collectEncoderAcquisition(std::uint32_t expected_sequence,
                                std::uint32_t join_budget_us,
                                EncoderAcquisitionResult* result);

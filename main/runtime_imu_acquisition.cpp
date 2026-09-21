@@ -89,6 +89,26 @@ bool dispatchImuAcquisition(std::uint32_t* const sequence) {
   return true;
 }
 
+bool tryCollectImuAcquisition(const std::uint32_t expected_sequence,
+                              ImuAcquisitionResult* const result) {
+  if (result == nullptr || result_queue == nullptr) {
+    return false;
+  }
+
+  ImuAcquisitionResult candidate{};
+  while (xQueueReceive(result_queue, &candidate, 0) == pdTRUE) {
+    if (candidate.sequence == expected_sequence) {
+      if (!candidate.ok) {
+        incrementStat(&ImuAcquisitionStats::read_failures);
+      }
+      *result = candidate;
+      return true;
+    }
+    incrementStat(&ImuAcquisitionStats::stale_results);
+  }
+  return false;
+}
+
 bool collectImuAcquisition(const std::uint32_t expected_sequence,
                            const std::uint32_t join_budget_us,
                            ImuAcquisitionResult* const result) {
@@ -99,18 +119,9 @@ bool collectImuAcquisition(const std::uint32_t expected_sequence,
 
   const std::int64_t deadline_us =
       esp_timer_get_time() + static_cast<std::int64_t>(join_budget_us);
-  ImuAcquisitionResult candidate{};
-
   do {
-    while (xQueueReceive(result_queue, &candidate, 0) == pdTRUE) {
-      if (candidate.sequence == expected_sequence) {
-        if (!candidate.ok) {
-          incrementStat(&ImuAcquisitionStats::read_failures);
-        }
-        *result = candidate;
-        return true;
-      }
-      incrementStat(&ImuAcquisitionStats::stale_results);
+    if (tryCollectImuAcquisition(expected_sequence, result)) {
+      return true;
     }
   } while (esp_timer_get_time() < deadline_us);
 

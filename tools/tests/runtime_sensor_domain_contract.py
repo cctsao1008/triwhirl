@@ -76,16 +76,22 @@ def main() -> None:
                 ("requested_at_us", "started_at_us", "completed_at_us"),
                 f"{name} acquisition timestamps are incomplete")
 
+    require(encoder_h, ("tryCollectEncoderAcquisition(",),
+            "AS5600 non-blocking result probe is missing")
+    require(imu_h, ("tryCollectImuAcquisition(",),
+            "MPU6050 non-blocking result probe is missing")
     require(encoder_cpp,
             ("request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
              "result.started_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
-             "result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time())"),
-            "AS5600 physical acquisition timestamps regressed")
+             "result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
+             "tryCollectEncoderAcquisition("),
+            "AS5600 physical acquisition/result-probe contract regressed")
     require(imu_cpp,
             ("request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
              "result.started_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
-             "result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time())"),
-            "MPU6050 physical acquisition timestamps regressed")
+             "result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time())",
+             "tryCollectImuAcquisition("),
+            "MPU6050 physical acquisition/result-probe contract regressed")
 
     require(frame_h,
             ("struct RuntimeSensorFrame", "encoder_received", "imu_expected",
@@ -99,10 +105,16 @@ def main() -> None:
             "sensor pipeline API is incomplete")
     require(pipeline_cpp,
             ("sensorFramePipelineTask(", "dispatchEncoderAcquisition(",
-             "dispatchImuAcquisition(", "collectEncoderAcquisition(",
-             "collectImuAcquisition(", "xQueueOverwrite(frame_queue, &frame)",
+             "dispatchImuAcquisition(", "tryCollectEncoderAcquisition(",
+             "tryCollectImuAcquisition(", "join_deadline_us",
+             "collectEncoderAcquisition(\n          encoder_sequence, 0U",
+             "collectImuAcquisition(\n          imu_sequence, 0U",
+             "xQueueOverwrite(frame_queue, &frame)",
              "kSensorWorkerJoinBudgetUs = 1500U"),
             "Core-0 coherent sensor coordinator is incomplete")
+    if "encoder_sequence, kSensorWorkerJoinBudgetUs" in pipeline_cpp or \
+       "imu_sequence, kSensorWorkerJoinBudgetUs" in pipeline_cpp:
+        fail("sensor coordinator returned to sequential per-sensor join budgets")
     if '"runtime_sensor_pipeline.cpp"' not in cmake:
         fail("runtime_sensor_pipeline.cpp is not compiled explicitly")
 
@@ -127,6 +139,7 @@ def main() -> None:
     print("  realtime_sensor_join=none")
     print("  blocking_mpu_i2c_in_realtime=no")
     print("  sensor_frame=bounded_timestamped_generation")
+    print("  sensor_frame_join_budget=shared_1500us")
     print("  sensor_freshness_limit_us=3000")
     print("  imu_timing_profile=cross_core_safe")
 

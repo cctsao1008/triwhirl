@@ -90,6 +90,26 @@ bool dispatchEncoderAcquisition(std::uint32_t* const sequence) {
   return true;
 }
 
+bool tryCollectEncoderAcquisition(const std::uint32_t expected_sequence,
+                                  EncoderAcquisitionResult* const result) {
+  if (result == nullptr || result_queue == nullptr) {
+    return false;
+  }
+
+  EncoderAcquisitionResult candidate{};
+  while (xQueueReceive(result_queue, &candidate, 0) == pdTRUE) {
+    if (candidate.sequence == expected_sequence) {
+      if (!candidate.ok) {
+        incrementStat(&EncoderAcquisitionStats::read_failures);
+      }
+      *result = candidate;
+      return true;
+    }
+    incrementStat(&EncoderAcquisitionStats::stale_results);
+  }
+  return false;
+}
+
 bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
                                const std::uint32_t join_budget_us,
                                EncoderAcquisitionResult* const result) {
@@ -100,18 +120,9 @@ bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
 
   const std::int64_t deadline_us =
       esp_timer_get_time() + static_cast<std::int64_t>(join_budget_us);
-  EncoderAcquisitionResult candidate{};
-
   do {
-    while (xQueueReceive(result_queue, &candidate, 0) == pdTRUE) {
-      if (candidate.sequence == expected_sequence) {
-        if (!candidate.ok) {
-          incrementStat(&EncoderAcquisitionStats::read_failures);
-        }
-        *result = candidate;
-        return true;
-      }
-      incrementStat(&EncoderAcquisitionStats::stale_results);
+    if (tryCollectEncoderAcquisition(expected_sequence, result)) {
+      return true;
     }
   } while (esp_timer_get_time() < deadline_us);
 
