@@ -19,7 +19,14 @@ TaskHandle_t acquisition_task = nullptr;
 ImuReadFn imu_read_fn = nullptr;
 void* imu_read_context = nullptr;
 std::uint32_t request_sequence = 0U;
+portMUX_TYPE stats_mux = portMUX_INITIALIZER_UNLOCKED;
 ImuAcquisitionStats stats{};
+
+void incrementStat(std::uint64_t ImuAcquisitionStats::* const field) {
+  portENTER_CRITICAL(&stats_mux);
+  ++(stats.*field);
+  portEXIT_CRITICAL(&stats_mux);
+}
 
 void imuAcquisitionTask(void*) {
   ImuAcquisitionRequest request{};
@@ -65,7 +72,7 @@ bool initImuAcquisition(const ImuReadFn read_fn, void* const context,
 bool dispatchImuAcquisition(std::uint32_t* const sequence) {
   if (sequence == nullptr || request_queue == nullptr ||
       acquisition_task == nullptr) {
-    ++stats.dispatch_failures;
+    incrementStat(&ImuAcquisitionStats::dispatch_failures);
     return false;
   }
 
@@ -73,11 +80,11 @@ bool dispatchImuAcquisition(std::uint32_t* const sequence) {
   request.sequence = ++request_sequence;
   request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
   if (xQueueSend(request_queue, &request, 0) != pdTRUE) {
-    ++stats.dispatch_failures;
+    incrementStat(&ImuAcquisitionStats::dispatch_failures);
     return false;
   }
 
-  ++stats.requests;
+  incrementStat(&ImuAcquisitionStats::requests);
   *sequence = request.sequence;
   return true;
 }
@@ -86,7 +93,7 @@ bool collectImuAcquisition(const std::uint32_t expected_sequence,
                            const std::uint32_t join_budget_us,
                            ImuAcquisitionResult* const result) {
   if (result == nullptr || result_queue == nullptr) {
-    ++stats.join_timeouts;
+    incrementStat(&ImuAcquisitionStats::join_timeouts);
     return false;
   }
 
@@ -98,25 +105,30 @@ bool collectImuAcquisition(const std::uint32_t expected_sequence,
     while (xQueueReceive(result_queue, &candidate, 0) == pdTRUE) {
       if (candidate.sequence == expected_sequence) {
         if (!candidate.ok) {
-          ++stats.read_failures;
+          incrementStat(&ImuAcquisitionStats::read_failures);
         }
         *result = candidate;
         return true;
       }
-      ++stats.stale_results;
+      incrementStat(&ImuAcquisitionStats::stale_results);
     }
   } while (esp_timer_get_time() < deadline_us);
 
-  ++stats.join_timeouts;
+  incrementStat(&ImuAcquisitionStats::join_timeouts);
   return false;
 }
 
 ImuAcquisitionStats imuAcquisitionStats() {
-  return stats;
+  portENTER_CRITICAL(&stats_mux);
+  const ImuAcquisitionStats copy = stats;
+  portEXIT_CRITICAL(&stats_mux);
+  return copy;
 }
 
 void resetImuAcquisitionStats() {
+  portENTER_CRITICAL(&stats_mux);
   stats = {};
+  portEXIT_CRITICAL(&stats_mux);
 }
 
 }  // namespace triwhirl::runtime

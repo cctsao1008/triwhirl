@@ -19,7 +19,14 @@ TaskHandle_t acquisition_task = nullptr;
 EncoderReadFn encoder_read_fn = nullptr;
 void* encoder_read_context = nullptr;
 std::uint32_t request_sequence = 0U;
+portMUX_TYPE stats_mux = portMUX_INITIALIZER_UNLOCKED;
 EncoderAcquisitionStats stats{};
+
+void incrementStat(std::uint64_t EncoderAcquisitionStats::* const field) {
+  portENTER_CRITICAL(&stats_mux);
+  ++(stats.*field);
+  portEXIT_CRITICAL(&stats_mux);
+}
 
 void encoderAcquisitionTask(void*) {
   EncoderAcquisitionRequest request{};
@@ -66,7 +73,7 @@ bool initEncoderAcquisition(const EncoderReadFn read_fn, void* const context,
 bool dispatchEncoderAcquisition(std::uint32_t* const sequence) {
   if (sequence == nullptr || request_queue == nullptr ||
       acquisition_task == nullptr) {
-    ++stats.dispatch_failures;
+    incrementStat(&EncoderAcquisitionStats::dispatch_failures);
     return false;
   }
 
@@ -74,11 +81,11 @@ bool dispatchEncoderAcquisition(std::uint32_t* const sequence) {
   request.sequence = ++request_sequence;
   request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
   if (xQueueSend(request_queue, &request, 0) != pdTRUE) {
-    ++stats.dispatch_failures;
+    incrementStat(&EncoderAcquisitionStats::dispatch_failures);
     return false;
   }
 
-  ++stats.requests;
+  incrementStat(&EncoderAcquisitionStats::requests);
   *sequence = request.sequence;
   return true;
 }
@@ -87,7 +94,7 @@ bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
                                const std::uint32_t join_budget_us,
                                EncoderAcquisitionResult* const result) {
   if (result == nullptr || result_queue == nullptr) {
-    ++stats.join_timeouts;
+    incrementStat(&EncoderAcquisitionStats::join_timeouts);
     return false;
   }
 
@@ -99,25 +106,30 @@ bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
     while (xQueueReceive(result_queue, &candidate, 0) == pdTRUE) {
       if (candidate.sequence == expected_sequence) {
         if (!candidate.ok) {
-          ++stats.read_failures;
+          incrementStat(&EncoderAcquisitionStats::read_failures);
         }
         *result = candidate;
         return true;
       }
-      ++stats.stale_results;
+      incrementStat(&EncoderAcquisitionStats::stale_results);
     }
   } while (esp_timer_get_time() < deadline_us);
 
-  ++stats.join_timeouts;
+  incrementStat(&EncoderAcquisitionStats::join_timeouts);
   return false;
 }
 
 EncoderAcquisitionStats encoderAcquisitionStats() {
-  return stats;
+  portENTER_CRITICAL(&stats_mux);
+  const EncoderAcquisitionStats copy = stats;
+  portEXIT_CRITICAL(&stats_mux);
+  return copy;
 }
 
 void resetEncoderAcquisitionStats() {
+  portENTER_CRITICAL(&stats_mux);
   stats = {};
+  portEXIT_CRITICAL(&stats_mux);
 }
 
 }  // namespace triwhirl::runtime
