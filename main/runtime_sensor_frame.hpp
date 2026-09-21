@@ -10,8 +10,8 @@ namespace triwhirl::runtime {
 
 // One request generation binds the AS5600 and MPU6050 acquisitions together.
 // Individual sensor validity is preserved so bring-up modes can degrade
-// independently, while Balance can require complete=true before consuming the
-// frame as a coherent state estimate input.
+// independently. Closed-loop Balance requires complete=true, so its state
+// feedback never mixes independently fresh members from different generations.
 struct RuntimeSensorFrame {
   std::uint32_t sequence = 0U;
   std::uint32_t requested_at_us = 0U;

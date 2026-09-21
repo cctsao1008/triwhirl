@@ -4,6 +4,8 @@
 
 #include "runtime_egress.hpp"
 #include "runtime_release.hpp"
+#include "runtime_sensor_frame.hpp"
+#include "runtime_sensor_pipeline.hpp"
 #include "runtime_state.hpp"
 #include "triwhirl/safety.hpp"
 
@@ -23,6 +25,17 @@ triwhirl::BalanceControllerInput currentBalanceInput() {
   return input;
 }
 
+bool latestBalanceSensorFrame(RuntimeSensorFrame* const frame) {
+  RuntimeSensorFrame latest{};
+  if (!readLatestSensorFrame(&latest) || !latest.complete ||
+      !latest.imu_expected) {
+    if (frame != nullptr) *frame = latest;
+    return false;
+  }
+  if (frame != nullptr) *frame = latest;
+  return true;
+}
+
 void tripBalanceFault(const triwhirl::SafetyFault fault) {
   const std::uint32_t before = state::safety_latch.mask();
   state::safety_latch.trip(fault);
@@ -35,6 +48,14 @@ void tripBalanceFault(const triwhirl::SafetyFault fault) {
     event.u32_0 = state::safety_latch.mask();
     publishRuntimeStateEvent(event);
   }
+}
+
+void tripIncompleteBalanceSensorFrame(const RuntimeSensorFrame& frame) {
+  if (!frame.encoder_received || !frame.encoder.ok) {
+    tripBalanceFault(triwhirl::SafetyFault::kEncoderUnavailable);
+    return;
+  }
+  tripBalanceFault(triwhirl::SafetyFault::kImuUnavailable);
 }
 
 }  // namespace
@@ -71,6 +92,7 @@ BalanceStartFailure startRuntimeBalance(float* const initial_vq_v) {
     return BalanceStartFailure::kAttitude;
   }
   if (state::safety_latch.faulted()) return BalanceStartFailure::kSafetyFault;
+  if (!latestBalanceSensorFrame(nullptr)) return BalanceStartFailure::kSensorFrame;
 
   const triwhirl::BalanceControllerInput input = currentBalanceInput();
   const triwhirl::BalanceControllerOutput output =
@@ -131,6 +153,16 @@ void updateRuntimeBalance() {
     return;
   }
 
+  // Balance never combines independently fresh members from different sensor
+  // generations. The latest Core-0 frame must contain successful AS5600 and
+  // MPU6050 results from the same bounded acquisition request. Bring-up modes
+  // may continue using partial frames, but closed-loop Balance fails closed.
+  RuntimeSensorFrame sensor_frame{};
+  if (!latestBalanceSensorFrame(&sensor_frame)) {
+    tripIncompleteBalanceSensorFrame(sensor_frame);
+    return;
+  }
+
   const triwhirl::BalanceControllerInput input = currentBalanceInput();
   const triwhirl::BalanceControllerOutput output =
       triwhirl::evaluateBalanceController(balance_config, input);
@@ -175,6 +207,7 @@ const char* balanceStartFailureName(const BalanceStartFailure failure) {
     case BalanceStartFailure::kImu: return "imu";
     case BalanceStartFailure::kAttitude: return "attitude";
     case BalanceStartFailure::kSafetyFault: return "safety_fault";
+    case BalanceStartFailure::kSensorFrame: return "sensor_frame";
     case BalanceStartFailure::kOutsideCapture: return "outside_capture";
     case BalanceStartFailure::kWheelRate: return "wheel_rate";
   }

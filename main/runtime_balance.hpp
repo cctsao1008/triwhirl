@@ -15,6 +15,7 @@ enum class BalanceStartFailure : int {
   kImu,
   kAttitude,
   kSafetyFault,
+  kSensorFrame,
   kOutsideCapture,
   kWheelRate,
 };
