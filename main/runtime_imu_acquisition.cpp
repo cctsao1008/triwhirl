@@ -47,7 +47,8 @@ void mpuDataReadyIsr(void*) {
 }
 
 bool initDataReadyInput() {
-  if (triwhirl::board::kMpu6050IntGpio < 0) {
+  if (!triwhirl::board::kMpu6050IntRoutingVerified ||
+      triwhirl::board::kMpu6050IntGpio < 0) {
     return false;
   }
 
@@ -56,8 +57,6 @@ bool initDataReadyInput() {
       1ULL << static_cast<unsigned>(triwhirl::board::kMpu6050IntGpio);
   config.mode = GPIO_MODE_INPUT;
   config.pull_up_en = GPIO_PULLUP_DISABLE;
-  // TRC-V1.0 leaves MPU_INT unconnected. A pull-down keeps IO21 quiet until the
-  // documented bring-up jumper is populated; MPU INT itself is push-pull.
   config.pull_down_en = GPIO_PULLDOWN_ENABLE;
   config.intr_type = GPIO_INTR_POSEDGE;
   if (gpio_config(&config) != ESP_OK) {
@@ -83,11 +82,9 @@ void imuAcquisitionTask(void*) {
       continue;
     }
 
-    // Consume an already-latched DRDY edge if the optional jumper is present.
-    // The first FIFO/async-I2C cut keeps the existing generation request as the
-    // scheduling authority; a later cut can promote DRDY to the producer clock
-    // once hardware wiring is validated. Unmodified boards are explicitly
-    // counted as fallback reads instead of silently pretending DRDY exists.
+    // Consume an already-latched DRDY edge only after the physical board route
+    // has been verified and assigned. Until then FIFO reads remain explicitly
+    // request-driven; fallback statistics make that hardware limitation visible.
     if (drdy_irq_enabled && ulTaskNotifyTake(pdTRUE, 0) > 0U) {
       incrementStat(&ImuAcquisitionStats::drdy_consumed);
     } else {
