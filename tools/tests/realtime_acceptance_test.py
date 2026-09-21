@@ -7,7 +7,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.triwhirl_tool.commands.realtime import _evaluate_realtime_acceptance
+from tools.triwhirl_tool.commands.realtime import (
+    _classify_drdy_probe,
+    _evaluate_realtime_acceptance,
+)
 
 
 def good_profile() -> dict[str, str]:
@@ -50,6 +53,16 @@ def good_status() -> dict[str, str]:
     }
 
 
+def good_probe() -> dict[str, str]:
+    return {
+        "drdy_gpio": "21",
+        "drdy_probe_only": "1",
+        "drdy_edges": "5010",
+        "drdy_consumed": "0",
+        "drdy_fallback_reads": "4995",
+    }
+
+
 def evaluate(profile: dict[str, str], timing: dict[str, str], status: dict[str, str]):
     return _evaluate_realtime_acceptance(
         profile,
@@ -80,6 +93,36 @@ def main() -> None:
     status["fault_mask"] = "0x00000020"
     failures = evaluate(good_profile(), good_timing(), status)
     assert "fault_mask=0x00000020" in failures
+
+    classification, rate_hz, ratio = _classify_drdy_probe(
+        good_profile(), good_probe(), 5.0
+    )
+    assert classification == "MATCH"
+    assert 999.0 < rate_hz < 1003.0
+    assert 1.0 < ratio < 1.01
+
+    no_edges = good_probe()
+    no_edges["drdy_edges"] = "0"
+    classification, _, ratio = _classify_drdy_probe(
+        good_profile(), no_edges, 5.0
+    )
+    assert classification == "NO_EDGES"
+    assert ratio == 0.0
+
+    wrong_rate = good_probe()
+    wrong_rate["drdy_edges"] = "2500"
+    classification, _, ratio = _classify_drdy_probe(
+        good_profile(), wrong_rate, 5.0
+    )
+    assert classification == "INCONCLUSIVE"
+    assert 0.49 < ratio < 0.51
+
+    disabled = good_probe()
+    disabled["drdy_gpio"] = "-1"
+    classification, _, _ = _classify_drdy_probe(
+        good_profile(), disabled, 5.0
+    )
+    assert classification == "DISABLED"
 
     print("PASS realtime acceptance evaluator")
 
