@@ -29,11 +29,15 @@ static_assert(std::is_trivially_copyable_v<RuntimeSensorFrame>,
 static_assert(sizeof(RuntimeSensorFrame) <= 128U,
               "RuntimeSensorFrame grew beyond the bounded mailbox budget");
 
-// Unsigned subtraction intentionally gives wrap-safe age for intervals much
-// shorter than the 32-bit microsecond counter wrap period.
+// Unsigned subtraction is wrap-safe when `now_us` is chronologically after the
+// sample. A frame can also be published concurrently after Core 1 captured its
+// loop timestamp; in that case the raw subtraction lands in the upper half of
+// the uint32 range. Treat that short future skew as zero age rather than a stale
+// sample. Real sensor ages are orders of magnitude below the half-range (~35 min).
 constexpr std::uint32_t sensorTimestampAgeUs(const std::uint32_t now_us,
                                              const std::uint32_t timestamp_us) {
-  return now_us - timestamp_us;
+  const std::uint32_t age = now_us - timestamp_us;
+  return age <= 0x7FFFFFFFU ? age : 0U;
 }
 
 constexpr bool sensorTimestampFresh(const std::uint32_t now_us,
