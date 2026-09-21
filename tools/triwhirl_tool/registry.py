@@ -112,6 +112,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
         description="Read IMU and attitude-estimator health over BLE.",
     ),
     ToolCommand(
+        group="control",
+        name="balance",
+        handler="commands.balance:balance_main",
+        description="Apply H-infinity gains and run a guarded near-upright balance trial over BLE.",
+    ),
+    ToolCommand(
         group="id",
         name="actuator-uart",
         script="parameter_id/acquire.py",
