@@ -1,0 +1,28 @@
+#pragma once
+
+#include <cstdint>
+
+#include "runtime_sensor_frame.hpp"
+
+namespace triwhirl::runtime {
+
+struct RuntimeSensorPipelineStats {
+  std::uint64_t requests = 0U;
+  std::uint64_t request_drops = 0U;
+  std::uint64_t frames_published = 0U;
+  std::uint64_t incomplete_frames = 0U;
+  std::uint32_t last_published_sequence = 0U;
+};
+
+// Child AS5600/MPU6050 acquisition workers must already be initialized. This
+// coordinator runs on the I/O core, dispatches both workers as one generation,
+// joins them outside the realtime deadline, and overwrites one latest-frame
+// mailbox for Core 1.
+bool initSensorFramePipeline(bool imu_enabled, int core_id,
+                             unsigned task_priority);
+bool dispatchSensorFrameAcquisition(std::uint32_t* sequence);
+bool readLatestSensorFrame(RuntimeSensorFrame* frame);
+RuntimeSensorPipelineStats sensorFramePipelineStats();
+void resetSensorFramePipelineStats();
+
+}  // namespace triwhirl::runtime

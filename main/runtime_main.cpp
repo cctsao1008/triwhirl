@@ -17,6 +17,7 @@
 #include "runtime_imu_acquisition.hpp"
 #include "runtime_platform.hpp"
 #include "runtime_release.hpp"
+#include "runtime_sensor_pipeline.hpp"
 #include "runtime_sensor_state.hpp"
 #include "runtime_snapshot.hpp"
 #include "runtime_state.hpp"
@@ -106,13 +107,13 @@ struct ControlPeriodHistogram {
   std::uint64_t ge_1500 = 0U;
 };
 
-constexpr std::uint32_t kEncoderJoinBudgetUs = 100U;
-// The MPU6050 transfer is now executed on Core 0. Keep the Core-1 join bounded
-// well inside the 1 ms release period; hardware profiling must validate/tune
-// this budget before Balance mode is enabled.
-constexpr std::uint32_t kImuJoinBudgetUs = 600U;
+// Core 1 consumes the latest complete/partial frame without waiting for I2C.
+// Three control periods of age budget tolerate a single delayed generation but
+// make sensor staleness an explicit state before future Balance admission.
+constexpr std::uint32_t kSensorFreshnessLimitUs = 3000U;
 constexpr std::uint32_t kEncoderConsecutiveMissLimit = 2U;
 constexpr unsigned kSupervisorTaskPriority = 2U;
+constexpr unsigned kSensorPipelineTaskPriority = configMAX_PRIORITIES - 2;
 
 SwingIdRunner swing_id_runner{};
 std::uint32_t swing_event_drops = 0U;
@@ -122,6 +123,9 @@ RuntimeTimingProfile runtime_timing_profile{};
 std::uint64_t encoder_acq_completions = 0U;
 std::uint32_t encoder_acq_consecutive_misses = 0U;
 std::uint32_t encoder_acq_max_consecutive_misses = 0U;
+std::uint32_t last_sensor_frame_sequence = 0U;
+std::uint32_t last_encoder_sample_us = 0U;
+std::uint32_t last_imu_sample_us = 0U;
 LocalTimingStats attitude_math_timing{};
 ControlPeriodHistogram control_period_histogram{};
 std::int64_t control_previous_start_us = 0;
@@ -401,6 +405,7 @@ void printSwingHelp() {
 void resetControlProfileStats() {
   triwhirl::runtime::resetEncoderAcquisitionStats();
   triwhirl::runtime::resetImuAcquisitionStats();
+  triwhirl::runtime::resetSensorFramePipelineStats();
   encoder_acq_completions = 0U;
   encoder_acq_consecutive_misses = 0U;
   encoder_acq_max_consecutive_misses = 0U;
@@ -494,40 +499,37 @@ bool commitEncoderResult(
     noteEncoderMiss();
     return false;
   }
-  const std::uint32_t sample_time_us =
-      result.completed_at_us != 0U ? result.completed_at_us : result.requested_at_us;
-  wheel_state = wheel_kinematics.update(result.raw_count, sample_time_us);
+  last_encoder_sample_us = triwhirl::runtime::encoderSampleTimestampUs(result);
+  wheel_state = wheel_kinematics.update(result.raw_count, last_encoder_sample_us);
   encoder_sample_valid = true;
   encoder_acq_consecutive_misses = 0U;
   ++encoder_acq_completions;
   return true;
 }
 
-bool collectAndCommitEncoder(const std::uint32_t expected_sequence) {
-  triwhirl::runtime::EncoderAcquisitionResult result{};
-  if (!triwhirl::runtime::collectEncoderAcquisition(
-          expected_sequence, kEncoderJoinBudgetUs, &result)) {
-    noteEncoderMiss();
-    return false;
-  }
-  return commitEncoderResult(result);
-}
-
-bool collectAndCommitImu(const std::uint32_t expected_sequence,
-                         std::uint32_t* const sample_time_us) {
-  triwhirl::runtime::ImuAcquisitionResult result{};
-  if (!triwhirl::runtime::collectImuAcquisition(
-          expected_sequence, kImuJoinBudgetUs, &result) || !result.ok) {
+bool commitImuResult(const triwhirl::runtime::ImuAcquisitionResult& result,
+                     std::uint32_t* const sample_time_us) {
+  if (!result.ok) {
     noteImuMiss();
     return false;
   }
   triwhirl::runtime::commitRuntimeImuSample(result.sample);
+  last_imu_sample_us = triwhirl::runtime::imuSampleTimestampUs(result);
   if (sample_time_us != nullptr) {
-    *sample_time_us = result.completed_at_us != 0U
-                          ? result.completed_at_us
-                          : result.requested_at_us;
+    *sample_time_us = last_imu_sample_us;
   }
   return true;
+}
+
+void applySensorFreshness(const std::uint32_t now_us) {
+  if (!triwhirl::runtime::sensorTimestampFresh(
+          now_us, last_encoder_sample_us, kSensorFreshnessLimitUs)) {
+    encoder_sample_valid = false;
+  }
+  if (imu_ready && !triwhirl::runtime::sensorTimestampFresh(
+                       now_us, last_imu_sample_us, kSensorFreshnessLimitUs)) {
+    imu_sample_valid = false;
+  }
 }
 
 void supervisorWrite(void*, const char* const data, const std::size_t length) {
@@ -1064,6 +1066,14 @@ void realtimeControlTaskImpl(void*) {
     vTaskDelete(nullptr);
     return;
   }
+  if (!triwhirl::runtime::initSensorFramePipeline(
+          imu_ready, 0, kSensorPipelineTaskPriority)) {
+    safety_latch.trip(SafetyFault::kStartup);
+    stopMotor();
+    consoleWrite("FATAL fault=startup sensor-frame pipeline creation failed\r\n");
+    vTaskDelete(nullptr);
+    return;
+  }
   if (!triwhirl::runtime::initRuntimeSnapshotChannel()) {
     safety_latch.trip(SafetyFault::kStartup);
     stopMotor();
@@ -1096,26 +1106,44 @@ void realtimeControlTaskImpl(void*) {
     }
     if (profile) recordControlPeriod(start_us);
 
-    // Both sensor transactions are dispatched to Core-0 workers before Core 1
-    // joins either result. I2C0/AS5600 and I2C1/MPU6050 stay independent and
-    // their physical request/start/completion timestamps travel with results.
-    std::uint32_t encoder_sequence = 0U;
-    const bool encoder_dispatched =
-        triwhirl::runtime::dispatchEncoderAcquisition(&encoder_sequence);
-    std::uint32_t imu_sequence = 0U;
-    const bool imu_dispatched =
-        imu_ready && triwhirl::runtime::dispatchImuAcquisition(&imu_sequence);
+    // Core 1 only requests the next generation and peeks the latest published
+    // frame. AS5600/MPU6050 dispatch and joins are owned by the Core-0 pipeline.
+    std::uint32_t requested_sensor_frame = 0U;
+    triwhirl::runtime::dispatchSensorFrameAcquisition(&requested_sensor_frame);
 
-    const std::int64_t imu_begin_us = esp_timer_get_time();
-    std::uint32_t imu_sample_time_us = loop_us;
+    triwhirl::runtime::RuntimeSensorFrame sensor_frame{};
+    const bool new_sensor_frame =
+        triwhirl::runtime::readLatestSensorFrame(&sensor_frame) &&
+        sensor_frame.sequence != last_sensor_frame_sequence;
+    if (new_sensor_frame) {
+      last_sensor_frame_sequence = sensor_frame.sequence;
+    }
+
+    const std::int64_t encoder_begin_us = esp_timer_get_time();
+    if (new_sensor_frame) {
+      if (sensor_frame.encoder_received && sensor_frame.encoder.ok) {
+        commitEncoderResult(sensor_frame.encoder);
+      } else {
+        noteEncoderMiss();
+      }
+    }
+    const std::int64_t encoder_end_us = esp_timer_get_time();
+    if (profile) {
+      recordRuntimeTimingStage(RuntimeTimingStage::kEncoder,
+                               encoder_begin_us, encoder_end_us);
+    }
+
+    const std::int64_t imu_begin_us = encoder_end_us;
+    std::uint32_t imu_sample_time_us = last_imu_sample_us;
     bool imu_sampled = false;
-    if (imu_ready) {
-      if (imu_dispatched) {
-        imu_sampled = collectAndCommitImu(imu_sequence, &imu_sample_time_us);
+    if (new_sensor_frame && imu_ready && sensor_frame.imu_expected) {
+      if (sensor_frame.imu_received && sensor_frame.imu.ok) {
+        imu_sampled = commitImuResult(sensor_frame.imu, &imu_sample_time_us);
       } else {
         noteImuMiss();
       }
     }
+    applySensorFreshness(loop_us);
     const std::int64_t attitude_begin_us = esp_timer_get_time();
     if (imu_sampled) updateAttitude(imu_sample_time_us);
     const std::int64_t imu_end_us = esp_timer_get_time();
@@ -1127,16 +1155,7 @@ void realtimeControlTaskImpl(void*) {
       }
     }
 
-    const std::int64_t encoder_join_begin_us = imu_end_us;
-    if (encoder_dispatched) collectAndCommitEncoder(encoder_sequence);
-    else noteEncoderMiss();
-    const std::int64_t encoder_join_end_us = esp_timer_get_time();
-    if (profile) {
-      recordRuntimeTimingStage(RuntimeTimingStage::kEncoder,
-                               encoder_join_begin_us, encoder_join_end_us);
-    }
-
-    std::int64_t stage_us = encoder_join_end_us;
+    std::int64_t stage_us = imu_end_us;
     evaluateSafety(start_us);
     updateSwingIdentification(loop_us);
     if (profile) {
@@ -1239,12 +1258,16 @@ extern "C" void app_main(void) {
 
   bridge.stopZeroVector();
   const std::uint32_t now_us = static_cast<std::uint32_t>(esp_timer_get_time());
-  sampleEncoder(now_us);
+  if (sampleEncoder(now_us)) {
+    last_encoder_sample_us = now_us;
+  }
   refreshEncoderHealth();
   if (imu_ready) {
     // Startup probing/calibration priming occurs before the realtime task and
     // before the Core-0 IMU worker is created. Runtime sampling is worker-only.
-    sampleImu();
+    if (sampleImu()) {
+      last_imu_sample_us = now_us;
+    }
     const std::uint32_t calibration_samples =
         startGyroCalibration(kDefaultGyroCalibrationSamples);
     if (calibration_samples > 0U) {
