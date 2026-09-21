@@ -56,6 +56,42 @@ def _int_field(values: Mapping[str, str], key: str) -> int:
         raise RuntimeError(f"invalid integer field {key}={values[key]!r}") from exc
 
 
+def _classify_drdy_probe(
+    profile: Mapping[str, str],
+    imu: Mapping[str, str],
+    profile_seconds: float,
+) -> tuple[str, float, float]:
+    """Classify an observation-only MPU_INT GPIO hypothesis.
+
+    The profile-start transition resets IMU acquisition statistics and the
+    encoder-side request counter used by parallel_profile. Therefore edge/request
+    ratio is more robust than host wall-clock timing for identifying a 1 kHz
+    DATA_RDY signal. This result is diagnostic only; it never changes realtime
+    acceptance or firmware routing authority.
+    """
+
+    gpio = _int_field(imu, "drdy_gpio")
+    probe_only = _int_field(imu, "drdy_probe_only")
+    edges = _int_field(imu, "drdy_edges")
+    requests = _int_field(profile, "requests")
+    rate_hz = edges / profile_seconds if profile_seconds > 0.0 else 0.0
+    edge_ratio = edges / requests if requests > 0 else 0.0
+
+    if gpio < 0:
+        return "DISABLED", rate_hz, edge_ratio
+    if probe_only == 0:
+        if edges == 0:
+            return "VERIFIED_NO_EDGES", rate_hz, edge_ratio
+        if 0.90 <= edge_ratio <= 1.10:
+            return "VERIFIED_ACTIVE", rate_hz, edge_ratio
+        return "VERIFIED_UNEXPECTED_RATE", rate_hz, edge_ratio
+    if edges == 0:
+        return "NO_EDGES", rate_hz, edge_ratio
+    if 0.90 <= edge_ratio <= 1.10:
+        return "MATCH", rate_hz, edge_ratio
+    return "INCONCLUSIVE", rate_hz, edge_ratio
+
+
 def _evaluate_realtime_acceptance(
     profile: Mapping[str, str],
     timing: Mapping[str, str],
@@ -210,6 +246,31 @@ async def _run(args: argparse.Namespace) -> int:
             )
         print(parallel_line)
 
+        # Read the Core-0 acquisition counters immediately after the profiled
+        # interval. resetControlProfileStats() resets these counters when timing
+        # profiling starts, so the passive DRDY count belongs to the same window.
+        await transport.send("imu status")
+        imu_line = await _wait_console(
+            transport,
+            prefixes=("imu,",),
+            timeout_s=args.timeout,
+        )
+        print(imu_line)
+        profile = _parse_key_values(parallel_line, "parallel_profile")
+        imu = _parse_key_values(imu_line, "imu")
+        drdy_class, drdy_rate_hz, drdy_edge_ratio = _classify_drdy_probe(
+            profile, imu, args.seconds
+        )
+        print(
+            "drdy_probe,"
+            f"gpio={_int_field(imu, 'drdy_gpio')},"
+            f"probe_only={_int_field(imu, 'drdy_probe_only')},"
+            f"edges={_int_field(imu, 'drdy_edges')},"
+            f"rate_hz={drdy_rate_hz:.3f},"
+            f"edge_request_ratio={drdy_edge_ratio:.4f},"
+            f"classification={drdy_class}"
+        )
+
         await transport.send("timing reset")
         await _wait_console(
             transport,
@@ -234,7 +295,6 @@ async def _run(args: argparse.Namespace) -> int:
         )
         print(status_line)
 
-        profile = _parse_key_values(parallel_line, "parallel_profile")
         timing = _parse_key_values(timing_line, "timing")
         status = _parse_key_values(status_line, "status")
         min_iterations = max(1, int(args.baseline_seconds * 500.0))
