@@ -17,17 +17,17 @@ constexpr int kMpu6050SclGpio = 18;
 constexpr int kMpu6050SdaGpio = 19;
 constexpr std::uint8_t kMpu6050I2cAddress = 0x68U;
 
-// TRC-V1.0 labels MPU6050 pin 12 as MPU_INT but does not route that net to the
-// ESP32. GPIO21 is otherwise exposed on P4 and is the chosen bring-up jumper
-// target. Firmware keeps a pull-down on this input, so an unmodified board can
-// continue using the FIFO path without spurious edges. Populate a jumper from
-// MPU_INT to IO21 to activate hardware DRDY observability.
-constexpr int kMpu6050IntGpio = 21;
-constexpr bool kMpu6050IntRequiresJumper = true;
+// The vendor TRC-V1.0 schematic shows MPU_INT and a P4 header, but photographs
+// of the actual TRC-V1.0 production board do not show that header and do not
+// establish which ESP32 GPIO, if any, receives MPU6050 pin 12. Keep DRDY
+// disabled until continuity/probing verifies the physical net.
+constexpr int kMpu6050IntGpio = -1;
+constexpr bool kMpu6050IntRoutingVerified = false;
 
 // Additional schematic-defined board interfaces. These are named here so a
 // future driver does not have to rediscover the PCB mapping. They are not
-// enabled by the current control runtime unless explicitly used.
+// enabled by the current control runtime unless explicitly used and verified
+// on the physical board revision.
 constexpr int kBatteryAdcGpio = 34;
 constexpr int kRgbDataGpio = 4;
 constexpr int kKey1Gpio = 13;
