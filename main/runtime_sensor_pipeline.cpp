@@ -13,8 +13,9 @@ namespace {
 constexpr UBaseType_t kSensorFrameRequestDepth = 1U;
 constexpr UBaseType_t kSensorFrameMailboxDepth = 1U;
 // One shared Core-0 join deadline bounds the complete generation. Encoder and
-// IMU workers run independently, but the coordinator never spends a full join
-// budget on each sensor sequentially.
+// IMU workers run independently; the coordinator blocks on their result queues
+// instead of spinning, so IDLE0 remains schedulable while synchronous I2C is in
+// flight.
 constexpr std::uint32_t kSensorWorkerJoinBudgetUs = 1500U;
 
 struct SensorFrameRequest {
@@ -30,12 +31,16 @@ std::uint32_t request_sequence = 0U;
 portMUX_TYPE stats_mux = portMUX_INITIALIZER_UNLOCKED;
 RuntimeSensorPipelineStats stats{};
 
-// `readLatestSensorFrame()` and `readLastConsumedSensorFrame()` are both called
-// only by the Core-1 control task. Keeping this copy outside the Core-0 mailbox
-// closes the race where the coordinator could overwrite the queue between the
-// control task committing a frame and Balance validating that same generation.
 RuntimeSensorFrame last_consumed_frame{};
 bool last_consumed_frame_valid = false;
+
+std::uint32_t remainingJoinBudgetUs(const std::int64_t deadline_us) {
+  const std::int64_t now_us = esp_timer_get_time();
+  if (now_us >= deadline_us) {
+    return 0U;
+  }
+  return static_cast<std::uint32_t>(deadline_us - now_us);
+}
 
 void noteFrameResult(const bool complete, const std::uint32_t sequence) {
   portENTER_CRITICAL(&stats_mux);
@@ -70,39 +75,38 @@ void sensorFramePipelineTask(void*) {
     const std::int64_t join_deadline_us =
         esp_timer_get_time() +
         static_cast<std::int64_t>(kSensorWorkerJoinBudgetUs);
-    bool coordinator_blocked_once = false;
-    while (esp_timer_get_time() < join_deadline_us) {
-      if (encoder_dispatched && !frame.encoder_received) {
-        frame.encoder_received = tryCollectEncoderAcquisition(
-            encoder_sequence, &frame.encoder);
-      }
-      if (pipeline_imu_enabled && imu_dispatched && !frame.imu_received) {
-        frame.imu_received =
-            tryCollectImuAcquisition(imu_sequence, &frame.imu);
-      }
-      if ((!encoder_dispatched || frame.encoder_received) &&
-          (!pipeline_imu_enabled || !imu_dispatched || frame.imu_received)) {
-        break;
-      }
 
-      // Both physical sensor workers run above the coordinator on Core 0. A
-      // taskYIELD() here only yields to equal/higher-priority ready tasks; when
-      // the synchronous I2C workers are blocked in the driver it immediately
-      // reschedules this coordinator and can starve IDLE0 indefinitely. That is
-      // exactly the task-WDT failure seen on the physical unit. Block once for
-      // one 1-kHz RTOS tick instead. The workers and IDLE0 then get real CPU
-      // time, while the existing shared 1.5-ms generation deadline remains the
-      // hard upper bound for accepting results.
-      if (!coordinator_blocked_once) {
-        coordinator_blocked_once = true;
-        vTaskDelay(pdMS_TO_TICKS(1));
-        continue;
-      }
-      break;
+    if (encoder_dispatched) {
+      frame.encoder_received = tryCollectEncoderAcquisition(
+          encoder_sequence, &frame.encoder);
+    }
+    if (pipeline_imu_enabled && imu_dispatched) {
+      frame.imu_received =
+          tryCollectImuAcquisition(imu_sequence, &frame.imu);
     }
 
-    // One final zero-budget probe closes the deadline race and records the
-    // worker join timeout exactly once when a dispatched result is still absent.
+    if (pipeline_imu_enabled && imu_dispatched && !frame.imu_received) {
+      const std::uint32_t remaining_us =
+          remainingJoinBudgetUs(join_deadline_us);
+      if (remaining_us > 0U) {
+        frame.imu_received = collectImuAcquisition(
+            imu_sequence, remaining_us, &frame.imu);
+      }
+    }
+
+    if (encoder_dispatched && !frame.encoder_received) {
+      frame.encoder_received = tryCollectEncoderAcquisition(
+          encoder_sequence, &frame.encoder);
+      if (!frame.encoder_received) {
+        const std::uint32_t remaining_us =
+            remainingJoinBudgetUs(join_deadline_us);
+        if (remaining_us > 0U) {
+          frame.encoder_received = collectEncoderAcquisition(
+              encoder_sequence, remaining_us, &frame.encoder);
+        }
+      }
+    }
+
     if (encoder_dispatched && !frame.encoder_received) {
       frame.encoder_received = collectEncoderAcquisition(
           encoder_sequence, 0U, &frame.encoder);
@@ -118,9 +122,6 @@ void sensorFramePipelineTask(void*) {
     frame.complete = encoder_valid && imu_valid;
     frame.published_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
 
-    // Publish every acquisition attempt as one coherent generation. Core 1 may
-    // continue using an independently valid member in bring-up modes, while
-    // complete=false is an explicit safety input for Balance mode.
     xQueueOverwrite(frame_queue, &frame);
     noteFrameResult(frame.complete, frame.sequence);
   }
@@ -164,8 +165,6 @@ bool dispatchSensorFrameAcquisition(std::uint32_t* const sequence) {
   request.sequence = ++request_sequence;
   request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
 
-  // Keep only the newest not-yet-consumed generation. This prevents Core 0 from
-  // spending its next cycle on an older queued request after a slow sensor frame.
   const bool replacing_queued_request = uxQueueMessagesWaiting(request_queue) > 0U;
   xQueueOverwrite(request_queue, &request);
 

@@ -52,6 +52,18 @@ bool sequenceReached(const std::uint32_t candidate,
   return static_cast<std::int32_t>(candidate - expected) >= 0;
 }
 
+TickType_t waitTicksForBudgetUs(const std::uint32_t budget_us) {
+  if (budget_us == 0U) {
+    return 0;
+  }
+  const std::uint32_t wait_ms = (budget_us + 999U) / 1000U;
+  TickType_t ticks = pdMS_TO_TICKS(wait_ms);
+  if (ticks == 0U) {
+    ticks = 1U;
+  }
+  return ticks;
+}
+
 void mpuDataReadyIsr(void*) {
   portENTER_CRITICAL_ISR(&stats_mux);
   ++stats.drdy_edges;
@@ -288,13 +300,49 @@ bool collectImuAcquisition(const std::uint32_t expected_sequence,
     return false;
   }
 
+  if (tryCollectImuAcquisition(expected_sequence, result)) {
+    return true;
+  }
+  if (join_budget_us == 0U) {
+    incrementStat(&ImuAcquisitionStats::join_timeouts);
+    return false;
+  }
+
   const std::int64_t deadline_us =
       esp_timer_get_time() + static_cast<std::int64_t>(join_budget_us);
-  do {
-    if (tryCollectImuAcquisition(expected_sequence, result)) {
+  while (esp_timer_get_time() < deadline_us) {
+    const std::int64_t now_us = esp_timer_get_time();
+    if (now_us >= deadline_us) {
+      break;
+    }
+    const std::uint32_t remaining_us =
+        static_cast<std::uint32_t>(deadline_us - now_us);
+
+    ImuAcquisitionResult candidate{};
+    if (drdy_authoritative.load(std::memory_order_acquire)) {
+      // IRQ mode keeps the latest sample in the mailbox rather than consuming
+      // it. Block by one scheduler slice, then re-peek the hardware-produced
+      // result. This path is inactive until an MPU_INT route is verified.
+      vTaskDelay(waitTicksForBudgetUs(remaining_us));
+      if (tryCollectImuAcquisition(expected_sequence, result)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (xQueueReceive(result_queue, &candidate,
+                      waitTicksForBudgetUs(remaining_us)) != pdTRUE) {
+      break;
+    }
+    if (candidate.sequence == expected_sequence) {
+      if (!candidate.ok) {
+        incrementStat(&ImuAcquisitionStats::read_failures);
+      }
+      *result = candidate;
       return true;
     }
-  } while (esp_timer_get_time() < deadline_us);
+    incrementStat(&ImuAcquisitionStats::stale_results);
+  }
 
   incrementStat(&ImuAcquisitionStats::join_timeouts);
   return false;
