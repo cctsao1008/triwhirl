@@ -46,7 +46,11 @@ void populateRuntimeDiagnosticSnapshot(RuntimeSnapshot* const snapshot) {
 
   if (!imu_identity_checked) {
     imu_identity_checked = true;
-    imu_identity_valid = imu_ready && imu.readWhoAmI(&imu_identity);
+    // If full initialization failed after WHO_AM_I succeeded, retain that
+    // evidence instead of collapsing diagnostics to who=0x00. Both paths are
+    // cached-only here; supervisor diagnostics never issue live MPU I2C.
+    imu_identity_valid = imu_ready ? imu.readWhoAmI(&imu_identity)
+                                   : imu.lastInitWhoAmI(&imu_identity);
   }
 
   snapshot->imu_ready = imu_ready;

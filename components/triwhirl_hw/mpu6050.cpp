@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "esp_err.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -10,6 +11,8 @@
 namespace triwhirl {
 namespace drivers {
 namespace {
+
+constexpr char kTag[] = "triwhirl_mpu";
 
 constexpr std::uint8_t kRegSampleRateDivider = 0x19U;
 constexpr std::uint8_t kRegConfig = 0x1AU;
@@ -67,23 +70,29 @@ void decodePhysicalSample(Mpu6050Sample* const sample) {
 
 bool Mpu6050::init(const i2c_master_bus_handle_t bus,
                    const std::uint8_t address) {
-  if (bus == nullptr) {
-    return false;
-  }
-
   who_am_i_ = 0U;
   who_am_i_valid_ = false;
+  last_init_who_am_i_ = 0U;
+  last_init_who_am_i_valid_ = false;
   fifo_enabled_ = false;
   async_i2c_enabled_ = false;
   async_in_flight_.store(false, std::memory_order_relaxed);
   async_event_.store(0U, std::memory_order_relaxed);
 
+  if (bus == nullptr) {
+    ESP_LOGW(kTag, "init stage=bus result=null");
+    return false;
+  }
+
   if (async_done_ == nullptr) {
     async_done_ = xSemaphoreCreateBinary();
     if (async_done_ == nullptr) {
+      ESP_LOGW(kTag, "init stage=semaphore result=no_mem");
       return false;
     }
   }
+
+  ESP_LOGI(kTag, "init begin preferred_addr=0x%02x", static_cast<unsigned>(address));
 
   // The MPU-60X0 may not accept register traffic immediately after power-on.
   vTaskDelay(pdMS_TO_TICKS(kPowerOnSettleMs));
@@ -101,12 +110,22 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
       who_am_i_valid_ = false;
       fifo_enabled_ = false;
       async_i2c_enabled_ = false;
-      i2c_master_bus_reset(bus);
+      const esp_err_t reset_result = i2c_master_bus_reset(bus);
+      ESP_LOGI(kTag, "init attempt=%u stage=bus_reset result=%s",
+               attempt + 1U, esp_err_to_name(reset_result));
       vTaskDelay(pdMS_TO_TICKS(kRetrySettleMs));
     }
 
     for (const std::uint8_t candidate : candidates) {
-      if (i2c_master_probe(bus, candidate, kI2cTimeoutMs) != ESP_OK) {
+      who_am_i_ = 0U;
+      who_am_i_valid_ = false;
+
+      const esp_err_t probe_result =
+          i2c_master_probe(bus, candidate, kI2cTimeoutMs);
+      ESP_LOGI(kTag, "init attempt=%u stage=probe addr=0x%02x result=%s",
+               attempt + 1U, static_cast<unsigned>(candidate),
+               esp_err_to_name(probe_result));
+      if (probe_result != ESP_OK) {
         continue;
       }
 
@@ -114,7 +133,12 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
       config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
       config.device_address = candidate;
       config.scl_speed_hz = 400000U;
-      if (i2c_master_bus_add_device(bus, &config, &device_) != ESP_OK) {
+      const esp_err_t add_result =
+          i2c_master_bus_add_device(bus, &config, &device_);
+      ESP_LOGI(kTag, "init attempt=%u stage=add_device addr=0x%02x result=%s",
+               attempt + 1U, static_cast<unsigned>(candidate),
+               esp_err_to_name(add_result));
+      if (add_result != ESP_OK) {
         device_ = nullptr;
         continue;
       }
@@ -131,51 +155,94 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
       };
 
       std::uint8_t who_am_i = 0U;
-      if (!readWhoAmI(&who_am_i) || who_am_i != kExpectedWhoAmI) {
+      const bool who_ok = readWhoAmI(&who_am_i);
+      if (who_ok) {
+        last_init_who_am_i_ = who_am_i;
+        last_init_who_am_i_valid_ = true;
+      }
+      ESP_LOGI(kTag,
+               "init attempt=%u stage=who addr=0x%02x read_ok=%d value=0x%02x match=%d",
+               attempt + 1U, static_cast<unsigned>(candidate), who_ok ? 1 : 0,
+               static_cast<unsigned>(who_am_i),
+               who_ok && who_am_i == kExpectedWhoAmI ? 1 : 0);
+      if (!who_ok || who_am_i != kExpectedWhoAmI) {
         discard_device();
         continue;
       }
 
       // Wake the device and use the X-axis gyro PLL as the clock source.
       if (!writeRegister(kRegPowerManagement1, 0x01U)) {
+        ESP_LOGW(kTag, "init attempt=%u stage=wake failed", attempt + 1U);
         discard_device();
         continue;
       }
+      ESP_LOGI(kTag, "init attempt=%u stage=wake ok", attempt + 1U);
       vTaskDelay(pdMS_TO_TICKS(kWakeSettleMs));
 
-      // These are the known-good settings used by the pre-FIFO runtime. FIFO is
-      // still mandatory for the runtime acquisition contract; only the host-side
-      // wait mechanism is allowed to degrade from async callback to synchronous
-      // FIFO transfers.
-      if (!writeRegister(kRegSampleRateDivider, 0x00U) ||
-          !writeRegister(kRegConfig, 0x02U) ||
-          !writeRegister(kRegGyroConfig, 0x10U) ||
-          !writeRegister(kRegAccelConfig, 0x08U) ||
-          !configureRuntimeFifo()) {
+      // These are the known-good settings used by the pre-FIFO runtime. Keep
+      // each stage separate so a physical unit reports the exact first failure.
+      if (!writeRegister(kRegSampleRateDivider, 0x00U)) {
+        ESP_LOGW(kTag, "init attempt=%u stage=sample_rate failed", attempt + 1U);
         discard_device();
         continue;
       }
+      if (!writeRegister(kRegConfig, 0x02U)) {
+        ESP_LOGW(kTag, "init attempt=%u stage=dlpf failed", attempt + 1U);
+        discard_device();
+        continue;
+      }
+      if (!writeRegister(kRegGyroConfig, 0x10U)) {
+        ESP_LOGW(kTag, "init attempt=%u stage=gyro_config failed", attempt + 1U);
+        discard_device();
+        continue;
+      }
+      if (!writeRegister(kRegAccelConfig, 0x08U)) {
+        ESP_LOGW(kTag, "init attempt=%u stage=accel_config failed", attempt + 1U);
+        discard_device();
+        continue;
+      }
+      ESP_LOGI(kTag, "init attempt=%u stage=base_config ok", attempt + 1U);
+
+      if (!configureRuntimeFifo()) {
+        ESP_LOGW(kTag, "init attempt=%u stage=fifo_config failed", attempt + 1U);
+        discard_device();
+        continue;
+      }
+      ESP_LOGI(kTag, "init attempt=%u stage=fifo_config ok", attempt + 1U);
 
       i2c_master_event_callbacks_t callbacks{};
       callbacks.on_trans_done = &Mpu6050::asyncTransactionDone;
-      if (i2c_master_register_event_callbacks(device_, &callbacks, this) != ESP_OK) {
+      const esp_err_t callback_result =
+          i2c_master_register_event_callbacks(device_, &callbacks, this);
+      if (callback_result != ESP_OK) {
         // Do not throw away a healthy MPU + FIFO merely because this ESP-IDF /
         // target combination rejects asynchronous callbacks. Synchronous FIFO
-        // transfers preserve the new acquisition architecture and keep DATA_RDY
-        // enabled so the GPIO routing probe remains meaningful.
+        // transfers preserve the FIFO acquisition architecture and keep
+        // DATA_RDY enabled so the GPIO routing probe remains meaningful.
         async_i2c_enabled_ = false;
+        ESP_LOGW(kTag,
+                 "init attempt=%u stage=async_callback result=%s mode=sync_fifo",
+                 attempt + 1U, esp_err_to_name(callback_result));
         vTaskDelay(pdMS_TO_TICKS(kFifoPrimeMs));
+        ESP_LOGI(kTag, "init ready addr=0x%02x fifo=1 async=0",
+                 static_cast<unsigned>(candidate));
         return true;
       }
       async_i2c_enabled_ = true;
+      ESP_LOGI(kTag, "init attempt=%u stage=async_callback ok", attempt + 1U);
 
       // Give the 1 kHz hardware sampler time to place at least one complete
       // accel+gyro packet into FIFO before startup calibration probes it.
       vTaskDelay(pdMS_TO_TICKS(kFifoPrimeMs));
+      ESP_LOGI(kTag, "init ready addr=0x%02x fifo=1 async=1",
+               static_cast<unsigned>(candidate));
       return true;
     }
   }
 
+  ESP_LOGW(kTag, "init failed after %u attempts last_who_valid=%d last_who=0x%02x",
+           kInitAttempts, last_init_who_am_i_valid_ ? 1 : 0,
+           static_cast<unsigned>(last_init_who_am_i_));
   return false;
 }
 
@@ -185,7 +252,14 @@ bool Mpu6050::writeRegister(const std::uint8_t reg,
     return false;
   }
   const std::uint8_t data[2] = {reg, value};
-  return i2c_master_transmit(device_, data, sizeof(data), kI2cTimeoutMs) == ESP_OK;
+  const esp_err_t result =
+      i2c_master_transmit(device_, data, sizeof(data), kI2cTimeoutMs);
+  if (result != ESP_OK) {
+    ESP_LOGW(kTag, "write reg=0x%02x value=0x%02x result=%s",
+             static_cast<unsigned>(reg), static_cast<unsigned>(value),
+             esp_err_to_name(result));
+  }
+  return result == ESP_OK;
 }
 
 bool Mpu6050::readRegisters(const std::uint8_t first_register,
@@ -218,22 +292,44 @@ bool Mpu6050::readWhoAmI(std::uint8_t* const who_am_i) {
   return true;
 }
 
+bool Mpu6050::lastInitWhoAmI(std::uint8_t* const who_am_i) const {
+  if (who_am_i == nullptr || !last_init_who_am_i_valid_) {
+    return false;
+  }
+  *who_am_i = last_init_who_am_i_;
+  return true;
+}
+
 bool Mpu6050::configureRuntimeFifo() {
   // Stop FIFO writes, reset the FIFO, then enable accel + all gyro axes. The
   // temperature channel is intentionally excluded: Balance does not consume it,
   // reducing each 1 kHz packet from 14 bytes to 12 bytes without coupling FIFO
   // layout to the runtime-selectable planar gyro axis.
-  if (!writeRegister(kRegFifoEnable, 0x00U) ||
-      !writeRegister(kRegUserControl, kUserControlFifoReset)) {
+  if (!writeRegister(kRegFifoEnable, 0x00U)) {
+    ESP_LOGW(kTag, "fifo stage=disable_sources failed");
+    return false;
+  }
+  if (!writeRegister(kRegUserControl, kUserControlFifoReset)) {
+    ESP_LOGW(kTag, "fifo stage=reset failed");
     return false;
   }
   vTaskDelay(pdMS_TO_TICKS(1));
-  if (!writeRegister(kRegFifoEnable, kRuntimeFifoSources) ||
-      !writeRegister(kRegUserControl, kUserControlFifoEnable) ||
-      // Active-high, push-pull, 50 us pulse (register reset/default behavior).
-      !writeRegister(kRegIntPinConfig, 0x00U) ||
-      !writeRegister(kRegIntEnable,
+  if (!writeRegister(kRegFifoEnable, kRuntimeFifoSources)) {
+    ESP_LOGW(kTag, "fifo stage=enable_sources failed");
+    return false;
+  }
+  if (!writeRegister(kRegUserControl, kUserControlFifoEnable)) {
+    ESP_LOGW(kTag, "fifo stage=enable_user_control failed");
+    return false;
+  }
+  // Active-high, push-pull, 50 us pulse (register reset/default behavior).
+  if (!writeRegister(kRegIntPinConfig, 0x00U)) {
+    ESP_LOGW(kTag, "fifo stage=int_pin_config failed");
+    return false;
+  }
+  if (!writeRegister(kRegIntEnable,
                      kIntEnableFifoOverflow | kIntEnableDataReady)) {
+    ESP_LOGW(kTag, "fifo stage=int_enable failed");
     return false;
   }
   fifo_enabled_ = true;
