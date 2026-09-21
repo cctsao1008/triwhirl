@@ -68,13 +68,23 @@ def _delta(after: Mapping[str, str], before: Mapping[str, str], key: str) -> int
     return end - start
 
 
-def _classify(gpio: int, probe_only: int, edge_rate_hz: float) -> str:
+def _classify(
+    gpio: int,
+    probe_only: int,
+    edge_rate_hz: float,
+    imu_ready: int,
+) -> str:
     if gpio < 0:
         return "DISABLED"
-    if edge_rate_hz == 0.0:
-        return "NO_EDGES" if probe_only else "VERIFIED_NO_EDGES"
     if 800.0 <= edge_rate_hz <= 1200.0:
         return "CANDIDATE_1KHZ" if probe_only else "VERIFIED_1KHZ"
+    # DATA_RDY is enabled during successful MPU initialization. If initialization
+    # is down, the chip may never have received INT_ENABLE, so zero/off-rate edges
+    # cannot reject the physical routing hypothesis.
+    if imu_ready == 0:
+        return "INCONCLUSIVE_IMU_NOT_READY"
+    if edge_rate_hz == 0.0:
+        return "NO_EDGES" if probe_only else "VERIFIED_NO_EDGES"
     return "INCONCLUSIVE" if probe_only else "VERIFIED_UNEXPECTED_RATE"
 
 
@@ -89,8 +99,10 @@ async def _run(args: argparse.Namespace) -> int:
         imu_ready = _int_field(first, "ready")
         if imu_ready == 0:
             print(
-                "DRDY_PROBE_NOTE imu_ready=0; GPIO observation is still useful, "
-                "but Balance remains blocked until MPU6050 I2C initialization succeeds"
+                "DRDY_PROBE_NOTE imu_ready=0; GPIO observation is passive only. "
+                "No/off-rate edges are inconclusive because MPU INT_ENABLE may "
+                "not have been configured. Balance remains blocked until MPU6050 "
+                "I2C initialization succeeds."
             )
 
         gpio = _int_field(first, "drdy_gpio")
@@ -109,14 +121,17 @@ async def _run(args: argparse.Namespace) -> int:
 
         end_gpio = _int_field(second, "drdy_gpio")
         end_probe_only = _int_field(second, "drdy_probe_only")
+        end_imu_ready = _int_field(second, "ready")
         if end_gpio != gpio or end_probe_only != probe_only:
             raise RuntimeError("DRDY routing state changed during observation")
+        if end_imu_ready != imu_ready:
+            raise RuntimeError("IMU readiness changed during observation")
 
         edges = _delta(second, first, "drdy_edges")
         consumed = _delta(second, first, "drdy_consumed")
         fallback = _delta(second, first, "drdy_fallback_reads")
         edge_rate_hz = edges / args.seconds
-        state = _classify(gpio, probe_only, edge_rate_hz)
+        state = _classify(gpio, probe_only, edge_rate_hz, imu_ready)
         print(
             "drdy_probe,"
             f"state={state},gpio={gpio},probe_only={probe_only},"
