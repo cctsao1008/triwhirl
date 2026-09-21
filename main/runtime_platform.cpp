@@ -1,5 +1,7 @@
 #include "runtime_platform.hpp"
 
+#include <cstddef>
+
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
