@@ -14,8 +14,10 @@
 #include "freertos/task.h"
 #include "runtime_control.hpp"
 #include "runtime_encoder_acquisition.hpp"
+#include "runtime_imu_acquisition.hpp"
 #include "runtime_platform.hpp"
 #include "runtime_release.hpp"
+#include "runtime_sensor_state.hpp"
 #include "runtime_snapshot.hpp"
 #include "runtime_state.hpp"
 #include "runtime_supervisor_io.hpp"
@@ -57,7 +59,9 @@ bool initRuntimeImuBus(i2c_master_bus_handle_t* bus) {
   config.clk_source = I2C_CLK_SRC_DEFAULT;
   config.glitch_ignore_cnt = 7;
   config.flags.enable_internal_pullup = true;
-  return triwhirl::runtime::createI2cMasterBusOnCore(&config, bus, 1) == ESP_OK;
+  // Both sensor buses belong to the I/O domain. They remain separate hardware
+  // controllers, but neither controller allocates its ISR on realtime Core 1.
+  return triwhirl::runtime::createI2cMasterBusOnCore(&config, bus, 0) == ESP_OK;
 }
 
 enum class RuntimeTimingStage : std::uint8_t {
@@ -103,6 +107,10 @@ struct ControlPeriodHistogram {
 };
 
 constexpr std::uint32_t kEncoderJoinBudgetUs = 100U;
+// The MPU6050 transfer is now executed on Core 0. Keep the Core-1 join bounded
+// well inside the 1 ms release period; hardware profiling must validate/tune
+// this budget before Balance mode is enabled.
+constexpr std::uint32_t kImuJoinBudgetUs = 600U;
 constexpr std::uint32_t kEncoderConsecutiveMissLimit = 2U;
 constexpr unsigned kSupervisorTaskPriority = 2U;
 
@@ -177,7 +185,7 @@ void publishTimingProfileStage(
     const std::uint32_t min_us, const std::uint32_t max_us) {
   triwhirl::runtime::RuntimeReply reply{};
   reply.code = triwhirl::runtime::RuntimeReplyCode::kTimingProfileStage;
-  reply.value0 = static_cast<std::int32_t>(stage);
+  reply.value0 = static_cast<int>(stage);
   reply.wide0 = count;
   reply.wide1 = total_us;
   reply.u32_0 = min_us;
@@ -238,16 +246,16 @@ triwhirl::runtime::RuntimeReply makeSwingStatusReply(
   const SwingIdConfig& config = swing_id_runner.config();
   triwhirl::runtime::RuntimeReply reply{};
   reply.code = code;
-  reply.value0 = static_cast<std::int32_t>(output.state);
-  reply.value1 = static_cast<std::int32_t>(output.stop_reason);
-  reply.value2 = static_cast<std::int32_t>(output.capture_count);
-  reply.value3 = static_cast<std::int32_t>(config.target_captures);
-  reply.value4 = static_cast<std::int32_t>(output.half_cycle_index);
-  reply.value5 = static_cast<std::int32_t>(output.vertex);
+  reply.value0 = static_cast<int>(output.state);
+  reply.value1 = static_cast<int>(output.stop_reason);
+  reply.value2 = static_cast<int>(output.capture_count);
+  reply.value3 = static_cast<int>(config.target_captures);
+  reply.value4 = static_cast<int>(output.half_cycle_index);
+  reply.value5 = static_cast<int>(output.vertex);
   reply.value6 = (output.pump_active ? 0x01 : 0) |
                  (output.probe_active ? 0x02 : 0) |
                  (output.critical_window ? 0x04 : 0);
-  reply.value7 = static_cast<std::int32_t>(swing_event_drops);
+  reply.value7 = static_cast<int>(swing_event_drops);
   reply.value8 = config.pump_polarity;
   reply.u32_0 = config.probe_duration_us;
   reply.u32_1 = config.max_duration_us;
@@ -267,12 +275,12 @@ void queueSwingEvent(const SwingIdOutput& output) {
   if (!output.transition) return;
   triwhirl::runtime::RuntimeReply reply{};
   reply.code = triwhirl::runtime::RuntimeReplyCode::kSwingTransitionEvent;
-  reply.value0 = static_cast<std::int32_t>(output.state);
-  reply.value1 = static_cast<std::int32_t>(output.capture_count);
-  reply.value2 = static_cast<std::int32_t>(swing_id_runner.config().target_captures);
-  reply.value3 = static_cast<std::int32_t>(output.half_cycle_index);
-  reply.value4 = static_cast<std::int32_t>(output.vertex);
-  reply.value5 = static_cast<std::int32_t>(output.stop_reason);
+  reply.value0 = static_cast<int>(output.state);
+  reply.value1 = static_cast<int>(output.capture_count);
+  reply.value2 = static_cast<int>(swing_id_runner.config().target_captures);
+  reply.value3 = static_cast<int>(output.half_cycle_index);
+  reply.value4 = static_cast<int>(output.vertex);
+  reply.value5 = static_cast<int>(output.stop_reason);
   reply.u32_0 = safety_latch.mask();
   reply.float0 = output.vertex_error_deg;
   reply.float1 = output.desired_vq_v;
@@ -392,6 +400,7 @@ void printSwingHelp() {
 
 void resetControlProfileStats() {
   triwhirl::runtime::resetEncoderAcquisitionStats();
+  triwhirl::runtime::resetImuAcquisitionStats();
   encoder_acq_completions = 0U;
   encoder_acq_consecutive_misses = 0U;
   encoder_acq_max_consecutive_misses = 0U;
@@ -465,17 +474,28 @@ void noteEncoderMiss() {
   }
 }
 
+void noteImuMiss() {
+  if (!imu_ready) return;
+  ++imu_read_errors;
+  imu_sample_valid = false;
+}
+
 bool readEncoderRaw(void*, std::uint16_t* const raw_count) {
   return encoder.readRawAngle(raw_count);
 }
 
+bool readImuSample(void*, triwhirl::drivers::Mpu6050Sample* const sample) {
+  return imu_ready && imu.readSample(sample);
+}
+
 bool commitEncoderResult(
-    const triwhirl::runtime::EncoderAcquisitionResult& result,
-    const std::uint32_t sample_time_us) {
+    const triwhirl::runtime::EncoderAcquisitionResult& result) {
   if (!result.ok) {
     noteEncoderMiss();
     return false;
   }
+  const std::uint32_t sample_time_us =
+      result.completed_at_us != 0U ? result.completed_at_us : result.requested_at_us;
   wheel_state = wheel_kinematics.update(result.raw_count, sample_time_us);
   encoder_sample_valid = true;
   encoder_acq_consecutive_misses = 0U;
@@ -483,15 +503,31 @@ bool commitEncoderResult(
   return true;
 }
 
-bool collectAndCommitEncoder(const std::uint32_t expected_sequence,
-                             const std::uint32_t sample_time_us) {
+bool collectAndCommitEncoder(const std::uint32_t expected_sequence) {
   triwhirl::runtime::EncoderAcquisitionResult result{};
   if (!triwhirl::runtime::collectEncoderAcquisition(
           expected_sequence, kEncoderJoinBudgetUs, &result)) {
     noteEncoderMiss();
     return false;
   }
-  return commitEncoderResult(result, sample_time_us);
+  return commitEncoderResult(result);
+}
+
+bool collectAndCommitImu(const std::uint32_t expected_sequence,
+                         std::uint32_t* const sample_time_us) {
+  triwhirl::runtime::ImuAcquisitionResult result{};
+  if (!triwhirl::runtime::collectImuAcquisition(
+          expected_sequence, kImuJoinBudgetUs, &result) || !result.ok) {
+    noteImuMiss();
+    return false;
+  }
+  triwhirl::runtime::commitRuntimeImuSample(result.sample);
+  if (sample_time_us != nullptr) {
+    *sample_time_us = result.completed_at_us != 0U
+                          ? result.completed_at_us
+                          : result.requested_at_us;
+  }
+  return true;
 }
 
 void supervisorWrite(void*, const char* const data, const std::size_t length) {
@@ -540,7 +576,7 @@ bool deferMotorStartFailure() {
       return false;
     case MotorStartFailure::kSafetyFault:
       reply.code = triwhirl::runtime::RuntimeReplyCode::kSafetyFaultLatched;
-      reply.value0 = static_cast<std::int32_t>(safety_latch.firstFault());
+      reply.value0 = static_cast<int>(safety_latch.firstFault());
       reply.u32_0 = safety_latch.mask();
       break;
     case MotorStartFailure::kEncoderUnavailable:
@@ -1018,6 +1054,16 @@ void realtimeControlTaskImpl(void*) {
     vTaskDelete(nullptr);
     return;
   }
+  if (imu_ready &&
+      !triwhirl::runtime::initImuAcquisition(
+          readImuSample, nullptr, 0,
+          static_cast<unsigned>(configMAX_PRIORITIES - 1))) {
+    safety_latch.trip(SafetyFault::kStartup);
+    stopMotor();
+    consoleWrite("FATAL fault=startup parallel IMU task creation failed\r\n");
+    vTaskDelete(nullptr);
+    return;
+  }
   if (!triwhirl::runtime::initRuntimeSnapshotChannel()) {
     safety_latch.trip(SafetyFault::kStartup);
     stopMotor();
@@ -1050,14 +1096,28 @@ void realtimeControlTaskImpl(void*) {
     }
     if (profile) recordControlPeriod(start_us);
 
+    // Both sensor transactions are dispatched to Core-0 workers before Core 1
+    // joins either result. I2C0/AS5600 and I2C1/MPU6050 stay independent and
+    // their physical request/start/completion timestamps travel with results.
     std::uint32_t encoder_sequence = 0U;
     const bool encoder_dispatched =
         triwhirl::runtime::dispatchEncoderAcquisition(&encoder_sequence);
+    std::uint32_t imu_sequence = 0U;
+    const bool imu_dispatched =
+        imu_ready && triwhirl::runtime::dispatchImuAcquisition(&imu_sequence);
 
     const std::int64_t imu_begin_us = esp_timer_get_time();
-    const bool imu_sampled = sampleImu();
+    std::uint32_t imu_sample_time_us = loop_us;
+    bool imu_sampled = false;
+    if (imu_ready) {
+      if (imu_dispatched) {
+        imu_sampled = collectAndCommitImu(imu_sequence, &imu_sample_time_us);
+      } else {
+        noteImuMiss();
+      }
+    }
     const std::int64_t attitude_begin_us = esp_timer_get_time();
-    if (imu_sampled) updateAttitude(loop_us);
+    if (imu_sampled) updateAttitude(imu_sample_time_us);
     const std::int64_t imu_end_us = esp_timer_get_time();
     if (profile) {
       recordRuntimeTimingStage(RuntimeTimingStage::kImuAttitude, imu_begin_us,
@@ -1068,7 +1128,7 @@ void realtimeControlTaskImpl(void*) {
     }
 
     const std::int64_t encoder_join_begin_us = imu_end_us;
-    if (encoder_dispatched) collectAndCommitEncoder(encoder_sequence, loop_us);
+    if (encoder_dispatched) collectAndCommitEncoder(encoder_sequence);
     else noteEncoderMiss();
     const std::int64_t encoder_join_end_us = esp_timer_get_time();
     if (profile) {
@@ -1182,6 +1242,8 @@ extern "C" void app_main(void) {
   sampleEncoder(now_us);
   refreshEncoderHealth();
   if (imu_ready) {
+    // Startup probing/calibration priming occurs before the realtime task and
+    // before the Core-0 IMU worker is created. Runtime sampling is worker-only.
     sampleImu();
     const std::uint32_t calibration_samples =
         startGyroCalibration(kDefaultGyroCalibrationSamples);

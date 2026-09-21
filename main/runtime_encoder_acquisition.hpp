@@ -8,6 +8,9 @@ using EncoderReadFn = bool (*)(void* context, std::uint16_t* raw_count);
 
 struct EncoderAcquisitionResult {
   std::uint32_t sequence = 0U;
+  std::uint32_t requested_at_us = 0U;
+  std::uint32_t started_at_us = 0U;
+  std::uint32_t completed_at_us = 0U;
   std::uint16_t raw_count = 0U;
   bool ok = false;
 };

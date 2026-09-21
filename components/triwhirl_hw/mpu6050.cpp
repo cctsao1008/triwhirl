@@ -1,6 +1,7 @@
 #include "triwhirl/drivers/mpu6050.hpp"
 
 #include <algorithm>
+#include <atomic>
 
 #include "esp_err.h"
 #include "esp_timer.h"
@@ -175,14 +176,13 @@ bool Mpu6050::readSample(Mpu6050Sample* const sample) {
     return false;
   }
 
+  const bool profile = timing_profile_enabled_.load(std::memory_order_relaxed);
   std::uint8_t data[14]{};
-  const std::int64_t transfer_begin_us =
-      timing_profile_enabled_ ? esp_timer_get_time() : 0;
+  const std::int64_t transfer_begin_us = profile ? esp_timer_get_time() : 0;
   if (!readRegisters(kRegAccelXoutH, data, sizeof(data))) {
     return false;
   }
-  const std::int64_t transfer_end_us =
-      timing_profile_enabled_ ? esp_timer_get_time() : 0;
+  const std::int64_t transfer_end_us = profile ? esp_timer_get_time() : 0;
 
   sample->accel_raw[0] = readBigEndianI16(data[0], data[1]);
   sample->accel_raw[1] = readBigEndianI16(data[2], data[3]);
@@ -203,7 +203,7 @@ bool Mpu6050::readSample(Mpu6050Sample* const sample) {
   sample->temperature_c =
       static_cast<float>(sample->temperature_raw) / 340.0F + 36.53F;
 
-  if (timing_profile_enabled_) {
+  if (profile) {
     const std::int64_t decode_end_us = esp_timer_get_time();
     recordSampleTiming(
         static_cast<std::uint32_t>(transfer_end_us - transfer_begin_us),
@@ -213,19 +213,25 @@ bool Mpu6050::readSample(Mpu6050Sample* const sample) {
 }
 
 void Mpu6050::setTimingProfileEnabled(const bool enabled) {
-  timing_profile_enabled_ = enabled;
+  timing_profile_enabled_.store(enabled, std::memory_order_relaxed);
 }
 
 void Mpu6050::resetTimingProfile() {
+  portENTER_CRITICAL(&timing_mux_);
   timing_stats_ = {};
+  portEXIT_CRITICAL(&timing_mux_);
 }
 
 Mpu6050TimingStats Mpu6050::timingProfile() const {
-  return timing_stats_;
+  portENTER_CRITICAL(&timing_mux_);
+  const Mpu6050TimingStats snapshot = timing_stats_;
+  portEXIT_CRITICAL(&timing_mux_);
+  return snapshot;
 }
 
 void Mpu6050::recordSampleTiming(const std::uint32_t transfer_us,
                                  const std::uint32_t decode_us) {
+  portENTER_CRITICAL(&timing_mux_);
   ++timing_stats_.sample_reads;
   timing_stats_.transfer_total_us += transfer_us;
   timing_stats_.decode_total_us += decode_us;
@@ -234,6 +240,7 @@ void Mpu6050::recordSampleTiming(const std::uint32_t transfer_us,
     timing_stats_.transfer_max_us = transfer_us;
     timing_stats_.decode_min_us = decode_us;
     timing_stats_.decode_max_us = decode_us;
+    portEXIT_CRITICAL(&timing_mux_);
     return;
   }
   timing_stats_.transfer_min_us =
@@ -244,6 +251,7 @@ void Mpu6050::recordSampleTiming(const std::uint32_t transfer_us,
       std::min(timing_stats_.decode_min_us, decode_us);
   timing_stats_.decode_max_us =
       std::max(timing_stats_.decode_max_us, decode_us);
+  portEXIT_CRITICAL(&timing_mux_);
 }
 
 }  // namespace drivers

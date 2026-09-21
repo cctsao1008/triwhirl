@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
 #include "driver/i2c_master.h"
+#include "freertos/FreeRTOS.h"
 
 namespace triwhirl {
 namespace drivers {
@@ -38,6 +40,8 @@ class Mpu6050 {
   bool readWhoAmI(std::uint8_t* who_am_i);
   bool readSample(Mpu6050Sample* sample);
 
+  // Timing-profile control can be called from Core 1 while readSample() runs on
+  // the Core-0 acquisition worker. Keep this diagnostic state cross-core safe.
   void setTimingProfileEnabled(bool enabled);
   void resetTimingProfile();
   Mpu6050TimingStats timingProfile() const;
@@ -52,7 +56,8 @@ class Mpu6050 {
   i2c_master_dev_handle_t device_ = nullptr;
   std::uint8_t who_am_i_ = 0U;
   bool who_am_i_valid_ = false;
-  bool timing_profile_enabled_ = false;
+  std::atomic<bool> timing_profile_enabled_{false};
+  mutable portMUX_TYPE timing_mux_ = portMUX_INITIALIZER_UNLOCKED;
   Mpu6050TimingStats timing_stats_{};
 };
 

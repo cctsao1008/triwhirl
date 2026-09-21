@@ -1,4 +1,4 @@
-#include "runtime_encoder_acquisition.hpp"
+#include "runtime_imu_acquisition.hpp"
 
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -8,7 +8,7 @@
 namespace triwhirl::runtime {
 namespace {
 
-struct EncoderAcquisitionRequest {
+struct ImuAcquisitionRequest {
   std::uint32_t sequence = 0U;
   std::uint32_t requested_at_us = 0U;
 };
@@ -16,24 +16,24 @@ struct EncoderAcquisitionRequest {
 QueueHandle_t request_queue = nullptr;
 QueueHandle_t result_queue = nullptr;
 TaskHandle_t acquisition_task = nullptr;
-EncoderReadFn encoder_read_fn = nullptr;
-void* encoder_read_context = nullptr;
+ImuReadFn imu_read_fn = nullptr;
+void* imu_read_context = nullptr;
 std::uint32_t request_sequence = 0U;
-EncoderAcquisitionStats stats{};
+ImuAcquisitionStats stats{};
 
-void encoderAcquisitionTask(void*) {
-  EncoderAcquisitionRequest request{};
+void imuAcquisitionTask(void*) {
+  ImuAcquisitionRequest request{};
   while (true) {
     if (xQueueReceive(request_queue, &request, portMAX_DELAY) != pdTRUE) {
       continue;
     }
 
-    EncoderAcquisitionResult result{};
+    ImuAcquisitionResult result{};
     result.sequence = request.sequence;
     result.requested_at_us = request.requested_at_us;
     result.started_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
-    result.ok = encoder_read_fn != nullptr &&
-                encoder_read_fn(encoder_read_context, &result.raw_count);
+    result.ok = imu_read_fn != nullptr &&
+                imu_read_fn(imu_read_context, &result.sample);
     result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
     xQueueOverwrite(result_queue, &result);
   }
@@ -41,36 +41,35 @@ void encoderAcquisitionTask(void*) {
 
 }  // namespace
 
-bool initEncoderAcquisition(const EncoderReadFn read_fn, void* const context,
-                            const int core_id,
-                            const unsigned task_priority) {
+bool initImuAcquisition(const ImuReadFn read_fn, void* const context,
+                        const int core_id, const unsigned task_priority) {
   if (read_fn == nullptr || request_queue != nullptr || result_queue != nullptr ||
       acquisition_task != nullptr) {
     return false;
   }
 
-  request_queue = xQueueCreate(1U, sizeof(EncoderAcquisitionRequest));
-  result_queue = xQueueCreate(1U, sizeof(EncoderAcquisitionResult));
+  request_queue = xQueueCreate(1U, sizeof(ImuAcquisitionRequest));
+  result_queue = xQueueCreate(1U, sizeof(ImuAcquisitionResult));
   if (request_queue == nullptr || result_queue == nullptr) {
     return false;
   }
 
-  encoder_read_fn = read_fn;
-  encoder_read_context = context;
+  imu_read_fn = read_fn;
+  imu_read_context = context;
   return xTaskCreatePinnedToCore(
-             encoderAcquisitionTask, "triwhirl_encoder", 4096, nullptr,
+             imuAcquisitionTask, "triwhirl_imu", 4096, nullptr,
              static_cast<UBaseType_t>(task_priority), &acquisition_task,
              core_id) == pdPASS;
 }
 
-bool dispatchEncoderAcquisition(std::uint32_t* const sequence) {
+bool dispatchImuAcquisition(std::uint32_t* const sequence) {
   if (sequence == nullptr || request_queue == nullptr ||
       acquisition_task == nullptr) {
     ++stats.dispatch_failures;
     return false;
   }
 
-  EncoderAcquisitionRequest request{};
+  ImuAcquisitionRequest request{};
   request.sequence = ++request_sequence;
   request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
   if (xQueueSend(request_queue, &request, 0) != pdTRUE) {
@@ -83,9 +82,9 @@ bool dispatchEncoderAcquisition(std::uint32_t* const sequence) {
   return true;
 }
 
-bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
-                               const std::uint32_t join_budget_us,
-                               EncoderAcquisitionResult* const result) {
+bool collectImuAcquisition(const std::uint32_t expected_sequence,
+                           const std::uint32_t join_budget_us,
+                           ImuAcquisitionResult* const result) {
   if (result == nullptr || result_queue == nullptr) {
     ++stats.join_timeouts;
     return false;
@@ -93,7 +92,7 @@ bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
 
   const std::int64_t deadline_us =
       esp_timer_get_time() + static_cast<std::int64_t>(join_budget_us);
-  EncoderAcquisitionResult candidate{};
+  ImuAcquisitionResult candidate{};
 
   do {
     while (xQueueReceive(result_queue, &candidate, 0) == pdTRUE) {
@@ -112,11 +111,11 @@ bool collectEncoderAcquisition(const std::uint32_t expected_sequence,
   return false;
 }
 
-EncoderAcquisitionStats encoderAcquisitionStats() {
+ImuAcquisitionStats imuAcquisitionStats() {
   return stats;
 }
 
-void resetEncoderAcquisitionStats() {
+void resetImuAcquisitionStats() {
   stats = {};
 }
 
