@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "runtime_balance.hpp"
 #include "runtime_control.hpp"
 #include "runtime_encoder_acquisition.hpp"
 #include "runtime_imu_acquisition.hpp"
@@ -25,6 +26,7 @@
 #include "triwhirl/ble_transport.hpp"
 #include "triwhirl/board.hpp"
 #include "triwhirl/swing_id.hpp"
+#include "triwhirl/upright_geometry.hpp"
 
 using namespace triwhirl::runtime::state;
 
@@ -40,6 +42,9 @@ using triwhirl::SwingIdRunner;
 using triwhirl::SwingIdState;
 using triwhirl::SwingIdStopReason;
 using triwhirl::SwingIdVertex;
+
+constexpr float kDegToRad = triwhirl::kPi / 180.0F;
+constexpr float kRadToDeg = 180.0F / triwhirl::kPi;
 
 bool initRuntimeEncoderBus(i2c_master_bus_handle_t* bus) {
   i2c_master_bus_config_t config{};
@@ -109,7 +114,7 @@ struct ControlPeriodHistogram {
 
 // Core 1 consumes the latest complete/partial frame without waiting for I2C.
 // Three control periods of age budget tolerate a single delayed generation but
-// make sensor staleness an explicit state before future Balance admission.
+// make sensor staleness an explicit state before Balance admission.
 constexpr std::uint32_t kSensorFreshnessLimitUs = 3000U;
 constexpr std::uint32_t kEncoderConsecutiveMissLimit = 2U;
 constexpr unsigned kSupervisorTaskPriority = 2U;
@@ -275,6 +280,25 @@ triwhirl::runtime::RuntimeReply makeSwingStatusReply(
   return reply;
 }
 
+triwhirl::runtime::RuntimeReply makeBalanceStatusReply(
+    const triwhirl::runtime::RuntimeReplyCode code) {
+  const auto status = triwhirl::runtime::runtimeBalanceStatus();
+  triwhirl::runtime::RuntimeReply reply{};
+  reply.code = code;
+  reply.value0 = status.configured ? 1 : 0;
+  reply.value1 = status.active ? 1 : 0;
+  reply.float0 = status.config.k_theta;
+  reply.float1 = status.config.k_rate;
+  reply.float2 = status.config.k_wheel;
+  reply.float3 = status.config.theta_reference_rad * kRadToDeg;
+  reply.float4 = status.config.capture_angle_rad * kRadToDeg;
+  reply.float5 = status.config.fall_angle_rad * kRadToDeg;
+  reply.float6 = status.config.vq_limit_v;
+  reply.float7 = status.config.wheel_rate_limit_rad_s;
+  reply.float8 = status.output.theta_error_rad * kRadToDeg;
+  return reply;
+}
+
 void queueSwingEvent(const SwingIdOutput& output) {
   if (!output.transition) return;
   triwhirl::runtime::RuntimeReply reply{};
@@ -399,6 +423,10 @@ void printSwingHelp() {
   consoleWrite("  swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n");
   consoleWrite("  swing start\r\n");
   consoleWrite("  swing abort\r\n");
+  consoleWrite("  balance status\r\n");
+  consoleWrite("  balance config <k_theta> <k_rate> <k_wheel> <theta_ref_deg> <capture_deg> <fall_deg> <vq_limit_v> <wheel_limit_rad_s>\r\n");
+  consoleWrite("  balance start\r\n");
+  consoleWrite("  balance stop\r\n");
   consoleWrite("  timing profile <status|on|off|reset>\r\n");
 }
 
@@ -599,6 +627,7 @@ bool typedCommandAllowedDuringSwing(
          type == triwhirl::runtime::RuntimeCommandType::kImuStatus ||
          type == triwhirl::runtime::RuntimeCommandType::kLogStatus ||
          type == triwhirl::runtime::RuntimeCommandType::kSwingStatus ||
+         type == triwhirl::runtime::RuntimeCommandType::kBalanceStatus ||
          type == triwhirl::runtime::RuntimeCommandType::kTimingProfileStatus ||
          type == triwhirl::runtime::RuntimeCommandType::kSwingAbort ||
          type == triwhirl::runtime::RuntimeCommandType::kSwingStart ||
@@ -630,14 +659,61 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
       deferRuntimeReply(makeSwingStatusReply(
           triwhirl::runtime::RuntimeReplyCode::kSwingStatus));
       return;
+    case triwhirl::runtime::RuntimeCommandType::kBalanceStatus:
+      deferRuntimeReply(makeBalanceStatusReply(
+          triwhirl::runtime::RuntimeReplyCode::kBalanceStatus));
+      return;
+    case triwhirl::runtime::RuntimeCommandType::kBalanceConfig: {
+      const auto& payload = command.payload.balance_config;
+      triwhirl::BalanceControllerConfig config{};
+      config.k_theta = payload.k_theta;
+      config.k_rate = payload.k_rate;
+      config.k_wheel = payload.k_wheel;
+      config.theta_reference_rad = payload.theta_reference_deg * kDegToRad;
+      config.capture_angle_rad = payload.capture_deg * kDegToRad;
+      config.fall_angle_rad = payload.fall_deg * kDegToRad;
+      config.vq_limit_v = payload.vq_limit_v;
+      config.wheel_rate_limit_rad_s = payload.wheel_rate_limit_rad_s;
+      if (!triwhirl::runtime::configureRuntimeBalance(config)) {
+        deferRuntimeReply(
+            triwhirl::runtime::RuntimeReplyCode::kBalanceConfigRejected);
+        return;
+      }
+      deferRuntimeReply(makeBalanceStatusReply(
+          triwhirl::runtime::RuntimeReplyCode::kBalanceConfigOk));
+      return;
+    }
+    case triwhirl::runtime::RuntimeCommandType::kBalanceStart: {
+      float initial_vq_v = 0.0F;
+      const auto failure =
+          triwhirl::runtime::startRuntimeBalance(&initial_vq_v);
+      if (failure != triwhirl::runtime::BalanceStartFailure::kNone) {
+        triwhirl::runtime::RuntimeReply reply{};
+        reply.code = triwhirl::runtime::RuntimeReplyCode::kBalanceStartRejected;
+        reply.value0 = static_cast<int>(failure);
+        deferRuntimeReply(reply);
+        return;
+      }
+      triwhirl::runtime::RuntimeReply reply{};
+      reply.code = triwhirl::runtime::RuntimeReplyCode::kBalanceStartOk;
+      reply.float0 = initial_vq_v;
+      deferRuntimeReply(reply);
+      return;
+    }
+    case triwhirl::runtime::RuntimeCommandType::kBalanceStop:
+      triwhirl::runtime::stopRuntimeBalance();
+      deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kBalanceStopOk);
+      return;
     case triwhirl::runtime::RuntimeCommandType::kTimingProfileStatus:
       publishRuntimeTimingProfile(promptAllowedNow());
       return;
     case triwhirl::runtime::RuntimeCommandType::kMotorStop:
+      triwhirl::runtime::stopRuntimeBalance();
       stopMotor();
       deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kMotorStopOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kStop:
+      triwhirl::runtime::stopRuntimeBalance();
       stopMotor();
       deferRuntimeReply(triwhirl::runtime::RuntimeReplyCode::kStopOk);
       return;
@@ -753,6 +829,7 @@ void executeRuntimeCommand(const triwhirl::runtime::RuntimeCommand& command) {
           triwhirl::runtime::RuntimeReplyCode::kTimingProfileResetOk);
       return;
     case triwhirl::runtime::RuntimeCommandType::kFaultClear:
+      triwhirl::runtime::stopRuntimeBalance();
       stopMotor();
       if (!safety_latch.faulted()) {
         deferRuntimeReply(
@@ -1155,6 +1232,12 @@ void realtimeControlTaskImpl(void*) {
       }
     }
 
+    // Balance state feedback runs only after freshness and attitude have been
+    // updated for this generation. It writes the bounded Vq command consumed by
+    // the existing FOC actuator path and trips safety before PWM update on any
+    // stale/invalid/envelope violation.
+    triwhirl::runtime::updateRuntimeBalance();
+
     std::int64_t stage_us = imu_end_us;
     evaluateSafety(start_us);
     updateSwingIdentification(loop_us);
@@ -1279,7 +1362,7 @@ extern "C" void app_main(void) {
   last_telemetry_us = now_us;
 
   consoleWrite("TriWhirl deterministic motor + IMU + attitude runtime ready\r\n");
-  consoleWrite("ESP32 owns swing-identification realtime decisions; host/BLE is supervisory only\r\n");
+  consoleWrite("ESP32 owns swing-identification and balance realtime decisions; host/BLE is supervisory only\r\n");
   consoleWrite("TWLG is the authoritative 1 kHz identification time base; BLE events are observability only\r\n");
   consoleWrite("telemetry is off by default; use 'telemetry on' only for diagnostic streaming\r\n");
   printStatus();
