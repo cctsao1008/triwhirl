@@ -18,7 +18,6 @@ constexpr std::uint8_t kRegAccelConfig = 0x1CU;
 constexpr std::uint8_t kRegFifoEnable = 0x23U;
 constexpr std::uint8_t kRegIntPinConfig = 0x37U;
 constexpr std::uint8_t kRegIntEnable = 0x38U;
-constexpr std::uint8_t kRegAccelXoutH = 0x3BU;
 constexpr std::uint8_t kRegUserControl = 0x6AU;
 constexpr std::uint8_t kRegPowerManagement1 = 0x6BU;
 constexpr std::uint8_t kRegFifoCountHigh = 0x72U;
@@ -144,37 +143,26 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
       }
       vTaskDelay(pdMS_TO_TICKS(kWakeSettleMs));
 
-      // These are the known-good settings used by the pre-FIFO runtime. Failure
-      // here means the base MPU path is genuinely unavailable and must not be
-      // hidden by an acquisition fallback.
+      // These are the known-good settings used by the pre-FIFO runtime. FIFO is
+      // still mandatory for the runtime acquisition contract; only the host-side
+      // wait mechanism is allowed to degrade from async callback to synchronous
+      // FIFO transfers.
       if (!writeRegister(kRegSampleRateDivider, 0x00U) ||
           !writeRegister(kRegConfig, 0x02U) ||
           !writeRegister(kRegGyroConfig, 0x10U) ||
-          !writeRegister(kRegAccelConfig, 0x08U)) {
+          !writeRegister(kRegAccelConfig, 0x08U) ||
+          !configureRuntimeFifo()) {
         discard_device();
         continue;
-      }
-
-      // FIFO/DRDY and asynchronous I2C are optimizations, not prerequisites for
-      // declaring a physically reachable MPU6050 ready. Keep a deterministic
-      // degraded mode so an unsupported async callback or a FIFO bring-up issue
-      // cannot regress the previously working IMU into ready=0.
-      if (!configureRuntimeFifo()) {
-        // Best-effort rollback to the proven 14-byte register window path.
-        writeRegister(kRegIntEnable, 0x00U);
-        writeRegister(kRegFifoEnable, 0x00U);
-        writeRegister(kRegUserControl, 0x00U);
-        fifo_enabled_ = false;
-        async_i2c_enabled_ = false;
-        return true;
       }
 
       i2c_master_event_callbacks_t callbacks{};
       callbacks.on_trans_done = &Mpu6050::asyncTransactionDone;
       if (i2c_master_register_event_callbacks(device_, &callbacks, this) != ESP_OK) {
-        // Keep hardware FIFO + DATA_RDY alive and use synchronous FIFO reads.
-        // This distinguishes callback support problems from MPU/I2C problems and
-        // still lets the GPIO21 passive probe observe the configured INT output.
+        // Do not throw away a healthy MPU + FIFO merely because this ESP-IDF /
+        // target combination rejects asynchronous callbacks. Synchronous FIFO
+        // transfers preserve the new acquisition architecture and keep DATA_RDY
+        // enabled so the GPIO routing probe remains meaningful.
         async_i2c_enabled_ = false;
         vTaskDelay(pdMS_TO_TICKS(kFifoPrimeMs));
         return true;
@@ -330,67 +318,50 @@ bool Mpu6050::decodeFifoSample(const std::uint8_t* const data,
 }
 
 bool Mpu6050::readSample(Mpu6050Sample* const sample) {
-  if (sample == nullptr || device_ == nullptr) {
+  if (sample == nullptr || device_ == nullptr || !fifo_enabled_) {
     return false;
   }
 
   const bool profile = timing_profile_enabled_.load(std::memory_order_relaxed);
   const std::int64_t transfer_begin_us = profile ? esp_timer_get_time() : 0;
-  bool decoded = false;
 
-  if (fifo_enabled_) {
-    const bool count_ok = async_i2c_enabled_
-                              ? asyncRead(kRegFifoCountHigh, fifo_count_data_,
-                                          sizeof(fifo_count_data_),
-                                          kAsyncTransferWaitTicks)
-                              : readRegisters(kRegFifoCountHigh, fifo_count_data_,
-                                              sizeof(fifo_count_data_));
-    if (!count_ok) {
-      return false;
-    }
+  const bool count_ok = async_i2c_enabled_
+                            ? asyncRead(kRegFifoCountHigh, fifo_count_data_,
+                                        sizeof(fifo_count_data_),
+                                        kAsyncTransferWaitTicks)
+                            : readRegisters(kRegFifoCountHigh, fifo_count_data_,
+                                            sizeof(fifo_count_data_));
+  if (!count_ok) {
+    return false;
+  }
 
-    const std::uint16_t fifo_count = static_cast<std::uint16_t>(
-        (static_cast<std::uint16_t>(fifo_count_data_[0]) << 8U) |
-        fifo_count_data_[1]);
-    const std::size_t aligned_bytes =
-        static_cast<std::size_t>(fifo_count) -
-        (static_cast<std::size_t>(fifo_count) % kFifoSampleBytes);
-    if (aligned_bytes < kFifoSampleBytes) {
-      return false;
-    }
+  const std::uint16_t fifo_count = static_cast<std::uint16_t>(
+      (static_cast<std::uint16_t>(fifo_count_data_[0]) << 8U) |
+      fifo_count_data_[1]);
+  const std::size_t aligned_bytes =
+      static_cast<std::size_t>(fifo_count) -
+      (static_cast<std::size_t>(fifo_count) % kFifoSampleBytes);
+  if (aligned_bytes < kFifoSampleBytes) {
+    return false;
+  }
 
-    const std::size_t read_bytes =
-        std::min(aligned_bytes, kFifoReadBufferBytes);
-    const bool fifo_ok = async_i2c_enabled_
-                             ? asyncRead(kRegFifoReadWrite, fifo_data_, read_bytes,
-                                         kAsyncTransferWaitTicks)
-                             : readRegisters(kRegFifoReadWrite, fifo_data_,
-                                             read_bytes);
-    if (!fifo_ok) {
-      return false;
-    }
-    decoded = decodeFifoSample(fifo_data_, read_bytes, sample);
-  } else {
-    // Proven fallback used before FIFO/async bring-up. Keeping this path lets us
-    // separate physical MPU/I2C availability from optimization failures.
-    std::uint8_t data[14]{};
-    if (!readRegisters(kRegAccelXoutH, data, sizeof(data))) {
-      return false;
-    }
-    sample->accel_raw[0] = readBigEndianI16(data[0], data[1]);
-    sample->accel_raw[1] = readBigEndianI16(data[2], data[3]);
-    sample->accel_raw[2] = readBigEndianI16(data[4], data[5]);
-    sample->temperature_raw = readBigEndianI16(data[6], data[7]);
-    sample->gyro_raw[0] = readBigEndianI16(data[8], data[9]);
-    sample->gyro_raw[1] = readBigEndianI16(data[10], data[11]);
-    sample->gyro_raw[2] = readBigEndianI16(data[12], data[13]);
-    sample->temperature_c =
-        static_cast<float>(sample->temperature_raw) / 340.0F + 36.53F;
-    decodePhysicalSample(sample);
-    decoded = true;
+  // Read multiple queued packets when necessary to catch up, then decode the
+  // newest packet in this bounded chunk. At steady state this is one 12-byte
+  // packet. A short scheduler hiccup therefore self-recovers instead of locking
+  // control onto an increasingly old FIFO sample.
+  const std::size_t read_bytes =
+      std::min(aligned_bytes, kFifoReadBufferBytes);
+  const bool fifo_ok = async_i2c_enabled_
+                           ? asyncRead(kRegFifoReadWrite, fifo_data_, read_bytes,
+                                       kAsyncTransferWaitTicks)
+                           : readRegisters(kRegFifoReadWrite, fifo_data_,
+                                           read_bytes);
+  if (!fifo_ok) {
+    return false;
   }
 
   const std::int64_t transfer_end_us = profile ? esp_timer_get_time() : 0;
+  const bool decoded = decodeFifoSample(fifo_data_, read_bytes, sample);
   if (profile && decoded) {
     const std::int64_t decode_end_us = esp_timer_get_time();
     recordSampleTiming(
