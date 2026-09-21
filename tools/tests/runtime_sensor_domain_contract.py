@@ -138,27 +138,34 @@ def main() -> None:
              "RuntimeStateEventType::kImuCalibrationComplete"),
             "Core-1 IMU state commit path is incomplete")
 
-    # MPU6050 runtime acquisition is FIFO-backed and uses ESP-IDF asynchronous
-    # master callbacks. Temperature is deliberately not in the runtime FIFO;
-    # accel + all gyro axes preserve runtime axis remapping in a 12-byte packet.
+    # MPU6050 runtime acquisition remains FIFO-backed. The async implementation
+    # is retained behind the driver fallback, but the shared platform helper must
+    # not force trans_queue_depth != 0: ESP-IDF then places the bus into async
+    # mode before the synchronous probe/configuration sequence runs. With the
+    # default synchronous bus, callback registration is rejected and the driver
+    # deliberately continues with synchronous FIFO transactions on Core 0.
     require(mpu_h,
             ("kFifoSampleBytes = 12U", "asyncTransactionDone(",
              "asyncRead(", "fifoEnabled()", "asyncI2cEnabled()",
              "std::atomic<bool> timing_profile_enabled_", "portMUX_TYPE timing_mux_"),
-            "MPU FIFO/async-I2C interface contract is incomplete")
+            "MPU FIFO interface contract is incomplete")
     require(mpu_cpp,
             ("kRuntimeFifoSources = 0x78U", "kRegFifoCountHigh = 0x72U",
              "kRegFifoReadWrite = 0x74U", "configureRuntimeFifo()",
              "i2c_master_register_event_callbacks(",
+             "mode=sync_fifo", "async_i2c_enabled_ = false;",
              "i2c_master_transmit_receive(", "xSemaphoreGiveFromISR(",
              "portENTER_CRITICAL(&timing_mux_)", "portEXIT_CRITICAL(&timing_mux_)"),
-            "MPU FIFO/async-I2C implementation regressed")
+            "MPU FIFO/synchronous-fallback implementation regressed")
     if "kRegAccelXoutH, data, sizeof(data)" in mpu_cpp:
         fail("runtime MPU sampling regressed to direct 14-byte register polling")
 
     require(platform_cpp,
-            ("trans_queue_depth", "kDefaultAsyncI2cQueueDepth = 4U"),
-            "I2C bus no longer reserves a bounded async transaction queue")
+            ("Preserve the caller's bus mode exactly", "i2c_new_master_bus(config, output)"),
+            "I2C bus creation no longer preserves synchronous bring-up mode")
+    if "kDefaultAsyncI2cQueueDepth" in platform_cpp:
+        fail("platform helper must not force an async I2C transaction queue")
+
     require(board_h,
             ("kMpu6050IntGpio = -1", "kMpu6050IntProbeGpio = 21",
              "kMpu6050IntRoutingVerified = false"),
@@ -185,7 +192,7 @@ def main() -> None:
     print("  encoder_worker=core0")
     print("  imu_worker=core0")
     print("  mpu_runtime_source=fifo_accel_xyz_gyro_xyz")
-    print("  mpu_i2c=asynchronous_callback")
+    print("  mpu_i2c=synchronous_fifo")
     print("  mpu_drdy_authority=disabled_unverified")
     print("  mpu_drdy_probe=io21_observation_only")
     print("  sensor_frame_coordinator=core0")
