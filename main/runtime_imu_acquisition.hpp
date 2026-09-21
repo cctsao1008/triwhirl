@@ -27,12 +27,14 @@ struct ImuAcquisitionStats {
   std::uint64_t drdy_edges = 0U;
   std::uint64_t drdy_consumed = 0U;
   std::uint64_t drdy_fallback_reads = 0U;
+  int drdy_gpio = -1;
+  bool drdy_probe_only = false;
 };
 
 // Runtime I2C is asynchronous inside the MPU6050 driver. The Core-0 worker
-// remains the single sample consumer and records MPU_INT edges when the optional
-// TRC-V1.0 MPU_INT->IO21 bring-up jumper is populated. Until the jumper exists,
-// FIFO reads remain request-driven and drdy_fallback_reads makes that explicit.
+// remains the single sample consumer. If the production-board MPU_INT route is
+// not verified, an explicitly marked passive GPIO hypothesis may count edges,
+// but those edges are never used as an acquisition clock or Balance authority.
 bool initImuAcquisition(ImuReadFn read_fn, void* context, int core_id,
                         unsigned task_priority);
 bool dispatchImuAcquisition(std::uint32_t* sequence);
