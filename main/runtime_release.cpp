@@ -165,6 +165,11 @@ bool waitForNextRealtimeRelease() {
   return next > 0U;
 }
 
+bool realtimeReleaseReady() {
+  return realtime_release_timer != nullptr && !realtime_release_init_failed &&
+         realtime_release_init_result == ESP_OK;
+}
+
 RealtimeReleaseStats realtimeReleaseStats() {
   return realtime_release_stats;
 }
