@@ -43,7 +43,7 @@ COMMANDS: tuple[ToolCommand, ...] = (
         group="log",
         name="critical",
         handler="commands.log:critical_main",
-        description="Pause/resume flash programming while SRAM capture continues.",
+        description="Pause/resume flash programming while retaining 1 kHz records in SRAM.",
     ),
     ToolCommand(
         group="log",
@@ -104,6 +104,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
         name="timing-profile",
         handler="commands.diag:timing_profile_main",
         description="Measure per-stage execution time inside the ESP32 control task.",
+    ),
+    ToolCommand(
+        group="diag",
+        name="realtime-check",
+        handler="commands.realtime:realtime_check_main",
+        description="Enforce the pre-Balance realtime and sensor-pipeline acceptance criteria over BLE.",
     ),
     ToolCommand(
         group="diag",

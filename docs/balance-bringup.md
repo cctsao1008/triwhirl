@@ -6,7 +6,33 @@ This is the shortest supported path from firmware-owned identification to a guar
 
 The runtime now owns the full 1 kHz balance loop on ESP32 Core 1. UART/BLE remain supervisory only. Balance actuation is admitted only when motor configuration, encoder, IMU calibration, attitude validity, safety state, capture angle, and wheel speed are all valid.
 
-## 2. Collect one firmware-owned swing-identification run
+## 2. Pass the realtime acceptance check
+
+Before collecting identification data, verify the actual unit's 1 kHz loop and Core-0 sensor pipeline:
+
+```bash
+python tools/twtool.py diag realtime-check 5 --baseline-seconds 3
+```
+
+The command keeps the motor stopped, profiles the sensor pipeline, then measures a clean unprofiled timing baseline. The default acceptance gate requires:
+
+- at least 98% sensor-generation completion;
+- zero dispatch failures, sensor read failures, stale results, and join timeouts;
+- no more than one consecutive missed sensor generation;
+- no profiled control period at or above 1500 us;
+- a 1000 us target period, no control-loop overrun or late-period event, `max_exec_us <= 1000`, and `max_period_us <= 1250` in the clean baseline;
+- zero UART/BLE drop bytes during the baseline;
+- healthy AS5600 magnet/sample/velocity state, a live IMU sample, and no latched safety fault.
+
+Proceed only when the tool ends with:
+
+```text
+REALTIME_ACCEPTANCE_PASS
+```
+
+These are bring-up acceptance defaults, not universal plant limits. Override a threshold only when there is measured hardware evidence and document why.
+
+## 3. Collect one firmware-owned swing-identification run
 
 ```bash
 python tools/twtool.py id swing \
@@ -22,7 +48,7 @@ artifacts/id/run01-active.csv
 
 Do not synthesize a deployment controller from an aborted run or from a run with unusable probe windows.
 
-## 3. Fit the plant and synthesize one robust H-infinity gain
+## 4. Fit the plant and synthesize one robust H-infinity gain
 
 ```bash
 python tools/twtool.py fit hinf \
@@ -58,7 +84,7 @@ artifacts/hinf/run01/run01-balance-command.txt
 
 The deployment converter refuses artifacts that do not report all plant vertices stable.
 
-## 4. Configure without starting
+## 5. Configure without starting
 
 ```bash
 python tools/twtool.py control balance \
@@ -71,7 +97,7 @@ python tools/twtool.py control balance \
 
 This connection stops the motor, restores the calibrated motor configuration, calibrates the gyro while stationary, resets attitude from gravity, applies the H-infinity gain, and verifies `balance status` plus `fault status`. It does **not** start the motor unless `--start` is supplied.
 
-## 5. Run the first bounded balance trial
+## 6. Run the first bounded balance trial
 
 Hold the unit close to the intended upright vertex and keep clear of the reaction wheel. Then run:
 
@@ -103,4 +129,4 @@ Vq = -K_inf x
 
 ## What is still hardware-dependent
 
-The repository intentionally does not ship a fabricated gain. A real `K_inf` requires a successful identification log from the actual unit. The first hardware trial should therefore proceed in this order: identify, synthesize, configure-only, bounded start, inspect faults/timing, then extend duration.
+The repository intentionally does not ship a fabricated gain. A real `K_inf` requires a successful identification log from the actual unit. The first hardware trial should therefore proceed in this order: realtime acceptance, identify, synthesize, configure-only, bounded start, inspect faults/timing, then extend duration.

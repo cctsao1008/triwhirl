@@ -38,6 +38,8 @@ jobs:
           /tmp/balance-controller-test
       - name: "test: H-infinity balance deployment command"
         run: python tools/tests/hinf_balance_command_test.py
+      - name: "test: realtime acceptance evaluator"
+        run: python tools/tests/realtime_acceptance_test.py
       - name: "test: host toolbox routing"
         run: |
           python tools/twtool.py --help
@@ -53,8 +55,12 @@ jobs:
           python tools/twtool.py help diag timing
           python tools/twtool.py help diag timing-reset
           python tools/twtool.py help diag timing-test
+          python tools/twtool.py help diag timing-profile
+          python tools/twtool.py help diag realtime-check
           python tools/twtool.py help diag imu
+          python tools/twtool.py help control balance
           python tools/twtool.py help id swing
+          python tools/twtool.py help fit hinf
           python -m tools.triwhirl_tool help log decode
           python -m compileall -q tools/triwhirl_tool model tools/synthesis/hinf
       - name: "test: native TWLG tools"
