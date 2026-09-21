@@ -17,6 +17,8 @@ constexpr float kDefaultCalibrationTurns = 4.0F;
 constexpr float kDefaultLogSeconds = 45.0F;
 constexpr const char* kSwingConfigUsage =
     "ERR usage: swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n";
+constexpr const char* kBalanceConfigUsage =
+    "ERR usage: balance config <k_theta> <k_rate> <k_wheel> <theta_ref_deg> <capture_deg> <fall_deg> <vq_limit_v> <wheel_limit_rad_s>\r\n";
 
 bool commandArguments(const char* const line, const char* const command,
                       const char** const arguments) {
@@ -121,6 +123,12 @@ RuntimeCommandParseResult parseRuntimeCommand(const char* const input) {
     return commandResult(RuntimeCommandType::kLogStatus);
   if (std::strcmp(line, "swing") == 0 || std::strcmp(line, "swing status") == 0)
     return commandResult(RuntimeCommandType::kSwingStatus);
+  if (std::strcmp(line, "balance") == 0 || std::strcmp(line, "balance status") == 0)
+    return commandResult(RuntimeCommandType::kBalanceStatus);
+  if (std::strcmp(line, "balance start") == 0)
+    return commandResult(RuntimeCommandType::kBalanceStart);
+  if (std::strcmp(line, "balance stop") == 0)
+    return commandResult(RuntimeCommandType::kBalanceStop);
   if (std::strcmp(line, "timing profile") == 0 ||
       std::strcmp(line, "timing profile status") == 0)
     return commandResult(RuntimeCommandType::kTimingProfileStatus);
@@ -238,6 +246,37 @@ RuntimeCommandParseResult parseRuntimeCommand(const char* const input) {
     return result;
   }
 
+  if (commandArguments(line, "balance config", &arguments)) {
+    char copy[kCommandTextBytes]{};
+    std::snprintf(copy, sizeof(copy), "%s", arguments);
+    char* cursor = copy;
+    char* k_theta = nextToken(&cursor);
+    char* k_rate = nextToken(&cursor);
+    char* k_wheel = nextToken(&cursor);
+    char* theta_reference = nextToken(&cursor);
+    char* capture = nextToken(&cursor);
+    char* fall = nextToken(&cursor);
+    char* vq_limit = nextToken(&cursor);
+    char* wheel_limit = nextToken(&cursor);
+    if (k_theta == nullptr || k_rate == nullptr || k_wheel == nullptr ||
+        theta_reference == nullptr || capture == nullptr || fall == nullptr ||
+        vq_limit == nullptr || wheel_limit == nullptr ||
+        nextToken(&cursor) != nullptr) {
+      return usageError(kBalanceConfigUsage);
+    }
+    auto result = commandResult(RuntimeCommandType::kBalanceConfig);
+    auto& config = result.command.payload.balance_config;
+    config.k_theta = std::strtof(k_theta, nullptr);
+    config.k_rate = std::strtof(k_rate, nullptr);
+    config.k_wheel = std::strtof(k_wheel, nullptr);
+    config.theta_reference_deg = std::strtof(theta_reference, nullptr);
+    config.capture_deg = std::strtof(capture, nullptr);
+    config.fall_deg = std::strtof(fall, nullptr);
+    config.vq_limit_v = std::strtof(vq_limit, nullptr);
+    config.wheel_rate_limit_rad_s = std::strtof(wheel_limit, nullptr);
+    return result;
+  }
+
   if (commandArguments(line, "swing config", &arguments)) {
     char copy[kCommandTextBytes]{};
     std::snprintf(copy, sizeof(copy), "%s", arguments);
@@ -299,6 +338,8 @@ RuntimeCommandParseResult parseRuntimeCommand(const char* const input) {
     return usageError("ERR usage: imu <status|calibrate [samples]|map ...>\r\n");
   if (commandArguments(line, "attitude", &arguments))
     return usageError("ERR usage: attitude <status|reset [angle_rad]>\r\n");
+  if (commandArguments(line, "balance", &arguments))
+    return usageError("ERR usage: balance <status|config ...|start|stop>\r\n");
   if (commandArguments(line, "timing profile", &arguments))
     return usageError("ERR usage: timing profile <status|on|off|reset>\r\n");
   if (commandArguments(line, "timing", &arguments))
