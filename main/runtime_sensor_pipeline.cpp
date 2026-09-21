@@ -139,15 +139,17 @@ bool dispatchSensorFrameAcquisition(std::uint32_t* const sequence) {
   SensorFrameRequest request{};
   request.sequence = ++request_sequence;
   request.requested_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
-  if (xQueueSend(request_queue, &request, 0) != pdTRUE) {
-    portENTER_CRITICAL(&stats_mux);
-    ++stats.request_drops;
-    portEXIT_CRITICAL(&stats_mux);
-    return false;
-  }
+
+  // Keep only the newest not-yet-consumed generation. This prevents Core 0 from
+  // spending its next cycle on an older queued request after a slow sensor frame.
+  const bool replacing_queued_request = uxQueueMessagesWaiting(request_queue) > 0U;
+  xQueueOverwrite(request_queue, &request);
 
   portENTER_CRITICAL(&stats_mux);
   ++stats.requests;
+  if (replacing_queued_request) {
+    ++stats.request_overwrites;
+  }
   portEXIT_CRITICAL(&stats_mux);
   *sequence = request.sequence;
   return true;

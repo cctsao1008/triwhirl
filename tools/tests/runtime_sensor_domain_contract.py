@@ -101,7 +101,8 @@ def main() -> None:
             "coherent sensor-frame contract is incomplete")
     require(pipeline_h,
             ("initSensorFramePipeline(", "dispatchSensorFrameAcquisition(",
-             "readLatestSensorFrame(", "RuntimeSensorPipelineStats"),
+             "readLatestSensorFrame(", "RuntimeSensorPipelineStats",
+             "request_overwrites"),
             "sensor pipeline API is incomplete")
     require(pipeline_cpp,
             ("sensorFramePipelineTask(", "dispatchEncoderAcquisition(",
@@ -110,11 +111,15 @@ def main() -> None:
              "collectEncoderAcquisition(\n          encoder_sequence, 0U",
              "collectImuAcquisition(\n          imu_sequence, 0U",
              "xQueueOverwrite(frame_queue, &frame)",
+             "xQueueOverwrite(request_queue, &request)",
+             "uxQueueMessagesWaiting(request_queue)",
              "kSensorWorkerJoinBudgetUs = 1500U"),
             "Core-0 coherent sensor coordinator is incomplete")
     if "encoder_sequence, kSensorWorkerJoinBudgetUs" in pipeline_cpp or \
        "imu_sequence, kSensorWorkerJoinBudgetUs" in pipeline_cpp:
         fail("sensor coordinator returned to sequential per-sensor join budgets")
+    if "xQueueSend(request_queue, &request, 0)" in pipeline_cpp:
+        fail("sensor request mailbox must remain latest-only")
     if '"runtime_sensor_pipeline.cpp"' not in cmake:
         fail("runtime_sensor_pipeline.cpp is not compiled explicitly")
 
@@ -140,6 +145,7 @@ def main() -> None:
     print("  blocking_mpu_i2c_in_realtime=no")
     print("  sensor_frame=bounded_timestamped_generation")
     print("  sensor_frame_join_budget=shared_1500us")
+    print("  sensor_frame_request_queue=latest_only")
     print("  sensor_freshness_limit_us=3000")
     print("  imu_timing_profile=cross_core_safe")
 
