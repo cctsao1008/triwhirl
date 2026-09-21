@@ -25,6 +25,8 @@ std::uint32_t request_sequence = 0U;
 portMUX_TYPE stats_mux = portMUX_INITIALIZER_UNLOCKED;
 ImuAcquisitionStats stats{};
 bool drdy_irq_enabled = false;
+bool drdy_probe_only = false;
+int drdy_gpio = -1;
 
 void incrementStat(std::uint64_t ImuAcquisitionStats::* const field) {
   portENTER_CRITICAL(&stats_mux);
@@ -37,6 +39,12 @@ void mpuDataReadyIsr(void*) {
   ++stats.drdy_edges;
   portEXIT_CRITICAL_ISR(&stats_mux);
 
+  // An unverified GPIO is observation-only: never let a guessed route become a
+  // scheduling authority. A verified route may wake the worker directly later.
+  if (drdy_probe_only) {
+    return;
+  }
+
   BaseType_t task_woken = pdFALSE;
   if (acquisition_task != nullptr) {
     vTaskNotifyGiveFromISR(acquisition_task, &task_woken);
@@ -47,29 +55,37 @@ void mpuDataReadyIsr(void*) {
 }
 
 bool initDataReadyInput() {
-  if (!triwhirl::board::kMpu6050IntRoutingVerified ||
-      triwhirl::board::kMpu6050IntGpio < 0) {
+  if (triwhirl::board::kMpu6050IntRoutingVerified &&
+      triwhirl::board::kMpu6050IntGpio >= 0) {
+    drdy_gpio = triwhirl::board::kMpu6050IntGpio;
+    drdy_probe_only = false;
+  } else if (triwhirl::board::kMpu6050IntProbeGpio >= 0) {
+    drdy_gpio = triwhirl::board::kMpu6050IntProbeGpio;
+    drdy_probe_only = true;
+  } else {
     return false;
   }
 
   gpio_config_t config{};
-  config.pin_bit_mask =
-      1ULL << static_cast<unsigned>(triwhirl::board::kMpu6050IntGpio);
+  config.pin_bit_mask = 1ULL << static_cast<unsigned>(drdy_gpio);
   config.mode = GPIO_MODE_INPUT;
+  // Do not bias an unknown production-board net while probing.
   config.pull_up_en = GPIO_PULLUP_DISABLE;
-  config.pull_down_en = GPIO_PULLDOWN_ENABLE;
+  config.pull_down_en = GPIO_PULLDOWN_DISABLE;
   config.intr_type = GPIO_INTR_POSEDGE;
   if (gpio_config(&config) != ESP_OK) {
+    drdy_gpio = -1;
     return false;
   }
 
   const esp_err_t install = gpio_install_isr_service(0);
   if (install != ESP_OK && install != ESP_ERR_INVALID_STATE) {
+    drdy_gpio = -1;
     return false;
   }
-  if (gpio_isr_handler_add(
-          static_cast<gpio_num_t>(triwhirl::board::kMpu6050IntGpio),
-          mpuDataReadyIsr, nullptr) != ESP_OK) {
+  if (gpio_isr_handler_add(static_cast<gpio_num_t>(drdy_gpio),
+                           mpuDataReadyIsr, nullptr) != ESP_OK) {
+    drdy_gpio = -1;
     return false;
   }
   return true;
@@ -82,10 +98,8 @@ void imuAcquisitionTask(void*) {
       continue;
     }
 
-    // Consume an already-latched DRDY edge only after the physical board route
-    // has been verified and assigned. Until then FIFO reads remain explicitly
-    // request-driven; fallback statistics make that hardware limitation visible.
-    if (drdy_irq_enabled && ulTaskNotifyTake(pdTRUE, 0) > 0U) {
+    if (drdy_irq_enabled && !drdy_probe_only &&
+        ulTaskNotifyTake(pdTRUE, 0) > 0U) {
       incrementStat(&ImuAcquisitionStats::drdy_consumed);
     } else {
       incrementStat(&ImuAcquisitionStats::drdy_fallback_reads);
@@ -193,8 +207,10 @@ bool collectImuAcquisition(const std::uint32_t expected_sequence,
 
 ImuAcquisitionStats imuAcquisitionStats() {
   portENTER_CRITICAL(&stats_mux);
-  const ImuAcquisitionStats copy = stats;
+  ImuAcquisitionStats copy = stats;
   portEXIT_CRITICAL(&stats_mux);
+  copy.drdy_gpio = drdy_gpio;
+  copy.drdy_probe_only = drdy_probe_only;
   return copy;
 }
 
