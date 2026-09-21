@@ -28,6 +28,14 @@ jobs:
             tools/tests/runtime_protocol_int_contract.cpp \
             -o /tmp/runtime-protocol-int-contract
           /tmp/runtime-protocol-int-contract
+      - name: "test: balance controller contract"
+        run: |
+          g++ -std=c++17 \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/balance_controller_test.cpp \
+            components/triwhirl_core/balance_controller.cpp \
+            -o /tmp/balance-controller-test
+          /tmp/balance-controller-test
       - name: "test: host toolbox routing"
         run: |
           python tools/twtool.py --help
