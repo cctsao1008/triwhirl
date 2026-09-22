@@ -14,6 +14,10 @@ constexpr std::uint8_t kStatusMagnetDetected = 1U << 5;
 constexpr std::uint8_t kStatusMagnetTooWeak = 1U << 4;
 constexpr std::uint8_t kStatusMagnetTooStrong = 1U << 3;
 constexpr int kI2cTimeoutMs = 20;
+// The 1 kHz control path must never inherit the long configuration/diagnostic
+// timeout. Normal RAW ANGLE reads are a few hundred microseconds on this board;
+// two milliseconds leaves margin while bounding a stuck transaction tightly.
+constexpr int kRuntimeI2cTimeoutMs = 2;
 constexpr std::uint32_t kI2cClockHz = 1000000U;  // AS5600 Fast-mode Plus max.
 
 void recordTiming(std::uint64_t* const count,
@@ -70,7 +74,8 @@ bool As5600::readRegisters(const std::uint8_t first_register,
     return false;
   }
   // Any addressed register transaction changes the AS5600 internal address
-  // pointer. The next fast RAW ANGLE read therefore has to seed 0x0C again.
+  // pointer. The runtime RAW ANGLE path therefore uses one explicit addressed
+  // transmit-receive transaction and does not depend on retained pointer state.
   raw_angle_pointer_valid_ = false;
   return i2c_master_transmit_receive(device_, &first_register, 1U, data, length,
                                      kI2cTimeoutMs) == ESP_OK;
@@ -80,26 +85,22 @@ bool As5600::readRawAngle(std::uint16_t* const raw_count) {
   if (raw_count == nullptr || device_ == nullptr || mutex_ == nullptr) {
     return false;
   }
-  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(kI2cTimeoutMs)) != pdTRUE) {
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(kRuntimeI2cTimeoutMs)) != pdTRUE) {
     return false;
   }
 
   const bool profile = timing_profile_enabled_;
   const std::int64_t begin_us = profile ? esp_timer_get_time() : 0;
 
-  bool ok = true;
-  if (!raw_angle_pointer_valid_) {
-    ok = selectRegister(kRawAngleHighRegister);
-    if (ok) {
-      raw_angle_pointer_valid_ = true;
-    }
-  }
-
+  // Use one deterministic repeated-start transaction per runtime sample. The
+  // previous pointer-cached path could require a 20 ms select plus a 20 ms read
+  // after pointer invalidation, which was observed as a ~44 ms realtime stall.
+  const std::uint8_t first_register = kRawAngleHighRegister;
   std::uint8_t data[2]{};
-  if (ok && i2c_master_receive(device_, data, sizeof(data), kI2cTimeoutMs) != ESP_OK) {
-    raw_angle_pointer_valid_ = false;
-    ok = false;
-  }
+  const bool ok = i2c_master_transmit_receive(
+                      device_, &first_register, 1U, data, sizeof(data),
+                      kRuntimeI2cTimeoutMs) == ESP_OK;
+  raw_angle_pointer_valid_ = false;
 
   if (ok) {
     *raw_count = static_cast<std::uint16_t>(
