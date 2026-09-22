@@ -79,7 +79,7 @@ COMMANDS: tuple[ToolCommand, ...] = (
         group="log",
         name="inspect",
         handler="commands.log:inspect_main",
-        description="Inspect TWLG metadata, timing quality, validity, and signal ranges.",
+        description="Inspect TWLG metadata, timing quality, validity, and signals.",
     ),
     ToolCommand(
         group="diag",
@@ -122,6 +122,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
         name="imu",
         handler="commands.diag:imu_main",
         description="Read IMU and attitude-estimator health over BLE.",
+    ),
+    ToolCommand(
+        group="diag",
+        name="motor-direction",
+        handler="commands.motor:motor_direction_main",
+        description="Run an untethered BLE-only +Vq/-Vq wheel direction check from rest.",
     ),
     ToolCommand(
         group="control",
