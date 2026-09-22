@@ -116,6 +116,8 @@ bool readEncoderDiagnosticStatus(EncoderDiagnosticStatus* const status) {
   status->magnet_detected = cached_valid && value.magnet_detected;
   status->magnet_too_weak = cached_valid && value.magnet_too_weak;
   status->magnet_too_strong = cached_valid && value.magnet_too_strong;
+  status->agc = cached_valid ? value.agc : 0U;
+  status->magnitude = cached_valid ? value.magnitude : 0U;
   return ok;
 }
 
