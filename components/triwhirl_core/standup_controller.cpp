@@ -37,6 +37,7 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
       config.lqr_k_angle_stable,
       config.lqr_k_rate_stable,
       config.lqr_k_wheel_stable,
+      config.gyro_rate_limit_rad_s,
       config.velocity_p_unstable,
       config.velocity_i_unstable,
       config.velocity_p_stable,
@@ -58,6 +59,7 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
          config.pump_v_low > 0.0F &&
          config.pump_v_low <= config.pump_v_high &&
          config.rate_switch_rad_s >= 0.0F &&
+         config.gyro_rate_limit_rad_s > 0.0F &&
          config.velocity_p_unstable >= 0.0F &&
          config.velocity_i_unstable >= 0.0F &&
          config.velocity_p_stable >= 0.0F &&
@@ -153,6 +155,8 @@ StandupControllerOutput StandupController::update(
     output.stable = false;
     output.valid = true;
 
+    // Golden firmware explicitly assigns Gyro=0 in both swing branches. Keep
+    // the next Balance entry equivalent to one vendor filter update from zero.
     filtered_rate_rad_s_ = 0.0F;
     resetVelocityLoop();
     stable_ = false;
@@ -163,16 +167,23 @@ StandupControllerOutput StandupController::update(
     return output_;
   }
 
-  // Local balance region. Match the seller's 0.6/0.4 gyro smoothing and its
-  // sign convention: controllerLQR(pendulum_angle, -Gyro, shaftVelocity()).
+  // Golden TRC-V1.1 runs the MPU6050 at +/-250 deg/s, then executes
+  //   Gyro = Gyro * 0.6 + gyroZrate * 0.4
+  // before controllerLQR(..., -Gyro, ...). Our runtime keeps a wider gyro range
+  // globally, so reproduce the seller's sensor saturation only at this control
+  // boundary. Critically, the first Balance sample is 0.4*rate (Gyro was reset
+  // to zero while swinging), not the full raw rate.
+  const float vendor_rate_rad_s = std::clamp(
+      input.theta_rate_rad_s, -config_.gyro_rate_limit_rad_s,
+      config_.gyro_rate_limit_rad_s);
   if (!was_balancing_) {
-    filtered_rate_rad_s_ = input.theta_rate_rad_s;
+    filtered_rate_rad_s_ = 0.4F * vendor_rate_rad_s;
     resetVelocityLoop();
     last_unstable_us_ = input.now_us;
     last_momentum_adjust_us_ = input.now_us;
   } else {
     filtered_rate_rad_s_ =
-        0.6F * filtered_rate_rad_s_ + 0.4F * input.theta_rate_rad_s;
+        0.6F * filtered_rate_rad_s_ + 0.4F * vendor_rate_rad_s;
   }
   was_balancing_ = true;
 
