@@ -7,6 +7,7 @@
 #include "runtime_release.hpp"
 #include "runtime_sensor_frame.hpp"
 #include "runtime_sensor_pipeline.hpp"
+#include "runtime_standup.hpp"
 #include "runtime_state.hpp"
 #include "triwhirl/safety.hpp"
 
@@ -14,10 +15,13 @@ namespace triwhirl::runtime {
 namespace {
 
 constexpr std::uint32_t kBalanceSensorFreshnessUs = 3000U;
+constexpr float kVendorStandupWheelLimitRadS = 160.0F;
+constexpr float kUprightHalfPeriodRad = 1.0471975512F;  // 60 deg
 
 triwhirl::BalanceControllerConfig balance_config{};
 bool balance_config_valid = false;
 bool balance_active = false;
+bool vendor_standup_mode = false;
 triwhirl::BalanceControllerOutput balance_output{};
 
 triwhirl::BalanceControllerInput currentBalanceInput() {
@@ -36,10 +40,10 @@ bool consumedBalanceSensorFrame(RuntimeSensorFrame* const frame) {
     return false;
   }
 
-  // Generic motor bring-up may tolerate one bounded scheduler/producer phase
-  // slip before declaring a sensor unavailable. Balance does not: validate the
-  // exact generation consumed by Core 1 against the original 3 ms nominal age
-  // budget before it is allowed into the state-feedback controller.
+  // Synthesized direct-Vq Balance validates the exact generation consumed by
+  // Core 1 against the original 3 ms nominal age budget. The vendor standup
+  // fallback deliberately uses the generic bounded freshness path because the
+  // seller controller is proven on a slower, non-deterministic Arduino loop.
   const std::uint32_t now_us =
       static_cast<std::uint32_t>(esp_timer_get_time());
   const bool encoder_fresh = sensorTimestampNominallyFresh(
@@ -50,8 +54,6 @@ bool consumedBalanceSensorFrame(RuntimeSensorFrame* const frame) {
 
   if (frame != nullptr) {
     *frame = consumed;
-    // Preserve the existing fault classifier by marking only this returned copy
-    // invalid when age, rather than I2C, makes a member unusable for Balance.
     if (!encoder_fresh) frame->encoder.ok = false;
     if (!imu_fresh) frame->imu.ok = false;
   }
@@ -62,6 +64,8 @@ void tripBalanceFault(const triwhirl::SafetyFault fault) {
   const std::uint32_t before = state::safety_latch.mask();
   state::safety_latch.trip(fault);
   balance_active = false;
+  vendor_standup_mode = false;
+  stopRuntimeStandup();
   state::stopMotor();
   if ((before & triwhirl::safetyFaultMask(fault)) == 0U) {
     RuntimeStateEvent event{};
@@ -80,16 +84,49 @@ void tripIncompleteBalanceSensorFrame(const RuntimeSensorFrame& frame) {
   tripBalanceFault(triwhirl::SafetyFault::kImuUnavailable);
 }
 
+BalanceStartFailure mapStandupStartFailure(const StandupStartFailure failure) {
+  switch (failure) {
+    case StandupStartFailure::kNone: return BalanceStartFailure::kNone;
+    case StandupStartFailure::kAlreadyActive:
+      return BalanceStartFailure::kAlreadyActive;
+    case StandupStartFailure::kMotorActive:
+      return BalanceStartFailure::kMotorActive;
+    case StandupStartFailure::kReleaseClock:
+      return BalanceStartFailure::kReleaseClock;
+    case StandupStartFailure::kMotorConfig:
+      return BalanceStartFailure::kMotorConfig;
+    case StandupStartFailure::kEncoder: return BalanceStartFailure::kEncoder;
+    case StandupStartFailure::kImu: return BalanceStartFailure::kImu;
+    case StandupStartFailure::kAttitude: return BalanceStartFailure::kAttitude;
+    case StandupStartFailure::kSafetyFault:
+      return BalanceStartFailure::kSafetyFault;
+  }
+  return BalanceStartFailure::kControllerConfig;
+}
+
+void mirrorStandupOutput() {
+  const auto status = runtimeStandupStatus();
+  balance_output = {};
+  balance_output.valid = status.output.valid;
+  balance_output.capture_ready =
+      status.output.phase == triwhirl::StandupPhase::kBalance;
+  balance_output.inside_envelope = status.output.valid;
+  balance_output.theta_error_rad = status.output.theta_error_rad;
+  balance_output.vq_unsaturated_v = status.output.vq_v;
+  balance_output.vq_v = status.output.vq_v;
+}
+
 }  // namespace
 
 bool configureRuntimeBalance(const triwhirl::BalanceControllerConfig& config) {
-  if (balance_active || state::motorActive() ||
+  if (balance_active || runtimeStandupActive() || state::motorActive() ||
       !triwhirl::validBalanceControllerConfig(config) ||
       config.vq_limit_v > state::kMotorVectorLimitV) {
     return false;
   }
   balance_config = config;
   balance_config_valid = true;
+  vendor_standup_mode = false;
   balance_output = {};
   return true;
 }
@@ -98,8 +135,24 @@ BalanceStartFailure startRuntimeBalance(float* const initial_vq_v) {
   if (balance_active) return BalanceStartFailure::kAlreadyActive;
   if (state::motorActive()) return BalanceStartFailure::kMotorActive;
   if (!realtimeReleaseReady()) return BalanceStartFailure::kReleaseClock;
-  if (!balance_config_valid ||
-      !triwhirl::validBalanceControllerConfig(balance_config) ||
+
+  // No synthesized controller has been configured after boot: start the known-
+  // good seller architecture instead. This keeps identification/H-infinity
+  // deployment untouched while enabling an immediate autonomous
+  // swing-up -> local-balance trial on the proven TRC-V1.1 electrical/control
+  // baseline.
+  if (!balance_config_valid) {
+    const StandupStartFailure standup_failure = startRuntimeStandup();
+    const BalanceStartFailure failure = mapStandupStartFailure(standup_failure);
+    if (failure != BalanceStartFailure::kNone) return failure;
+    vendor_standup_mode = true;
+    balance_active = true;
+    mirrorStandupOutput();
+    if (initial_vq_v != nullptr) *initial_vq_v = state::vq_command_v;
+    return BalanceStartFailure::kNone;
+  }
+
+  if (!triwhirl::validBalanceControllerConfig(balance_config) ||
       balance_config.vq_limit_v > state::kMotorVectorLimitV) {
     return BalanceStartFailure::kControllerConfig;
   }
@@ -129,6 +182,7 @@ BalanceStartFailure startRuntimeBalance(float* const initial_vq_v) {
   }
 
   balance_output = output;
+  vendor_standup_mode = false;
   balance_active = true;
   state::vq_command_v = output.vq_v;
   state::motor_mode = state::MotorMode::kFoc;
@@ -139,7 +193,11 @@ BalanceStartFailure startRuntimeBalance(float* const initial_vq_v) {
 }
 
 void stopRuntimeBalance() {
-  if (!balance_active) return;
+  if (!balance_active && !runtimeStandupActive()) return;
+  if (vendor_standup_mode || runtimeStandupActive()) {
+    stopRuntimeStandup();
+  }
+  vendor_standup_mode = false;
   balance_active = false;
   balance_output = {};
   state::stopMotor();
@@ -147,6 +205,18 @@ void stopRuntimeBalance() {
 
 void updateRuntimeBalance() {
   if (!balance_active) return;
+
+  if (vendor_standup_mode) {
+    updateRuntimeStandup(static_cast<std::uint32_t>(esp_timer_get_time()));
+    if (!runtimeStandupActive()) {
+      balance_active = false;
+      vendor_standup_mode = false;
+      balance_output = {};
+      return;
+    }
+    mirrorStandupOutput();
+    return;
+  }
 
   if (!realtimeReleaseReady()) {
     tripBalanceFault(triwhirl::SafetyFault::kControlTiming);
@@ -175,11 +245,6 @@ void updateRuntimeBalance() {
     return;
   }
 
-  // Balance validates the exact sensor generation already consumed and committed
-  // by this Core-1 iteration. It never peeks the Core-0 mailbox a second time,
-  // so an asynchronous overwrite cannot turn a partial committed state into an
-  // apparently complete one. Bring-up modes may use partial frames; Balance
-  // fails closed, including on nominal-age freshness.
   RuntimeSensorFrame sensor_frame{};
   if (!consumedBalanceSensorFrame(&sensor_frame)) {
     tripIncompleteBalanceSensorFrame(sensor_frame);
@@ -211,8 +276,20 @@ bool runtimeBalanceActive() { return balance_active; }
 
 RuntimeBalanceStatus runtimeBalanceStatus() {
   RuntimeBalanceStatus status{};
-  status.configured = balance_config_valid;
   status.active = balance_active;
+  if (vendor_standup_mode || runtimeStandupActive()) {
+    const auto standup = runtimeStandupStatus();
+    status.configured = true;
+    status.config = {};
+    status.config.theta_reference_rad = standup.output.theta_reference_rad;
+    status.config.capture_angle_rad = standup.config.balance_capture_rad;
+    status.config.fall_angle_rad = kUprightHalfPeriodRad;
+    status.config.vq_limit_v = standup.config.vq_limit_v;
+    status.config.wheel_rate_limit_rad_s = kVendorStandupWheelLimitRadS;
+    status.output = balance_output;
+    return status;
+  }
+  status.configured = balance_config_valid;
   status.config = balance_config;
   status.output = balance_output;
   return status;
