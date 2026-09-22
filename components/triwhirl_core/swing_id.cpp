@@ -168,9 +168,6 @@ void SwingIdRunner::updatePumpHalfCycle(const SwingIdInput& input) {
   last_pump_turn_us_ = input.now_us;
   last_pump_turn_angle_deg_ = angle_deg;
   ++output_.half_cycle_index;
-  current_pump_v_ = (output_.half_cycle_index % 2U) == 0U
-                        ? config_.pump_v_high
-                        : config_.pump_v_low;
 }
 
 float SwingIdRunner::pumpCommand() const {
@@ -224,7 +221,18 @@ bool SwingIdRunner::start(const SwingIdInput& input) {
   pending_pump_rate_since_us_ = 0U;
   last_pump_turn_us_ = input.now_us;
   last_pump_turn_angle_deg_ = wrapDeg(radiansToDegrees(input.theta_rad));
-  current_pump_v_ = config_.pump_v_high;
+
+  SwingIdVertex nearest = SwingIdVertex::kNone;
+  float nearest_center_deg = 0.0F;
+  float nearest_error_deg = 0.0F;
+  classifyVertex(input.theta_rad, &nearest, &nearest_center_deg,
+                 &nearest_error_deg);
+  // The known-good TRC firmware uses full 0.42 V when far from balance and
+  // about 0.42/2.5 V near the capture region. Use geometry, not half-cycle
+  // parity, to choose the excitation magnitude.
+  current_pump_v_ = std::fabs(nearest_error_deg) <= config_.rearm_deg
+                        ? config_.pump_v_low
+                        : config_.pump_v_high;
   probe_vq_v_ = 0.0F;
   probe_vertex_ = SwingIdVertex::kNone;
   probe_center_deg_ = 0.0F;
@@ -325,6 +333,9 @@ SwingIdOutput SwingIdRunner::update(const SwingIdInput& input) {
   }
 
   updatePumpHalfCycle(input);
+  current_pump_v_ = std::fabs(nearest_error_deg) <= config_.rearm_deg
+                        ? config_.pump_v_low
+                        : config_.pump_v_high;
   output_.desired_vq_v = pumpCommand();
   output_.vertex = nearest;
   output_.vertex_error_deg = nearest_error_deg;
@@ -357,7 +368,9 @@ SwingIdOutput SwingIdRunner::update(const SwingIdInput& input) {
         recovered_half_cycles >= kRecoveryHalfCycles) {
       probe_vertex_ = SwingIdVertex::kNone;
       probe_center_deg_ = 0.0F;
-      current_pump_v_ = config_.pump_v_high;
+      current_pump_v_ = std::fabs(nearest_error_deg) <= config_.rearm_deg
+                            ? config_.pump_v_low
+                            : config_.pump_v_high;
       setState(SwingIdState::kPump, true);
       output_.vertex = nearest;
       output_.vertex_error_deg = nearest_error_deg;
