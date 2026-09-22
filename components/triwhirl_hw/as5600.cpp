@@ -11,14 +11,13 @@ namespace {
 constexpr std::uint8_t kStatusRegister = 0x0BU;
 constexpr std::uint8_t kRawAngleHighRegister = 0x0CU;
 constexpr std::uint8_t kAgcRegister = 0x1AU;
-constexpr std::uint8_t kMagnitudeHighRegister = 0x1BU;
 constexpr std::uint8_t kStatusMagnetDetected = 1U << 5;
 constexpr std::uint8_t kStatusMagnetTooWeak = 1U << 4;
 constexpr std::uint8_t kStatusMagnetTooStrong = 1U << 3;
 constexpr int kI2cTimeoutMs = 20;
-// The 1 kHz control path must never inherit the long configuration/diagnostic
-// timeout. Normal RAW ANGLE reads are a few hundred microseconds on this board;
-// two milliseconds leaves margin while bounding a stuck transaction tightly.
+// The sensor worker and live field diagnostics must never inherit a long bus
+// timeout. Normal transfers are a few hundred microseconds on this board; two
+// milliseconds leaves margin while bounding a stuck transaction tightly.
 constexpr int kRuntimeI2cTimeoutMs = 2;
 constexpr std::uint32_t kI2cClockHz = 1000000U;  // AS5600 Fast-mode Plus max.
 
@@ -66,7 +65,7 @@ bool As5600::selectRegister(const std::uint8_t reg) {
     return false;
   }
   raw_angle_pointer_valid_ = false;
-  return i2c_master_transmit(device_, &reg, 1U, kI2cTimeoutMs) == ESP_OK;
+  return i2c_master_transmit(device_, &reg, 1U, kRuntimeI2cTimeoutMs) == ESP_OK;
 }
 
 bool As5600::readRegisters(const std::uint8_t first_register,
@@ -76,11 +75,10 @@ bool As5600::readRegisters(const std::uint8_t first_register,
     return false;
   }
   // Any addressed register transaction changes the AS5600 internal address
-  // pointer. The runtime RAW ANGLE path therefore uses one explicit addressed
-  // transmit-receive transaction and does not depend on retained pointer state.
+  // pointer. Invalidate the RAW ANGLE fast-path so its next sample reseeds 0x0C.
   raw_angle_pointer_valid_ = false;
   return i2c_master_transmit_receive(device_, &first_register, 1U, data, length,
-                                     kI2cTimeoutMs) == ESP_OK;
+                                     kRuntimeI2cTimeoutMs) == ESP_OK;
 }
 
 bool As5600::readRawAngle(std::uint16_t* const raw_count) {
@@ -127,7 +125,7 @@ bool As5600::readStatus(As5600Status* const status) {
   if (status == nullptr || mutex_ == nullptr) {
     return false;
   }
-  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(kI2cTimeoutMs)) != pdTRUE) {
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(kRuntimeI2cTimeoutMs)) != pdTRUE) {
     return false;
   }
 
