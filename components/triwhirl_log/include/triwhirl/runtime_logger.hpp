@@ -98,14 +98,14 @@ class RuntimeLogger {
   bool start();
   bool stop();
 
-  // The control task calls record() once per control tick. Probe/critical
-  // records remain full-rate; coarse PumpActive intervals may be intentionally
-  // thinned before the SRAM queue so flash traffic cannot starve realtime I/O.
+  // The control task calls record() once per control tick. Swing pump/probe
+  // records are intentionally thinned into SRAM and flash programming is held
+  // off while the autonomous motor experiment is active. stop() re-enables
+  // flash and drains the bounded SRAM payload after the motor has stopped.
   bool record(const RuntimeLogRecord& record);
 
-  // Autonomous control can block flash programming during a near-upright
-  // critical window and re-enable it afterwards. SRAM absorbs the records while
-  // programming is paused.
+  // Autonomous control can block flash programming during a critical window.
+  // SRAM absorbs the records while programming is paused.
   void setFlashWritesAllowed(bool allowed);
 
   LoggerStatus status() const;
@@ -136,6 +136,7 @@ class RuntimeLogger {
   volatile std::uint32_t dropped_records_ = 0U;
   volatile std::uint32_t payload_crc32_ = 0U;
   std::uint32_t pump_record_counter_ = 0U;
+  std::uint32_t probe_record_counter_ = 0U;
 };
 
 const char* loggerStateName(LoggerState state);
