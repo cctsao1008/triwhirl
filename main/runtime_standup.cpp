@@ -16,23 +16,39 @@ constexpr float kDefaultThetaReferenceRad = 68.0F * triwhirl::kPi / 180.0F;
 // The vendor velocity target is limited to 140 rad/s. Keep a small physical
 // margin above that target before treating wheel speed as a hard standup fault.
 constexpr float kStandupWheelHardLimitRadS = 160.0F;
+// The Core-0 sensor pipeline is latest-only and may occasionally skip one IMU
+// generation without an actual I2C failure. Do not turn that isolated scheduler
+// phase slip into an immediate standup fault. Six milliseconds matches the
+// runtime's existing 3 ms nominal + 3 ms transient sensor-freshness envelope;
+// a genuinely stale IMU stream still stops the motor within a few control ticks.
+constexpr std::uint32_t kStandupImuGraceUs = 6000U;
 
 triwhirl::StandupControllerConfig standup_config{};
 triwhirl::StandupController standup_controller{};
 bool standup_configured = false;
 bool standup_active = false;
+std::uint32_t standup_last_valid_imu_us = 0U;
+
+bool standupImuUsable(const std::uint32_t now_us) {
+  if (state::imu_sample_valid) {
+    standup_last_valid_imu_us = now_us;
+    return true;
+  }
+  if (standup_last_valid_imu_us == 0U) return false;
+  return (now_us - standup_last_valid_imu_us) <= kStandupImuGraceUs;
+}
 
 triwhirl::StandupControllerInput currentStandupInput(
-    const std::uint32_t now_us) {
+    const std::uint32_t now_us, const bool imu_usable) {
   triwhirl::StandupControllerInput input{};
   input.now_us = now_us;
   input.theta_rad = state::attitude_state.angle_rad;
   input.theta_rate_rad_s = state::attitude_state.rate_rad_s;
   input.wheel_rate_rad_s = state::wheel_state.velocity_rad_s;
   input.valid = state::encoder_sample_valid && state::wheel_state.velocity_valid &&
-                state::imu_ready && state::imu_sample_valid &&
-                state::gyro_bias_valid && state::attitude_initialized &&
-                state::attitude_state.valid && !state::safety_latch.faulted();
+                state::imu_ready && imu_usable && state::gyro_bias_valid &&
+                state::attitude_initialized && state::attitude_state.valid &&
+                !state::safety_latch.faulted();
   return input;
 }
 
@@ -40,6 +56,7 @@ void tripStandupFault(const triwhirl::SafetyFault fault) {
   const std::uint32_t before = state::safety_latch.mask();
   state::safety_latch.trip(fault);
   standup_active = false;
+  standup_last_valid_imu_us = 0U;
   state::stopMotor();
   if ((before & triwhirl::safetyFaultMask(fault)) == 0U) {
     RuntimeStateEvent event{};
@@ -93,10 +110,12 @@ StandupStartFailure startRuntimeStandup() {
 
   const std::uint32_t now_us =
       static_cast<std::uint32_t>(esp_timer_get_time());
-  const auto input = currentStandupInput(now_us);
+  standup_last_valid_imu_us = now_us;
+  const auto input = currentStandupInput(now_us, true);
   standup_controller.reset(input);
   const auto output = standup_controller.update(input);
   if (!output.valid || !std::isfinite(output.vq_v)) {
+    standup_last_valid_imu_us = 0U;
     return StandupStartFailure::kAttitude;
   }
 
@@ -108,8 +127,12 @@ StandupStartFailure startRuntimeStandup() {
 }
 
 void stopRuntimeStandup() {
-  if (!standup_active) return;
+  if (!standup_active) {
+    standup_last_valid_imu_us = 0U;
+    return;
+  }
   standup_active = false;
+  standup_last_valid_imu_us = 0U;
   state::stopMotor();
 }
 
@@ -121,11 +144,13 @@ void updateRuntimeStandup(const std::uint32_t now_us) {
   }
   if (state::safety_latch.faulted()) {
     standup_active = false;
+    standup_last_valid_imu_us = 0U;
     state::stopMotor();
     return;
   }
   if (state::motor_mode != state::MotorMode::kFoc) {
     standup_active = false;
+    standup_last_valid_imu_us = 0U;
     state::stopMotor();
     return;
   }
@@ -133,7 +158,9 @@ void updateRuntimeStandup(const std::uint32_t now_us) {
     tripStandupFault(triwhirl::SafetyFault::kEncoderUnavailable);
     return;
   }
-  if (!state::imu_ready || !state::imu_sample_valid || !state::gyro_bias_valid ||
+
+  const bool imu_usable = standupImuUsable(now_us);
+  if (!state::imu_ready || !imu_usable || !state::gyro_bias_valid ||
       !state::attitude_initialized || !state::attitude_state.valid) {
     tripStandupFault(triwhirl::SafetyFault::kImuUnavailable);
     return;
@@ -144,7 +171,8 @@ void updateRuntimeStandup(const std::uint32_t now_us) {
     return;
   }
 
-  const auto output = standup_controller.update(currentStandupInput(now_us));
+  const auto output =
+      standup_controller.update(currentStandupInput(now_us, imu_usable));
   if (!output.valid || !std::isfinite(output.vq_v)) {
     tripStandupFault(triwhirl::SafetyFault::kInvalidNumeric);
     return;
