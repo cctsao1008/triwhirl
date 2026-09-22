@@ -47,7 +47,9 @@ inline constexpr float kDefaultCalibrationAmplitudeV =
 inline constexpr float kDefaultCalibrationElectricalHz = 1.0F;
 inline constexpr float kDefaultCalibrationTurns = 1.0F;
 inline constexpr std::uint32_t kCalibrationAlignUs = 500000U;
-inline constexpr std::uint32_t kCalibrationSettleUs = 400000U;
+// SimpleFOC holds the final alignment field for roughly 700 ms before sampling
+// the zero electrical angle. Use the same settling window without blocking Core 1.
+inline constexpr std::uint32_t kCalibrationSettleUs = 700000U;
 inline constexpr std::uint32_t kControlPeriodUs = 1000U;
 inline constexpr std::uint32_t kHardControlPeriodUs = 20U * kControlPeriodUs;
 inline constexpr std::uint32_t kDefaultGyroCalibrationSamples = 500U;
