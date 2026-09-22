@@ -98,9 +98,9 @@ int main() {
     const auto parsed = parseRuntimeCommand("motor calibrate");
     assert(parsed.status == RuntimeCommandParseStatus::kCommand);
     assert(parsed.command.type == RuntimeCommandType::kMotorCalibrate);
-    assert(std::fabs(parsed.command.payload.motor_calibrate.amplitude_v - 0.6F) < 1.0e-6F);
-    assert(std::fabs(parsed.command.payload.motor_calibrate.electrical_hz - 0.5F) < 1.0e-6F);
-    assert(std::fabs(parsed.command.payload.motor_calibrate.turns - 4.0F) < 1.0e-6F);
+    assert(std::fabs(parsed.command.payload.motor_calibrate.amplitude_v - 3.0F) < 1.0e-6F);
+    assert(std::fabs(parsed.command.payload.motor_calibrate.electrical_hz - 1.0F) < 1.0e-6F);
+    assert(std::fabs(parsed.command.payload.motor_calibrate.turns - 1.0F) < 1.0e-6F);
   }
 
   {
