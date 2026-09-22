@@ -14,9 +14,15 @@ constexpr UBaseType_t kSensorFrameRequestDepth = 1U;
 constexpr UBaseType_t kSensorFrameMailboxDepth = 1U;
 // One shared Core-0 join deadline bounds the complete generation. Encoder and
 // IMU workers run independently; the coordinator blocks on their result queues
-// instead of spinning, so IDLE0 remains schedulable while synchronous I2C is in
-// flight.
+// instead of spinning, so synchronous I2C wait time is scheduler-visible.
 constexpr std::uint32_t kSensorWorkerJoinBudgetUs = 1500U;
+// Under continuous 1 kHz requests the two highest-priority I2C workers plus BLE
+// can keep Core 0 runnable indefinitely even though each individual transfer is
+// bounded. Reserve one scheduler tick roughly twice per second so IDLE0 can run
+// housekeeping and service the task watchdog. A single retained sensor frame is
+// still inside the runtime's 3 ms freshness budget, and the cadence cost is
+// below 0.2%.
+constexpr std::uint32_t kCore0IdleReservationFrames = 512U;
 
 struct SensorFrameRequest {
   std::uint32_t sequence = 0U;
@@ -55,6 +61,7 @@ void noteFrameResult(const bool complete, const std::uint32_t sequence) {
 
 void sensorFramePipelineTask(void*) {
   SensorFrameRequest request{};
+  std::uint32_t frames_since_idle_reservation = 0U;
   while (true) {
     if (xQueueReceive(request_queue, &request, portMAX_DELAY) != pdTRUE) {
       continue;
@@ -124,6 +131,12 @@ void sensorFramePipelineTask(void*) {
 
     xQueueOverwrite(frame_queue, &frame);
     noteFrameResult(frame.complete, frame.sequence);
+
+    ++frames_since_idle_reservation;
+    if (frames_since_idle_reservation >= kCore0IdleReservationFrames) {
+      frames_since_idle_reservation = 0U;
+      vTaskDelay(1);
+    }
   }
 }
 
