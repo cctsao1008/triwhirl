@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "attitude_estimator.cpp" "balance_controller.cpp" "safety.cpp" "swing_id.cpp" "three_phase_field.cpp" "voltage_mode_foc.cpp" "wheel_kinematics.cpp"
+    SRCS "attitude_estimator.cpp" "balance_controller.cpp" "safety.cpp" "standup_controller.cpp" "swing_id.cpp" "three_phase_field.cpp" "voltage_mode_foc.cpp" "wheel_kinematics.cpp"
     INCLUDE_DIRS "include"
 )
 
