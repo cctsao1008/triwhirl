@@ -59,6 +59,34 @@ void testSwingAndCaptureLaw() {
   assert(output.phase == triwhirl::StandupPhase::kSwingLow);
 }
 
+void testVelocityOutputRamp() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  assert(std::fabs(config.velocity_output_ramp_v_s - 1000.0F) < 1.0e-6F);
+  triwhirl::StandupController controller(config);
+
+  triwhirl::StandupControllerInput input{};
+  input.valid = true;
+  input.now_us = 1000U;
+  input.theta_rad = degToRad(60.0F);  // -8 deg: enter Balance with a large demand.
+  input.theta_rate_rad_s = 0.0F;
+  input.wheel_rate_rad_s = 0.0F;
+  controller.reset(input);
+
+  input.now_us += 1000U;
+  auto first = controller.update(input);
+  assert(first.phase == triwhirl::StandupPhase::kBalance);
+  assert(first.valid);
+  // 1000 V/s at 1 ms permits at most a 1 V step from the reset output.
+  assert(std::fabs(first.vq_v) <= 1.000001F);
+
+  input.now_us += 1000U;
+  auto second = controller.update(input);
+  assert(second.phase == triwhirl::StandupPhase::kBalance);
+  assert(second.valid);
+  assert(std::fabs(second.vq_v - first.vq_v) <= 1.000001F);
+}
+
 void testPeriodicVerticesShareBalanceLaw() {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = degToRad(68.0F);
@@ -116,6 +144,7 @@ void testStableTransitionAndRecovery() {
 
 int main() {
   testSwingAndCaptureLaw();
+  testVelocityOutputRamp();
   testPeriodicVerticesShareBalanceLaw();
   testStableTransitionAndRecovery();
   return 0;
