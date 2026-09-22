@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "triwhirl/board.hpp"
+
 namespace triwhirl {
 namespace {
 constexpr float kTwoPi = 6.28318530717958647692F;
@@ -22,7 +24,10 @@ inline void fastSinCos(const float angle_rad, float* const sin_out,
 }  // namespace
 
 bool validMotorElectricalConfig(const MotorElectricalConfig& config) {
-  return config.pole_pairs > 0 && config.pole_pairs <= 64 &&
+  // This repository targets the vendor TRC-V1.1 8 V motor assembly. Its golden
+  // firmware explicitly uses BLDCMotor(7), so calibration may validate the
+  // observed motion but must not silently accept a different pole-pair count.
+  return config.pole_pairs == board::kMotorPolePairs &&
          (config.sensor_direction == 1 || config.sensor_direction == -1) &&
          std::isfinite(config.electrical_offset_rad);
 }
