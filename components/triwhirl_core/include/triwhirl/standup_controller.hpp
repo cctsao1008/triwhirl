@@ -43,6 +43,10 @@ struct StandupControllerConfig {
   float velocity_i_stable = 0.7F;
   float velocity_target_limit_rad_s = 140.0F;
   float vq_limit_v = 4.0F;
+  // The vendor build's SimpleFOC defaults encode DEF_PID_VEL_RAMP=1000 V/s,
+  // and the independent remrc triangle reference explicitly uses the same
+  // value. Preserve that bumpless actuator-rate limit at Balance handoff.
+  float velocity_output_ramp_v_s = 1000.0F;
 
   // Seller firmware considers the body stable after remaining within 5 deg for
   // one second, then slowly biases the equilibrium to unload wheel momentum.
@@ -92,6 +96,7 @@ class StandupController {
   float filtered_rate_rad_s_ = 0.0F;
   float velocity_integral_v_ = 0.0F;
   float previous_velocity_error_rad_s_ = 0.0F;
+  float previous_vq_v_ = 0.0F;
   std::uint32_t previous_update_us_ = 0U;
   std::uint32_t last_unstable_us_ = 0U;
   std::uint32_t last_momentum_adjust_us_ = 0U;
