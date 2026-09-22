@@ -7,9 +7,8 @@ namespace triwhirl::runtime {
 
 // UART development CLI and BLE GATT ingress are parsed/validated in the
 // supervisor domain. Realtime receives only this fixed-size typed record.
-// Snapshot-owned read-only forms are intercepted on Core 0; the four legacy
-// status enum values remain temporarily only so parser cleanup can be a
-// separate no-wire-change deletion after the egress cutover is stable.
+// Snapshot-owned read-only forms are intercepted on Core 0; the legacy status
+// enum values remain temporarily only so parser cleanup can stay wire-neutral.
 enum class RuntimeCommandType : std::uint8_t {
   kNone = 0,
   kStatus,
@@ -17,11 +16,15 @@ enum class RuntimeCommandType : std::uint8_t {
   kImuStatus,
   kLogStatus,
   kSwingStatus,
+  kStandupStatus,
   kTimingProfileStatus,
   kBalanceStatus,
   kBalanceConfig,
   kBalanceStart,
   kBalanceStop,
+  kStandupConfig,
+  kStandupStart,
+  kStandupStop,
   kMotorStop,
   kStop,
   kSwingAbort,
@@ -113,6 +116,10 @@ struct BalanceConfigPayload {
   float wheel_rate_limit_rad_s = 0.0F;
 };
 
+struct StandupConfigPayload {
+  float theta_reference_deg = 68.0F;
+};
+
 struct LogPreparePayload {
   float seconds = 0.0F;
 };
@@ -127,6 +134,7 @@ union RuntimeCommandPayload {
   ImuMapPayload imu_map;
   SwingConfigPayload swing_config;
   BalanceConfigPayload balance_config;
+  StandupConfigPayload standup_config;
   LogPreparePayload log_prepare;
 
   constexpr RuntimeCommandPayload() : motor_vq{} {}
