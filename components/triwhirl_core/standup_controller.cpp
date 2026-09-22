@@ -43,6 +43,7 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
       config.velocity_i_stable,
       config.velocity_target_limit_rad_s,
       config.vq_limit_v,
+      config.velocity_output_ramp_v_s,
       config.stable_angle_rad,
       config.momentum_adjust_threshold_rad_s,
       config.momentum_adjust_step_rad,
@@ -62,6 +63,7 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
          config.velocity_p_stable >= 0.0F &&
          config.velocity_i_stable >= 0.0F &&
          config.velocity_target_limit_rad_s > 0.0F && config.vq_limit_v > 0.0F &&
+         config.velocity_output_ramp_v_s > 0.0F &&
          config.stable_angle_rad > 0.0F &&
          config.stable_angle_rad <= config.balance_capture_rad &&
          config.stable_delay_us > 0U && config.momentum_adjust_period_us > 0U &&
@@ -89,6 +91,7 @@ bool StandupController::configure(const StandupControllerConfig& config) {
 void StandupController::resetVelocityLoop() {
   velocity_integral_v_ = 0.0F;
   previous_velocity_error_rad_s_ = 0.0F;
+  previous_vq_v_ = 0.0F;
 }
 
 void StandupController::reset(const StandupControllerInput& input) {
@@ -226,8 +229,17 @@ StandupControllerOutput StandupController::update(
   }
   previous_velocity_error_rad_s_ = velocity_error;
 
-  const float vq = std::clamp(kp * velocity_error + velocity_integral_v_,
-                              -config_.vq_limit_v, config_.vq_limit_v);
+  const float vq_target =
+      std::clamp(kp * velocity_error + velocity_integral_v_,
+                 -config_.vq_limit_v, config_.vq_limit_v);
+  float vq = vq_target;
+  if (dt_s > 0.0F && dt_s < 0.1F) {
+    const float max_step = config_.velocity_output_ramp_v_s * dt_s;
+    vq = std::clamp(vq_target, previous_vq_v_ - max_step,
+                    previous_vq_v_ + max_step);
+  }
+  previous_vq_v_ = vq;
+
   output.phase = StandupPhase::kBalance;
   output.theta_error_rad = error_rad;
   output.theta_reference_rad = theta_reference_rad_;
