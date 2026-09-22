@@ -5,12 +5,15 @@
 #include "driver/gptimer.h"
 #include "esp_attr.h"
 #include "esp_err.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
 namespace triwhirl::runtime {
 namespace {
+
+constexpr const char* kTag = "triwhirl_release";
 
 gptimer_handle_t realtime_release_timer = nullptr;
 TaskHandle_t realtime_release_task = nullptr;
@@ -142,6 +145,29 @@ void accountReleaseNotifications(const std::uint32_t notifications,
       std::max(realtime_release_stats.max_notification_backlog, notifications);
 }
 
+void reportReleaseBacklog(const char* const phase,
+                          const std::uint32_t notifications) {
+  if (phase == nullptr || notifications <= 1U) {
+    return;
+  }
+
+  // This executes in the realtime task only after an anomaly has already
+  // occurred; never log from the GPTimer ISR. If a long control period is
+  // accompanied by a large notification count, the ISR kept firing while the
+  // task was unable to run. If the long period occurs without this diagnostic,
+  // the timer interrupt itself was delayed/coalesced (for example by a global
+  // interrupt/cache critical section) rather than ordinary task starvation.
+  ESP_LOGW(kTag,
+           "release_backlog phase=%s notifications=%lu missed_total=%llu "
+           "skip_events=%llu max_backlog=%lu",
+           phase, static_cast<unsigned long>(notifications),
+           static_cast<unsigned long long>(
+               realtime_release_stats.missed_release_ticks),
+           static_cast<unsigned long long>(realtime_release_stats.skip_events),
+           static_cast<unsigned long>(
+               realtime_release_stats.max_notification_backlog));
+}
+
 }  // namespace
 
 bool waitForNextRealtimeRelease() {
@@ -157,12 +183,14 @@ bool waitForNextRealtimeRelease() {
   // histogram.
   const std::uint32_t pending = ulTaskNotifyTake(pdTRUE, 0);
   accountReleaseNotifications(pending, false);
+  reportReleaseBacklog("pending", pending);
 
   // Wait for one future release. If more than one notification is already
   // accumulated when the task resumes, exactly one is the release used for the
   // next iteration and the remainder are additional missed releases.
   const std::uint32_t next = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   accountReleaseNotifications(next, true);
+  reportReleaseBacklog("wake", next);
   return next > 0U;
 }
 
