@@ -159,6 +159,7 @@ bool RuntimeLogger::prepare(const std::uint32_t max_records) {
   payload_crc32_ = kCrc32Initial;
   pump_record_counter_ = 0U;
   probe_record_counter_ = 0U;
+  autonomous_flash_hold_ = false;
   prepared_bytes_ = static_cast<std::uint32_t>(erase_bytes);
   flash_writes_allowed_ = true;
   setState(LoggerState::kErasing);
@@ -179,6 +180,7 @@ bool RuntimeLogger::start() {
   payload_crc32_ = kCrc32Initial;
   pump_record_counter_ = 0U;
   probe_record_counter_ = 0U;
+  autonomous_flash_hold_ = false;
   flash_writes_allowed_ = true;
   setState(LoggerState::kRecording);
   return true;
@@ -191,9 +193,9 @@ bool RuntimeLogger::stop() {
   if (state_ != LoggerState::kRecording && state_ != LoggerState::kReady) {
     return false;
   }
-  // Motor/autonomous code stops before requesting finalization. Flash can now
-  // drain the bounded SRAM payload without injecting cache-off stalls into the
-  // active control/sensor path.
+  // Motor/autonomous code stops before requesting finalization. Clear the
+  // latched no-flash region only here, then drain SRAM to flash.
+  autonomous_flash_hold_ = false;
   flash_writes_allowed_ = true;
   setState(LoggerState::kStopping);
   if (worker_task_ != nullptr) {
@@ -211,9 +213,10 @@ bool RuntimeLogger::record(const RuntimeLogRecord& record_value) {
   const bool pump_active = (record_value.flags & kRecordPumpActive) != 0U;
   const bool probe_active = (record_value.flags & kRecordProbeActive) != 0U;
   if (pump_active || probe_active) {
-    // Autonomous motor identification is a hard no-flash region. This is more
-    // conservative than only protecting ProbeActive: even one NOR page program
-    // can make a 1 kHz I2C sample look stale and falsely latch sensor loss.
+    // Autonomous motor identification is a hard no-flash region. This remains
+    // latched across Pump -> Probe -> Rearm transitions so a critical-window
+    // state change cannot briefly re-enable NOR programming mid-experiment.
+    autonomous_flash_hold_ = true;
     flash_writes_allowed_ = false;
   }
 
@@ -256,6 +259,10 @@ bool RuntimeLogger::record(const RuntimeLogRecord& record_value) {
 }
 
 void RuntimeLogger::setFlashWritesAllowed(const bool allowed) {
+  if (allowed && autonomous_flash_hold_) {
+    flash_writes_allowed_ = false;
+    return;
+  }
   flash_writes_allowed_ = allowed;
   if (allowed && worker_task_ != nullptr) {
     xTaskNotifyGive(taskFrom(worker_task_));
