@@ -83,6 +83,12 @@ async def _balance_status(transport, timeout: float) -> tuple[str, dict[str, str
     return line, _parse_key_values(line, "balance")
 
 
+async def _runtime_status(transport, timeout: float) -> tuple[str, dict[str, str]]:
+    await transport.send("status")
+    line = await _wait_console(transport, prefixes=("status,",), timeout_s=timeout)
+    return line, _parse_key_values(line, "status")
+
+
 async def _start_with_transient_retry(transport, timeout: float) -> str:
     # The latest-only sensor pipeline can expose a sub-millisecond instant where
     # imu_sample_valid is false even though the next generation is already on the
@@ -170,6 +176,20 @@ async def _run(args: argparse.Namespace) -> int:
             if status.get("active") != "1":
                 fault_line, _fault = await _fault_status(transport, args.timeout)
                 raise RuntimeError(f"standup became inactive: {line}; {fault_line}")
+
+            # Balance status intentionally keeps the synthesized-controller ABI.
+            # Pair it with the normal runtime snapshot so a physical capture trial
+            # records the actuator command and the two rates needed to distinguish
+            # gain/sign/saturation failures without enabling high-rate telemetry.
+            _runtime_line, runtime = await _runtime_status(transport, args.timeout)
+            print(
+                "standup_live,"
+                f"error_deg={status.get('error_deg', '?')},"
+                f"vq_v={runtime.get('vq_v', '?')},"
+                f"theta_rate_rad_s={runtime.get('theta_rate_rad_s', '?')},"
+                f"wheel_rate_rad_s={runtime.get('vel_rad_s', '?')},"
+                f"fault_mask={runtime.get('fault_mask', '?')}"
+            )
 
         await transport.send("balance stop")
         print(await _wait_console(transport, prefixes=("OK balance stop",), timeout_s=args.timeout))
