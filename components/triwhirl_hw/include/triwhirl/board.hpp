@@ -39,8 +39,13 @@ constexpr int kKey2Gpio = 15;
 constexpr int kKey3Gpio = 2;
 constexpr int kDownloadGpio = 0;
 
-constexpr float kMotorBusNominalV = 12.0F;
-constexpr float kBringupPhaseAmplitudeMaxV = 1.5F;
+// Golden TRC-V1.1 8 V motor firmware uses BLDCMotor(7), an 8.3 V driver supply,
+// and SimpleFOC's 3 V sensor-alignment field. Keep those proven electrical
+// assumptions explicit instead of scaling PWM from the earlier 12 V placeholder.
+constexpr int kMotorPolePairs = 7;
+constexpr float kMotorBusNominalV = 8.3F;
+constexpr float kMotorSensorAlignVoltageV = 3.0F;
+constexpr float kBringupPhaseAmplitudeMaxV = 3.0F;
 
 }  // namespace board
 }  // namespace triwhirl
