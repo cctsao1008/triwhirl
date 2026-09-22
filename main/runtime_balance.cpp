@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "esp_timer.h"
 #include "runtime_egress.hpp"
 #include "runtime_release.hpp"
 #include "runtime_sensor_frame.hpp"
@@ -11,6 +12,8 @@
 
 namespace triwhirl::runtime {
 namespace {
+
+constexpr std::uint32_t kBalanceSensorFreshnessUs = 3000U;
 
 triwhirl::BalanceControllerConfig balance_config{};
 bool balance_config_valid = false;
@@ -32,8 +35,27 @@ bool consumedBalanceSensorFrame(RuntimeSensorFrame* const frame) {
     if (frame != nullptr) *frame = consumed;
     return false;
   }
-  if (frame != nullptr) *frame = consumed;
-  return true;
+
+  // Generic motor bring-up may tolerate one bounded scheduler/producer phase
+  // slip before declaring a sensor unavailable. Balance does not: validate the
+  // exact generation consumed by Core 1 against the original 3 ms nominal age
+  // budget before it is allowed into the state-feedback controller.
+  const std::uint32_t now_us =
+      static_cast<std::uint32_t>(esp_timer_get_time());
+  const bool encoder_fresh = sensorTimestampNominallyFresh(
+      now_us, encoderSampleTimestampUs(consumed.encoder),
+      kBalanceSensorFreshnessUs);
+  const bool imu_fresh = sensorTimestampNominallyFresh(
+      now_us, imuSampleTimestampUs(consumed.imu), kBalanceSensorFreshnessUs);
+
+  if (frame != nullptr) {
+    *frame = consumed;
+    // Preserve the existing fault classifier by marking only this returned copy
+    // invalid when age, rather than I2C, makes a member unusable for Balance.
+    if (!encoder_fresh) frame->encoder.ok = false;
+    if (!imu_fresh) frame->imu.ok = false;
+  }
+  return encoder_fresh && imu_fresh;
 }
 
 void tripBalanceFault(const triwhirl::SafetyFault fault) {
@@ -157,7 +179,7 @@ void updateRuntimeBalance() {
   // by this Core-1 iteration. It never peeks the Core-0 mailbox a second time,
   // so an asynchronous overwrite cannot turn a partial committed state into an
   // apparently complete one. Bring-up modes may use partial frames; Balance
-  // fails closed.
+  // fails closed, including on nominal-age freshness.
   RuntimeSensorFrame sensor_frame{};
   if (!consumedBalanceSensorFrame(&sensor_frame)) {
     tripIncompleteBalanceSensorFrame(sensor_frame);
