@@ -89,7 +89,7 @@ class SwingIdRunner {
 
   void classifyVertex(float theta_rad, SwingIdVertex* vertex,
                       float* center_deg, float* error_deg) const;
-  void updatePumpHalfCycle(float theta_rate_rad_s);
+  void updatePumpHalfCycle(const SwingIdInput& input);
   float pumpCommand() const;
   float scheduledProbeCommand(SwingIdVertex vertex) const;
   void setState(SwingIdState state, bool transition = true);
@@ -100,7 +100,11 @@ class SwingIdRunner {
   std::uint32_t start_us_ = 0U;
   std::uint32_t probe_start_us_ = 0U;
   std::uint32_t rearm_start_half_cycle_ = 0U;
+  std::uint32_t pending_pump_rate_since_us_ = 0U;
+  std::uint32_t last_pump_turn_us_ = 0U;
   int pump_rate_sign_ = 1;
+  int pending_pump_rate_sign_ = 0;
+  float last_pump_turn_angle_deg_ = 0.0F;
   float current_pump_v_ = 0.98F;
   float probe_vq_v_ = 0.0F;
   SwingIdVertex probe_vertex_ = SwingIdVertex::kNone;
