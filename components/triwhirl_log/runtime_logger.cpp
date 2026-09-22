@@ -24,6 +24,10 @@ constexpr std::size_t kFlashBatchBytes = 256U;
 constexpr std::size_t kFlashSectorBytes = 4096U;
 constexpr std::uint32_t kHeaderFlagComplete = 1U << 0;
 constexpr std::uint32_t kCrc32Initial = 0xffffffffU;
+// Coarse pump/rearm motion does not need the 1 kHz density required by local
+// probe identification. 100 Hz keeps enough envelope/turning-point context
+// while reducing steady flash traffic from about 32 KiB/s to about 3.2 KiB/s.
+constexpr std::uint32_t kPumpRecordDecimation = 10U;
 
 std::size_t roundUp(const std::size_t value, const std::size_t alignment) {
   return (value + alignment - 1U) / alignment * alignment;
@@ -149,6 +153,7 @@ bool RuntimeLogger::prepare(const std::uint32_t max_records) {
   records_written_ = 0U;
   dropped_records_ = 0U;
   payload_crc32_ = kCrc32Initial;
+  pump_record_counter_ = 0U;
   prepared_bytes_ = static_cast<std::uint32_t>(erase_bytes);
   flash_writes_allowed_ = true;
   setState(LoggerState::kErasing);
@@ -167,6 +172,7 @@ bool RuntimeLogger::start() {
   records_written_ = 0U;
   dropped_records_ = 0U;
   payload_crc32_ = kCrc32Initial;
+  pump_record_counter_ = 0U;
   flash_writes_allowed_ = true;
   setState(LoggerState::kRecording);
   return true;
@@ -192,6 +198,21 @@ bool RuntimeLogger::record(const RuntimeLogRecord& record_value) {
   if (state_ != LoggerState::kRecording || stream == nullptr) {
     return false;
   }
+
+  const bool pump_active = (record_value.flags & kRecordPumpActive) != 0U;
+  const bool probe_active = (record_value.flags & kRecordProbeActive) != 0U;
+  if (pump_active && !probe_active) {
+    const std::uint32_t pump_index = pump_record_counter_++;
+    if ((pump_index % kPumpRecordDecimation) != 0U) {
+      // Intentional thinning is not a data-loss/drop condition. The record's
+      // t_us remains the time authority, so coarse pump intervals simply have
+      // wider timestamps while ProbeActive windows stay at 1 kHz.
+      return true;
+    }
+  } else {
+    pump_record_counter_ = 0U;
+  }
+
   if (accepted_records_ >= max_records_) {
     dropped_records_ = dropped_records_ + 1U;
     return false;
