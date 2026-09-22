@@ -74,20 +74,32 @@ float mappedGyro() {
   return static_cast<float>(imu_map.gyro_sign) * correctedGyro(imu_map.gyro_axis);
 }
 
-bool applyDq(const float electrical_angle, const float vd_v, const float vq_v) {
+bool applyDqWithLimit(const float electrical_angle, const float vd_v,
+                      const float vq_v, const float vector_limit_v) {
   if (!std::isfinite(electrical_angle) || !std::isfinite(vd_v) ||
-      !std::isfinite(vq_v)) {
+      !std::isfinite(vq_v) || !(vector_limit_v > 0.0F) ||
+      !std::isfinite(vector_limit_v)) {
     tripFault(SafetyFault::kInvalidNumeric);
     return false;
   }
   const PhaseVoltages phase = triwhirl::makeDqVoltage(
       electrical_angle, vd_v, vq_v, triwhirl::board::kMotorBusNominalV,
-      kMotorVectorLimitV);
+      vector_limit_v);
   if (!bridge.setPhaseVoltages(phase.a, phase.b, phase.c)) {
     tripFault(SafetyFault::kActuator);
     return false;
   }
   return true;
+}
+
+bool applyDq(const float electrical_angle, const float vd_v, const float vq_v) {
+  return applyDqWithLimit(electrical_angle, vd_v, vq_v, kMotorVectorLimitV);
+}
+
+bool applyCalibrationDq(const float electrical_angle, const float vd_v,
+                        const float vq_v) {
+  return applyDqWithLimit(electrical_angle, vd_v, vq_v,
+                          triwhirl::board::kMotorCalibrationVectorLimitV);
 }
 
 void finishCalibration() {
@@ -105,9 +117,10 @@ void finishCalibration() {
   }
 
   const float pole_pairs_estimate = total_electrical / mechanical_travel;
-  const int pole_pairs = static_cast<int>(std::lround(pole_pairs_estimate));
-  if (pole_pairs < 1 || pole_pairs > 64 ||
-      std::fabs(pole_pairs_estimate - static_cast<float>(pole_pairs)) > 0.45F) {
+  const float expected_pole_pairs =
+      static_cast<float>(triwhirl::board::kMotorPolePairs);
+  if (!std::isfinite(pole_pairs_estimate) ||
+      std::fabs(pole_pairs_estimate - expected_pole_pairs) > 0.45F) {
     tripFault(SafetyFault::kCalibration);
     triwhirl::runtime::RuntimeStateEvent event{};
     event.type = triwhirl::runtime::RuntimeStateEventType::
@@ -122,9 +135,9 @@ void finishCalibration() {
       triwhirl::wrapElectricalAngle(calibration.commanded_electrical_rad);
   const float offset = triwhirl::wrapElectricalAngle(
       final_electrical -
-      static_cast<float>(sensor_direction * pole_pairs) *
+      static_cast<float>(sensor_direction * triwhirl::board::kMotorPolePairs) *
           wheel_state.unwrapped_angle_rad);
-  motor_config.pole_pairs = pole_pairs;
+  motor_config.pole_pairs = triwhirl::board::kMotorPolePairs;
   motor_config.sensor_direction = sensor_direction;
   motor_config.electrical_offset_rad = offset;
   motor_config_valid = triwhirl::validMotorElectricalConfig(motor_config);
@@ -162,7 +175,7 @@ void updateCalibration(const std::uint32_t now_us) {
   }
   if (calibration.stage == CalibrationStage::kAlign) {
     calibration.commanded_electrical_rad = 0.0F;
-    if (!applyDq(0.0F, calibration.amplitude_v, 0.0F)) {
+    if (!applyCalibrationDq(0.0F, calibration.amplitude_v, 0.0F)) {
       return;
     }
     if ((now_us - calibration.stage_start_us) >= kCalibrationAlignUs) {
@@ -184,13 +197,14 @@ void updateCalibration(const std::uint32_t now_us) {
       calibration.stage = CalibrationStage::kSettle;
       calibration.stage_start_us = now_us;
     }
-    applyDq(calibration.commanded_electrical_rad, calibration.amplitude_v, 0.0F);
+    applyCalibrationDq(calibration.commanded_electrical_rad,
+                       calibration.amplitude_v, 0.0F);
     return;
   }
 
   if (calibration.stage == CalibrationStage::kSettle &&
-      applyDq(calibration.commanded_electrical_rad, calibration.amplitude_v,
-              0.0F) &&
+      applyCalibrationDq(calibration.commanded_electrical_rad,
+                         calibration.amplitude_v, 0.0F) &&
       (now_us - calibration.stage_start_us) >= kCalibrationSettleUs) {
     finishCalibration();
   }
