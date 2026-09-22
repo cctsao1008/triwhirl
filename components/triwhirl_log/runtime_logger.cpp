@@ -17,17 +17,18 @@ namespace {
 
 constexpr std::size_t kRamBufferBytes = 32U * 1024U;
 // Keep each runtime flash program to one common NOR page. The WROOM-32 data
-// sheet gives 0.8 ms typical / 5 ms max page-program time; larger batches would
-// multiply that cache-unavailable interval. Critical local windows still turn
-// flash writes off completely and use SRAM only.
+// sheet gives 0.8 ms typical / 5 ms max page-program time. Autonomous swing
+// experiments never program flash while the motor is active; the SRAM payload
+// is drained only after stop().
 constexpr std::size_t kFlashBatchBytes = 256U;
 constexpr std::size_t kFlashSectorBytes = 4096U;
 constexpr std::uint32_t kHeaderFlagComplete = 1U << 0;
 constexpr std::uint32_t kCrc32Initial = 0xffffffffU;
-// Coarse pump/rearm motion does not need the 1 kHz density required by local
-// probe identification. 100 Hz keeps enough envelope/turning-point context
-// while reducing steady flash traffic from about 32 KiB/s to about 3.2 KiB/s.
-constexpr std::uint32_t kPumpRecordDecimation = 10U;
+// A 50 s / 12-capture swing run must fit in the fixed 32 KiB SRAM queue while
+// flash is forbidden. Pump/rearm context at 10 Hz plus 250 Hz probe windows is
+// under 31 KiB at the configured 160 ms * 12 maximum probe occupancy.
+constexpr std::uint32_t kPumpRecordDecimation = 100U;
+constexpr std::uint32_t kProbeRecordDecimation = 4U;
 
 std::size_t roundUp(const std::size_t value, const std::size_t alignment) {
   return (value + alignment - 1U) / alignment * alignment;
@@ -109,7 +110,10 @@ bool RuntimeLogger::init(const char* partition_label) {
   partition_ = partition;
   stream_ = stream;
   setState(LoggerState::kIdle);
-  if (xTaskCreatePinnedToCore(workerEntry, "triwhirl_log", 4096, this, 1,
+  // Sensor workers remain at near-maximum priority. Priority 3 lets the logger
+  // make deterministic forward progress after an experiment without competing
+  // with realtime acquisition while flash writes are disabled during motion.
+  if (xTaskCreatePinnedToCore(workerEntry, "triwhirl_log", 4096, this, 3,
                               &worker, 0) != pdPASS) {
     vStreamBufferDelete(stream);
     stream_ = nullptr;
@@ -154,6 +158,7 @@ bool RuntimeLogger::prepare(const std::uint32_t max_records) {
   dropped_records_ = 0U;
   payload_crc32_ = kCrc32Initial;
   pump_record_counter_ = 0U;
+  probe_record_counter_ = 0U;
   prepared_bytes_ = static_cast<std::uint32_t>(erase_bytes);
   flash_writes_allowed_ = true;
   setState(LoggerState::kErasing);
@@ -173,6 +178,7 @@ bool RuntimeLogger::start() {
   dropped_records_ = 0U;
   payload_crc32_ = kCrc32Initial;
   pump_record_counter_ = 0U;
+  probe_record_counter_ = 0U;
   flash_writes_allowed_ = true;
   setState(LoggerState::kRecording);
   return true;
@@ -185,6 +191,9 @@ bool RuntimeLogger::stop() {
   if (state_ != LoggerState::kRecording && state_ != LoggerState::kReady) {
     return false;
   }
+  // Motor/autonomous code stops before requesting finalization. Flash can now
+  // drain the bounded SRAM payload without injecting cache-off stalls into the
+  // active control/sensor path.
   flash_writes_allowed_ = true;
   setState(LoggerState::kStopping);
   if (worker_task_ != nullptr) {
@@ -201,16 +210,28 @@ bool RuntimeLogger::record(const RuntimeLogRecord& record_value) {
 
   const bool pump_active = (record_value.flags & kRecordPumpActive) != 0U;
   const bool probe_active = (record_value.flags & kRecordProbeActive) != 0U;
-  if (pump_active && !probe_active) {
+  if (pump_active || probe_active) {
+    // Autonomous motor identification is a hard no-flash region. This is more
+    // conservative than only protecting ProbeActive: even one NOR page program
+    // can make a 1 kHz I2C sample look stale and falsely latch sensor loss.
+    flash_writes_allowed_ = false;
+  }
+
+  if (probe_active) {
+    pump_record_counter_ = 0U;
+    const std::uint32_t probe_index = probe_record_counter_++;
+    if ((probe_index % kProbeRecordDecimation) != 0U) {
+      return true;
+    }
+  } else if (pump_active) {
+    probe_record_counter_ = 0U;
     const std::uint32_t pump_index = pump_record_counter_++;
     if ((pump_index % kPumpRecordDecimation) != 0U) {
-      // Intentional thinning is not a data-loss/drop condition. The record's
-      // t_us remains the time authority, so coarse pump intervals simply have
-      // wider timestamps while ProbeActive windows stay at 1 kHz.
       return true;
     }
   } else {
     pump_record_counter_ = 0U;
+    probe_record_counter_ = 0U;
   }
 
   if (accepted_records_ >= max_records_) {
