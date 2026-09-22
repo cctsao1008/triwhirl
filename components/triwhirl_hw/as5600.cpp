@@ -73,9 +73,8 @@ bool As5600::readRegisters(const std::uint8_t first_register,
   if (device_ == nullptr || data == nullptr || length == 0U) {
     return false;
   }
-  // Any addressed register transaction changes the AS5600 internal address
-  // pointer. The runtime RAW ANGLE path therefore uses one explicit addressed
-  // transmit-receive transaction and does not depend on retained pointer state.
+  // Any addressed diagnostic/configuration read changes the AS5600 address
+  // pointer. The next runtime RAW ANGLE read must reseed 0x0C first.
   raw_angle_pointer_valid_ = false;
   return i2c_master_transmit_receive(device_, &first_register, 1U, data, length,
                                      kI2cTimeoutMs) == ESP_OK;
@@ -92,15 +91,28 @@ bool As5600::readRawAngle(std::uint16_t* const raw_count) {
   const bool profile = timing_profile_enabled_;
   const std::int64_t begin_us = profile ? esp_timer_get_time() : 0;
 
-  // Use one deterministic repeated-start transaction per runtime sample. The
-  // previous pointer-cached path could require a 20 ms select plus a 20 ms read
-  // after pointer invalidation, which was observed as a ~44 ms realtime stall.
-  const std::uint8_t first_register = kRawAngleHighRegister;
   std::uint8_t data[2]{};
-  const bool ok = i2c_master_transmit_receive(
-                      device_, &first_register, 1U, data, sizeof(data),
-                      kRuntimeI2cTimeoutMs) == ESP_OK;
-  raw_angle_pointer_valid_ = false;
+  bool ok = false;
+
+  // AS5600 gives RAW ANGLE special address-pointer semantics: when the pointer
+  // is seeded to the high byte (0x0C), reads do not auto-increment it away from
+  // RAW ANGLE. Seed with one bounded repeated-start transaction after any
+  // addressed access, then use a single receive-only transaction at steady
+  // state. This recovers the lower latency of the original fast path without
+  // reintroducing its unbounded 20 ms + 20 ms failure window.
+  if (!raw_angle_pointer_valid_) {
+    const std::uint8_t first_register = kRawAngleHighRegister;
+    ok = i2c_master_transmit_receive(
+             device_, &first_register, 1U, data, sizeof(data),
+             kRuntimeI2cTimeoutMs) == ESP_OK;
+    raw_angle_pointer_valid_ = ok;
+  } else {
+    ok = i2c_master_receive(device_, data, sizeof(data),
+                            kRuntimeI2cTimeoutMs) == ESP_OK;
+    if (!ok) {
+      raw_angle_pointer_valid_ = false;
+    }
+  }
 
   if (ok) {
     *raw_count = static_cast<std::uint16_t>(
