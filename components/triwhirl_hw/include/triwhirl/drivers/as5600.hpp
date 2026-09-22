@@ -15,6 +15,8 @@ struct As5600Status {
   bool magnet_detected = false;
   bool magnet_too_weak = false;
   bool magnet_too_strong = false;
+  std::uint8_t agc = 0U;
+  std::uint16_t magnitude = 0U;
 };
 
 struct As5600TimingStats {
