@@ -44,11 +44,17 @@ def good_status() -> dict[str, str]:
     return {
         "status_ok": "1",
         "sample_ok": "1",
-        "mag": "1",
-        "ml": "0",
+        # The known-good vendor hardware can report weak-field diagnostics while
+        # RAW_ANGLE and velocity remain usable. These fields are observability,
+        # not realtime acceptance gates.
+        "mag": "0",
+        "ml": "1",
         "mh": "0",
+        "agc": "128",
+        "magnitude": "300",
         "vel_valid": "1",
         "imu_ok": "1",
+        "attitude_ok": "1",
         "fault_mask": "0x00000000",
     }
 
@@ -88,6 +94,11 @@ def main() -> None:
     timing["max_exec_us"] = "1200"
     failures = evaluate(good_profile(), timing, good_status())
     assert "max_exec_us=1200 > 1000" in failures
+
+    status = good_status()
+    status["attitude_ok"] = "0"
+    failures = evaluate(good_profile(), good_timing(), status)
+    assert "attitude_ok=0, expected 1" in failures
 
     status = good_status()
     status["fault_mask"] = "0x00000020"
