@@ -16,6 +16,34 @@ void expectNear(const float actual, const float expected) {
   assert(std::fabs(actual - expected) < 1.0e-6F);
 }
 
+void testVendorScalePumpEnvelope() {
+  triwhirl::SwingIdConfig config{};
+  assert(config.pump_polarity == 1);
+  expectNear(config.pump_v_high, 0.42F);
+  expectNear(config.pump_v_low, 0.168F);
+
+  triwhirl::SwingIdRunner runner(config);
+  triwhirl::SwingIdInput input{};
+  input.now_us = 1000U;
+  input.theta_rad = 0.0F;
+  input.theta_rate_rad_s = 0.2F;
+  input.attitude_valid = true;
+  assert(runner.start(input));
+
+  // At theta=0 the nearest configured vertex is about 52 deg away, so the
+  // known-good full swing excitation is used and follows the body-rate sign.
+  auto output = runner.output();
+  expectNear(output.desired_vq_v, config.pump_v_high);
+
+  // Inside the 18 deg near-vertex envelope but outside the 8 deg probe capture
+  // window, excitation drops to the vendor-style 0.42/2.5 value.
+  input.now_us += 1000U;
+  input.theta_rad = degToRad(-36.0F);  // 16 deg from vertex B at -52 deg.
+  output = runner.update(input);
+  assert(output.state == triwhirl::SwingIdState::kPump);
+  expectNear(std::fabs(output.desired_vq_v), config.pump_v_low);
+}
+
 void testRateChatterDoesNotCreateHalfCycles() {
   triwhirl::SwingIdConfig config{};
   config.max_duration_us = 2000000U;
@@ -120,6 +148,7 @@ void testProbeScheduleAndRearm() {
 }  // namespace
 
 int main() {
+  testVendorScalePumpEnvelope();
   testRateChatterDoesNotCreateHalfCycles();
   testProbeScheduleAndRearm();
   return 0;
