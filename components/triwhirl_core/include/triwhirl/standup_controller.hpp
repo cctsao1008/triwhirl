@@ -37,15 +37,21 @@ struct StandupControllerConfig {
   float lqr_k_rate_stable = 0.9F;
   float lqr_k_wheel_stable = 1.5F;
 
+  // Golden TRC-V1.1 configures the MPU6050 gyro for +/-250 deg/s. Our runtime
+  // deliberately uses a wider sensor range, so clamp only the vendor standup
+  // controller input to the same physical envelope before applying its 0.6/0.4
+  // Gyro filter. This preserves the seller control law without reducing the
+  // global IMU range used by diagnostics/identification.
+  float gyro_rate_limit_rad_s = 4.36332313F;  // 250 deg/s
+
   float velocity_p_unstable = 0.035F;
   float velocity_i_unstable = 0.8F;
   float velocity_p_stable = 0.03F;
   float velocity_i_stable = 0.7F;
   float velocity_target_limit_rad_s = 140.0F;
   float vq_limit_v = 4.0F;
-  // The vendor build's SimpleFOC defaults encode DEF_PID_VEL_RAMP=1000 V/s,
-  // and the independent remrc triangle reference explicitly uses the same
-  // value. Preserve that bumpless actuator-rate limit at Balance handoff.
+  // The supplied Arduino-FOC 2.1.1 library defaults
+  // DEF_PID_VEL_RAMP=1000 V/s. Preserve that velocity-PI actuator slew limit.
   float velocity_output_ramp_v_s = 1000.0F;
 
   // Seller firmware considers the body stable after remaining within 5 deg for
