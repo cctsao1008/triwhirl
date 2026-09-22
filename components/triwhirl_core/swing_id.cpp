@@ -8,6 +8,13 @@ namespace {
 constexpr float kPi = 3.14159265358979323846F;
 constexpr float kRadToDeg = 180.0F / kPi;
 constexpr std::uint32_t kRecoveryHalfCycles = 1U;
+// A genuine mechanical turning point must survive gyro/rate chatter and show
+// observable body travel. Hardware run swing-native-01 otherwise produced
+// hundreds of false half-cycles in only a few seconds while the body moved
+// only a few degrees.
+constexpr std::uint32_t kPumpTurnConfirmUs = 20000U;
+constexpr std::uint32_t kPumpMinHalfCycleUs = 80000U;
+constexpr float kPumpMinExcursionDeg = 1.5F;
 
 }  // namespace
 
@@ -122,18 +129,44 @@ void SwingIdRunner::classifyVertex(const float theta_rad,
   }
 }
 
-void SwingIdRunner::updatePumpHalfCycle(const float theta_rate_rad_s) {
-  if (!std::isfinite(theta_rate_rad_s) ||
-      std::fabs(theta_rate_rad_s) < config_.rate_switch_rad_s) {
+void SwingIdRunner::updatePumpHalfCycle(const SwingIdInput& input) {
+  if (!std::isfinite(input.theta_rate_rad_s) ||
+      std::fabs(input.theta_rate_rad_s) < config_.rate_switch_rad_s) {
+    pending_pump_rate_sign_ = 0;
+    pending_pump_rate_since_us_ = 0U;
     return;
   }
 
-  const int sign = theta_rate_rad_s > 0.0F ? 1 : -1;
+  const int sign = input.theta_rate_rad_s > 0.0F ? 1 : -1;
   if (sign == pump_rate_sign_) {
+    pending_pump_rate_sign_ = 0;
+    pending_pump_rate_since_us_ = 0U;
+    return;
+  }
+
+  if (pending_pump_rate_sign_ != sign) {
+    pending_pump_rate_sign_ = sign;
+    pending_pump_rate_since_us_ = input.now_us;
+    return;
+  }
+
+  if ((input.now_us - pending_pump_rate_since_us_) < kPumpTurnConfirmUs ||
+      (input.now_us - last_pump_turn_us_) < kPumpMinHalfCycleUs) {
+    return;
+  }
+
+  const float angle_deg = wrapDeg(radiansToDegrees(input.theta_rad));
+  const float excursion_deg =
+      std::fabs(angleDiffDeg(angle_deg, last_pump_turn_angle_deg_));
+  if (excursion_deg < kPumpMinExcursionDeg) {
     return;
   }
 
   pump_rate_sign_ = sign;
+  pending_pump_rate_sign_ = 0;
+  pending_pump_rate_since_us_ = 0U;
+  last_pump_turn_us_ = input.now_us;
+  last_pump_turn_angle_deg_ = angle_deg;
   ++output_.half_cycle_index;
   current_pump_v_ = (output_.half_cycle_index % 2U) == 0U
                         ? config_.pump_v_high
@@ -187,6 +220,10 @@ bool SwingIdRunner::start(const SwingIdInput& input) {
       std::fabs(input.theta_rate_rad_s) >= config_.rate_switch_rad_s
           ? (input.theta_rate_rad_s > 0.0F ? 1 : -1)
           : 1;
+  pending_pump_rate_sign_ = 0;
+  pending_pump_rate_since_us_ = 0U;
+  last_pump_turn_us_ = input.now_us;
+  last_pump_turn_angle_deg_ = wrapDeg(radiansToDegrees(input.theta_rad));
   current_pump_v_ = config_.pump_v_high;
   probe_vq_v_ = 0.0F;
   probe_vertex_ = SwingIdVertex::kNone;
@@ -278,9 +315,8 @@ SwingIdOutput SwingIdRunner::update(const SwingIdInput& input) {
       rearm_start_half_cycle_ = output_.half_cycle_index;
       setState(SwingIdState::kRearm, true);
       // One genuine turning point at full pump amplitude separates adjacent
-      // probes.  Hardware run swing-native-03 showed that a four-half-cycle
-      // holdoff discarded a near-center crossing (about 0.15 deg) and then
-      // allowed the rocking envelope to decay below the 8 deg capture window.
+      // probes. Hardware run swing-native-03 showed that a four-half-cycle
+      // holdoff discarded a near-center crossing and let the envelope decay.
       output_.desired_vq_v =
           static_cast<float>(config_.pump_polarity * pump_rate_sign_) *
           config_.pump_v_high;
@@ -288,7 +324,7 @@ SwingIdOutput SwingIdRunner::update(const SwingIdInput& input) {
     return output_;
   }
 
-  updatePumpHalfCycle(input.theta_rate_rad_s);
+  updatePumpHalfCycle(input);
   output_.desired_vq_v = pumpCommand();
   output_.vertex = nearest;
   output_.vertex_error_deg = nearest_error_deg;
