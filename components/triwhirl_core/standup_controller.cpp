@@ -26,6 +26,7 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
   const float values[] = {
       config.theta_reference_rad,
       config.balance_capture_rad,
+      config.balance_release_rad,
       config.swing_near_rad,
       config.pump_v_low,
       config.pump_v_high,
@@ -50,7 +51,8 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
     if (!std::isfinite(value)) return false;
   }
   return config.balance_capture_rad > 0.0F &&
-         config.balance_capture_rad < config.swing_near_rad &&
+         config.balance_capture_rad < config.balance_release_rad &&
+         config.balance_release_rad < config.swing_near_rad &&
          config.swing_near_rad <= kUprightHalfPeriodRad &&
          config.pump_v_low > 0.0F &&
          config.pump_v_low <= config.pump_v_high &&
@@ -126,7 +128,13 @@ StandupControllerOutput StandupController::update(
   }
   const float abs_error = std::fabs(error_rad);
 
-  if (abs_error >= config_.balance_capture_rad) {
+  // Enter the local controller at the seller's 9-degree boundary, but after a
+  // successful capture keep Balance engaged until 12 degrees. This prevents a
+  // near-upright 9.x/10.x-degree transient from instantly switching back to the
+  // 0.168 V swing pump and throwing away the corrective velocity-loop state.
+  const bool hold_balance =
+      was_balancing_ && abs_error < config_.balance_release_rad;
+  if (!hold_balance && abs_error >= config_.balance_capture_rad) {
     // Follow the seller firmware's proven swing-up law: torque sign follows
     // body angular-rate sign, with reduced voltage in the near-capture region.
     if (std::fabs(input.theta_rate_rad_s) >= config_.rate_switch_rad_s) {
@@ -233,7 +241,7 @@ StandupControllerOutput StandupController::update(
   return output_;
 }
 
-const char* standupPhaseName(const StandupPhase phase) {
+const char* standupPhaseName(StandupPhase phase) {
   switch (phase) {
     case StandupPhase::kIdle: return "idle";
     case StandupPhase::kSwingHigh: return "swing_high";
