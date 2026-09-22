@@ -3,13 +3,15 @@
 #include <algorithm>
 #include <cmath>
 
-#include "triwhirl/board.hpp"
-
 namespace triwhirl {
 namespace {
 constexpr float kTwoPi = 6.28318530717958647692F;
 constexpr float kInvSqrt3 = 0.5773502691896258F;
 constexpr float kSqrt3Over2 = 0.8660254037844386F;
+// Product invariant from the vendor TRC-V1.1 8 V golden firmware
+// (BLDCMotor(7)). Keep the control-law component independent of triwhirl_hw;
+// board wiring and electrical limits remain owned by the hardware component.
+constexpr int kSupportedMotorPolePairs = 7;
 
 float clampValue(const float value, const float low, const float high) {
   return value < low ? low : (value > high ? high : value);
@@ -27,7 +29,7 @@ bool validMotorElectricalConfig(const MotorElectricalConfig& config) {
   // This repository targets the vendor TRC-V1.1 8 V motor assembly. Its golden
   // firmware explicitly uses BLDCMotor(7), so calibration may validate the
   // observed motion but must not silently accept a different pole-pair count.
-  return config.pole_pairs == board::kMotorPolePairs &&
+  return config.pole_pairs == kSupportedMotorPolePairs &&
          (config.sensor_direction == 1 || config.sensor_direction == -1) &&
          std::isfinite(config.electrical_offset_rad);
 }
