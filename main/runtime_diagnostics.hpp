@@ -12,6 +12,8 @@ struct EncoderDiagnosticStatus {
   bool magnet_detected = false;
   bool magnet_too_weak = false;
   bool magnet_too_strong = false;
+  std::uint8_t agc = 0U;
+  std::uint16_t magnitude = 0U;
 };
 
 // Called only by the Core-1 snapshot publisher. This copies the runtime-owned
