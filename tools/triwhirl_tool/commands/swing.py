@@ -96,7 +96,9 @@ def _validate(args: argparse.Namespace) -> None:
 
 def _load_motor_config(path: Path) -> tuple[int, int, float]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # Windows PowerShell 5.1 writes a BOM for `Set-Content -Encoding UTF8`.
+        # utf-8-sig accepts both BOM and non-BOM JSON without changing content.
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         pole_pairs = int(data["pole_pairs"])
         sensor_dir = int(data["sensor_dir"])
         offset_rad = float(data["offset_rad"])
@@ -315,6 +317,20 @@ async def _run(args: argparse.Namespace) -> tuple[str, str]:
             )
         )
         state, reason = await _wait_for_terminal(transport, args.max_duration)
+        if state == "aborted" and reason == "safety":
+            # Capture the latched root cause before a later diagnostic or reboot
+            # can clear it. A sparse/dropped TWLG may not contain the fault row.
+            await transport.send("fault status")
+            try:
+                print(
+                    await _wait_console(
+                        transport,
+                        prefixes=("fault,",),
+                        timeout_s=3.0,
+                    )
+                )
+            except RuntimeError as exc:
+                print(f"warning: could not read fault status after safety abort: {exc}")
         await _wait_log_complete(transport, args.finalize_timeout)
         return state, reason
     except KeyboardInterrupt:
