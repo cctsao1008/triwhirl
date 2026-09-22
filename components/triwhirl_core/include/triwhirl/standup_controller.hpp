@@ -16,8 +16,12 @@ struct StandupControllerConfig {
   // three physical vertices.
   float theta_reference_rad = 0.0F;
 
-  // TRC-V1.1 proven swing/balance handoff envelope.
+  // TRC-V1.1 proven swing/balance handoff envelope. Enter Balance at 9 deg as
+  // the seller firmware does, but once captured keep the local controller until
+  // 12 deg. The small hysteresis prevents a marginal 9.x-deg excursion from
+  // immediately replacing corrective balance torque with the swing pump.
   float balance_capture_rad = 0.1570796327F;  // 9 deg
+  float balance_release_rad = 0.2094395102F;  // 12 deg
   float swing_near_rad = 0.3141592654F;       // 18 deg
   float pump_v_low = 0.168F;
   float pump_v_high = 0.42F;
@@ -38,7 +42,7 @@ struct StandupControllerConfig {
   float velocity_p_stable = 0.03F;
   float velocity_i_stable = 0.7F;
   float velocity_target_limit_rad_s = 140.0F;
-  float vq_limit_v = 3.0F;
+  float vq_limit_v = 4.0F;
 
   // Seller firmware considers the body stable after remaining within 5 deg for
   // one second, then slowly biases the equilibrium to unload wheel momentum.
