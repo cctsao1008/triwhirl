@@ -92,6 +92,30 @@ def _classify_drdy_probe(
     return "INCONCLUSIVE", rate_hz, edge_ratio
 
 
+def _sensor_acquisition_count(profile: Mapping[str, str]) -> tuple[int, str]:
+    """Return the physical dual-sensor acquisition count used by acceptance.
+
+    `parallel_profile.completions` is the number of distinct encoder generations
+    committed by Core 1. With a depth-one latest-frame mailbox, Core 1 can
+    legitimately skip an intermediate published generation while still consuming
+    a newer, nominally-fresh frame on the next control tick. That consumer count
+    therefore is not the Core-0 generation-completion metric documented by the
+    pre-Balance gate.
+
+    When timing-stage counts are available, use the minimum of the actual AS5600
+    and MPU6050 physical read counts. The independent read/join failure checks
+    remain mandatory. Fall back to the legacy committed-generation count for old
+    firmware/tool output that lacks the stage counters.
+    """
+
+    if "encoder_i2c_reads" in profile and "mpu_i2c_reads" in profile:
+        return min(
+            _int_field(profile, "encoder_i2c_reads"),
+            _int_field(profile, "mpu_i2c_reads"),
+        ), "physical_i2c"
+    return _int_field(profile, "completions"), "core1_committed"
+
+
 def _evaluate_realtime_acceptance(
     profile: Mapping[str, str],
     timing: Mapping[str, str],
@@ -106,12 +130,14 @@ def _evaluate_realtime_acceptance(
     failures: list[str] = []
 
     requests = _int_field(profile, "requests")
-    completions = _int_field(profile, "completions")
+    sensor_acquisitions, acquisition_source = _sensor_acquisition_count(profile)
     if requests <= 0:
         failures.append("sensor pipeline produced no requests")
-    elif completions / requests < min_completion_ratio:
+    elif sensor_acquisitions / requests < min_completion_ratio:
         failures.append(
-            f"sensor completion ratio {completions / requests:.4f} < {min_completion_ratio:.4f}"
+            "sensor acquisition ratio "
+            f"{sensor_acquisitions / requests:.4f} < {min_completion_ratio:.4f} "
+            f"source={acquisition_source}"
         )
 
     for key in ("dispatch_failures", "read_failures", "stale_results", "join_timeouts"):
@@ -151,7 +177,7 @@ def _evaluate_realtime_acceptance(
     # AS5600 MD/ML/MH/AGC/magnitude are advisory field diagnostics, not
     # realtime-control validity gates. The vendor baseline uses RAW_ANGLE and
     # shaft velocity directly without consulting those flags. Acceptance must
-    # follow the states actually consumed by Balance.
+    # therefore follow the states actually consumed by Balance.
     required_status = {
         "sample_ok": 1,
         "vel_valid": 1,
@@ -221,6 +247,7 @@ async def _run(args: argparse.Namespace) -> int:
         )
 
         parallel_line: str | None = None
+        profile_stage_counts: dict[str, int] = {}
         deadline = time.monotonic() + max(args.timeout, 3.0)
         saw_end = False
         while time.monotonic() < deadline:
@@ -231,6 +258,13 @@ async def _run(args: argparse.Namespace) -> int:
             normalized = _normalize_console_line(line)
             if "parallel_profile," in normalized:
                 parallel_line = normalized[normalized.find("parallel_profile,") :]
+            stage_index = normalized.find("timing_profile_stage,")
+            if stage_index >= 0:
+                stage_line = normalized[stage_index:]
+                stage = _parse_key_values(stage_line, "timing_profile_stage")
+                name = stage.get("name", "")
+                if name in ("encoder_i2c_raw", "mpu_i2c"):
+                    profile_stage_counts[name] = _int_field(stage, "count")
             if "timing_profile_end" in normalized:
                 saw_end = True
                 break
@@ -258,6 +292,24 @@ async def _run(args: argparse.Namespace) -> int:
         )
         print(imu_line)
         profile = _parse_key_values(parallel_line, "parallel_profile")
+        if "encoder_i2c_raw" in profile_stage_counts:
+            profile["encoder_i2c_reads"] = str(
+                profile_stage_counts["encoder_i2c_raw"]
+            )
+        if "mpu_i2c" in profile_stage_counts:
+            profile["mpu_i2c_reads"] = str(profile_stage_counts["mpu_i2c"])
+        if "encoder_i2c_reads" in profile and "mpu_i2c_reads" in profile:
+            requests = _int_field(profile, "requests")
+            acquisitions, _ = _sensor_acquisition_count(profile)
+            ratio = acquisitions / requests if requests > 0 else 0.0
+            print(
+                "sensor_acquisition,"
+                f"requests={requests},"
+                f"encoder_reads={_int_field(profile, 'encoder_i2c_reads')},"
+                f"imu_reads={_int_field(profile, 'mpu_i2c_reads')},"
+                f"ratio={ratio:.4f},"
+                f"core1_committed={_int_field(profile, 'completions')}"
+            )
         imu = _parse_key_values(imu_line, "imu")
         drdy_class, drdy_rate_hz, drdy_edge_ratio = _classify_drdy_probe(
             profile, imu, args.seconds
