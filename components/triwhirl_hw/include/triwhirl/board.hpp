@@ -5,16 +5,20 @@
 namespace triwhirl {
 namespace board {
 
-// Schematic net ownership.
-constexpr int kMotorIn1Gpio = 25;
-constexpr int kMotorIn2Gpio = 33;
-constexpr int kMotorIn3Gpio = 32;
+// Physical schematic nets on TRC-V1.x.
+constexpr int kMotorNetIn1Gpio = 25;
+constexpr int kMotorNetIn2Gpio = 33;
+constexpr int kMotorNetIn3Gpio = 32;
 
-// Golden TRC-V1.1 8 V firmware instantiates BLDCDriver3PWM(33, 25, 32).
-// Keep phase order explicit instead of changing the schematic net names above.
-constexpr int kMotorPhaseAGpio = kMotorIn2Gpio;  // GPIO33
-constexpr int kMotorPhaseBGpio = kMotorIn1Gpio;  // GPIO25
-constexpr int kMotorPhaseCGpio = kMotorIn3Gpio;  // GPIO32
+// Runtime bridge phase order. The golden TRC-V1.1 8 V firmware instantiates
+// BLDCDriver3PWM(33, 25, 32), so preserve that proven A/B/C ordering while
+// keeping the physical Moto_IN1/2/3 net mapping explicit above.
+constexpr int kMotorIn1Gpio = kMotorNetIn2Gpio;  // phase A, GPIO33
+constexpr int kMotorIn2Gpio = kMotorNetIn1Gpio;  // phase B, GPIO25
+constexpr int kMotorIn3Gpio = kMotorNetIn3Gpio;  // phase C, GPIO32
+constexpr int kMotorPhaseAGpio = kMotorIn1Gpio;
+constexpr int kMotorPhaseBGpio = kMotorIn2Gpio;
+constexpr int kMotorPhaseCGpio = kMotorIn3Gpio;
 
 constexpr int kAs5600SclGpio = 5;
 constexpr int kAs5600SdaGpio = 23;
@@ -47,15 +51,12 @@ constexpr int kKey3Gpio = 2;
 constexpr int kDownloadGpio = 0;
 
 // Golden TRC-V1.1 8 V motor firmware uses BLDCMotor(7), an 8.3 V driver supply,
-// SimpleFOC's 3 V sensor-alignment field, and a 4 V motor voltage limit.
+// SimpleFOC's 3 V sensor-alignment field, and a 4 V motor voltage limit. A 3 V
+// TriWhirl envelope is still conservative relative to that proven 4 V limit.
 constexpr int kMotorPolePairs = 7;
 constexpr float kMotorBusNominalV = 8.3F;
 constexpr float kMotorSensorAlignVoltageV = 3.0F;
-
-// Keep the conservative realtime bring-up/control envelope separate from the
-// short-lived calibration alignment field. Widening calibration must not widen
-// Balance/Swing Vq authority.
-constexpr float kBringupPhaseAmplitudeMaxV = 1.5F;
+constexpr float kBringupPhaseAmplitudeMaxV = 3.0F;
 constexpr float kMotorCalibrationVectorLimitV = 3.0F;
 
 }  // namespace board
