@@ -39,9 +39,13 @@ inline constexpr float kTwoPi = 6.28318530717958647692F;
 inline constexpr float kMaxElectricalHz = 30.0F;
 inline constexpr float kWheelVelocityFilterTauS = 0.01F;
 inline constexpr float kMotorVectorLimitV = triwhirl::board::kBringupPhaseAmplitudeMaxV;
-inline constexpr float kDefaultCalibrationAmplitudeV = 0.6F;
-inline constexpr float kDefaultCalibrationElectricalHz = 0.5F;
-inline constexpr float kDefaultCalibrationTurns = 4.0F;
+// Match the vendor/SimpleFOC bring-up baseline: 3 V alignment field and one
+// electrical revolution for direction/pole-pair observation. The existing
+// non-blocking state machine still performs the sweep on the 1 kHz control clock.
+inline constexpr float kDefaultCalibrationAmplitudeV =
+    triwhirl::board::kMotorSensorAlignVoltageV;
+inline constexpr float kDefaultCalibrationElectricalHz = 1.0F;
+inline constexpr float kDefaultCalibrationTurns = 1.0F;
 inline constexpr std::uint32_t kCalibrationAlignUs = 500000U;
 inline constexpr std::uint32_t kCalibrationSettleUs = 400000U;
 inline constexpr std::uint32_t kControlPeriodUs = 1000U;
