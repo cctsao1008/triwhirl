@@ -19,7 +19,11 @@ constexpr int kI2cTimeoutMs = 20;
 // timeout. Normal transfers are a few hundred microseconds on this board; two
 // milliseconds leaves margin while bounding a stuck transaction tightly.
 constexpr int kRuntimeI2cTimeoutMs = 2;
-constexpr std::uint32_t kI2cClockHz = 1000000U;  // AS5600 Fast-mode Plus max.
+// Match the vendor TRC-V1.1 golden firmware. AS5600 supports Fast-mode Plus,
+// but the proven balancing image runs this physical encoder bus at 400 kHz.
+// Keep the cached RAW_ANGLE receive-only fast path, while using the vendor bus
+// rate for better margin once 25 kHz motor PWM is active.
+constexpr std::uint32_t kI2cClockHz = 400000U;
 
 void recordTiming(std::uint64_t* const count,
                   std::uint64_t* const total_us,
