@@ -36,6 +36,14 @@ jobs:
             components/triwhirl_core/balance_controller.cpp \
             -o /tmp/balance-controller-test
           /tmp/balance-controller-test
+      - name: "test: vendor-aligned standup controller"
+        run: |
+          g++ -std=c++17 \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/standup_controller_test.cpp \
+            components/triwhirl_core/standup_controller.cpp \
+            -o /tmp/standup-controller-test
+          /tmp/standup-controller-test
       - name: "test: H-infinity balance deployment command"
         run: python tools/tests/hinf_balance_command_test.py
       - name: "test: realtime acceptance evaluator"
@@ -59,6 +67,7 @@ jobs:
           python tools/twtool.py help diag realtime-check
           python tools/twtool.py help diag imu
           python tools/twtool.py help control balance
+          python tools/twtool.py help control standup
           python tools/twtool.py help id swing
           python tools/twtool.py help fit hinf
           python -m tools.triwhirl_tool help log decode
