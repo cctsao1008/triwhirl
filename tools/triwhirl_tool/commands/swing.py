@@ -42,14 +42,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--motor-config", type=Path, default=Path("artifacts/motor-config.json"))
     parser.add_argument("--captures", type=int, default=12)
-    parser.add_argument("--pump-v-low", type=float, default=0.71)
-    parser.add_argument("--pump-v-high", type=float, default=0.98)
+    # TRC-V1.1 vendor baseline uses 0.42 V swing excitation and reduces it by
+    # 2.5 near the balance capture region. Keep ID defaults on that proven
+    # electrical scale rather than the earlier 0.71/0.98 V exploratory values.
+    parser.add_argument("--pump-v-low", type=float, default=0.168)
+    parser.add_argument("--pump-v-high", type=float, default=0.42)
     parser.add_argument("--capture-deg", type=float, default=8.0)
     parser.add_argument("--probe-exit-deg", type=float, default=12.0)
     parser.add_argument("--rearm-deg", type=float, default=18.0)
     parser.add_argument("--probe-duration", type=float, default=0.160)
     parser.add_argument("--rate-switch", type=float, default=0.03)
-    parser.add_argument("--pump-polarity", type=int, choices=(-1, 1), default=-1)
+    parser.add_argument("--pump-polarity", type=int, choices=(-1, 1), default=1)
     parser.add_argument("--vertex-a-deg", type=float, default=68.0)
     parser.add_argument("--max-duration", type=float, default=50.0)
     parser.add_argument("--reserve-seconds", type=float, default=2.0)
@@ -288,15 +291,9 @@ async def _run(args: argparse.Namespace) -> tuple[str, str]:
         )
         await _prepare_logger(transport, prepared_seconds, args.prepare_timeout)
 
-        await transport.send("log start")
-        print(
-            await _wait_console(
-                transport,
-                prefixes=("OK log start",),
-                timeout_s=3.0,
-            )
-        )
-
+        # Configure before recording. The previous ordering left almost one
+        # second of 1 kHz non-swing pre-roll in the 32 KiB SRAM stream and was
+        # enough to make the logger overflow before the first useful probe.
         await transport.send(_swing_config_command(args))
         print(
             await _wait_console(
@@ -308,7 +305,18 @@ async def _run(args: argparse.Namespace) -> tuple[str, str]:
         await asyncio.sleep(0.05)
         transport.drain()
 
+        # Queue start commands back-to-back. Firmware processes them in order,
+        # so the logger is recording when SwingStart is handled but there is no
+        # BLE round-trip worth of full-rate pre-roll between the two commands.
+        await transport.send("log start")
         await transport.send("swing start")
+        print(
+            await _wait_console(
+                transport,
+                prefixes=("OK log start",),
+                timeout_s=3.0,
+            )
+        )
         print(
             await _wait_console(
                 transport,
