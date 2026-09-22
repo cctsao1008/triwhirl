@@ -31,8 +31,10 @@ enum class SwingIdStopReason : std::uint8_t {
 
 struct SwingIdConfig {
   std::uint32_t target_captures = 12U;
-  float pump_v_low = 0.71F;
-  float pump_v_high = 0.98F;
+  // TRC-V1.1's known-good swing-up uses 0.42 V and reduces excitation by
+  // 2.5 near the balance region. Preserve those proven electrical scales.
+  float pump_v_low = 0.168F;
+  float pump_v_high = 0.42F;
   float probe_v_negative = -0.25F;
   float probe_v_positive = 0.25F;
   float capture_deg = 8.0F;
@@ -40,7 +42,7 @@ struct SwingIdConfig {
   float rearm_deg = 18.0F;
   std::uint32_t probe_duration_us = 160000U;
   float rate_switch_rad_s = 0.03F;
-  int pump_polarity = -1;
+  int pump_polarity = 1;
   float vertex_a_deg = 68.0F;
   std::uint32_t max_duration_us = 50000000U;
 };
@@ -105,7 +107,7 @@ class SwingIdRunner {
   int pump_rate_sign_ = 1;
   int pending_pump_rate_sign_ = 0;
   float last_pump_turn_angle_deg_ = 0.0F;
-  float current_pump_v_ = 0.98F;
+  float current_pump_v_ = 0.42F;
   float probe_vq_v_ = 0.0F;
   SwingIdVertex probe_vertex_ = SwingIdVertex::kNone;
   float probe_center_deg_ = 0.0F;
