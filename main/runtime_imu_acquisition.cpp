@@ -34,6 +34,12 @@ bool drdy_irq_enabled = false;
 bool drdy_probe_only = false;
 int drdy_gpio = -1;
 
+// A request-driven fallback can arrive just before the MPU's next 1-kHz FIFO
+// packet is committed. In that case readSample() fails quickly after FIFO_COUNT
+// reports less than one packet. Retry only fast failures so this phase-recovery
+// path cannot turn a real I2C timeout into a second 20-ms stall.
+constexpr std::uint32_t kFallbackRetryMaxFirstAttemptUs = 750U;
+
 void incrementStat(std::uint64_t ImuAcquisitionStats::* const field) {
   portENTER_CRITICAL(&stats_mux);
   ++(stats.*field);
@@ -165,8 +171,25 @@ void runRequestDrivenFallback() {
     result.sequence = request.sequence;
     result.requested_at_us = request.requested_at_us;
     result.started_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
-    result.ok = imu_read_fn != nullptr &&
-                imu_read_fn(imu_read_context, &result.sample);
+
+    if (imu_read_fn != nullptr) {
+      const std::int64_t first_begin_us = esp_timer_get_time();
+      result.ok = imu_read_fn(imu_read_context, &result.sample);
+      const std::int64_t first_elapsed_us =
+          esp_timer_get_time() - first_begin_us;
+
+      // No explicit spin/sleep is needed: the first synchronous FIFO_COUNT I2C
+      // transaction already advances time and blocks this task while the bus is
+      // active. A second immediate attempt therefore catches the common
+      // request-before-DATA_RDY phase miss without burning Core-0 CPU. Long
+      // failures are not retried, preserving bounded behavior on a broken bus.
+      if (!result.ok && first_elapsed_us >= 0 &&
+          static_cast<std::uint32_t>(first_elapsed_us) <=
+              kFallbackRetryMaxFirstAttemptUs) {
+        result.ok = imu_read_fn(imu_read_context, &result.sample);
+      }
+    }
+
     result.completed_at_us = static_cast<std::uint32_t>(esp_timer_get_time());
     xQueueOverwrite(result_queue, &result);
   }
