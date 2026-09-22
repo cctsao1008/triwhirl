@@ -16,13 +16,47 @@ void expectNear(const float actual, const float expected) {
   assert(std::fabs(actual - expected) < 1.0e-6F);
 }
 
-}  // namespace
+void testRateChatterDoesNotCreateHalfCycles() {
+  triwhirl::SwingIdConfig config{};
+  config.max_duration_us = 2000000U;
 
-int main() {
+  triwhirl::SwingIdRunner runner(config);
+  triwhirl::SwingIdInput input{};
+  input.now_us = 1000U;
+  input.theta_rad = 0.0F;
+  input.theta_rate_rad_s = 0.0F;
+  input.attitude_valid = true;
+  assert(runner.start(input));
+
+  // swing-native-01 showed millisecond-scale rate-sign chatter while the body
+  // barely moved. Alternating signs with sub-degree excursion must not be
+  // promoted to mechanical half-cycles.
+  for (int sample = 0; sample < 40; ++sample) {
+    input.now_us += 5000U;
+    input.theta_rad = degToRad((sample & 1) ? 0.4F : -0.4F);
+    input.theta_rate_rad_s = (sample & 1) ? 0.2F : -0.2F;
+    const auto output = runner.update(input);
+    assert(output.half_cycle_index == 0U);
+  }
+
+  // One opposite rate sign that persists for >20 ms, after >80 ms dwell and
+  // with a real angular excursion, is a genuine turn.
+  input.now_us += 100000U;
+  input.theta_rad = degToRad(5.0F);
+  input.theta_rate_rad_s = -0.2F;
+  auto output = runner.update(input);
+  assert(output.half_cycle_index == 0U);
+
+  input.now_us += 25000U;
+  output = runner.update(input);
+  assert(output.half_cycle_index == 1U);
+}
+
+void testProbeScheduleAndRearm() {
   triwhirl::SwingIdConfig config{};
   config.target_captures = 6U;
   config.probe_duration_us = 1000U;
-  config.max_duration_us = 1000000U;
+  config.max_duration_us = 2000000U;
   config.probe_v_negative = -0.25F;
   config.probe_v_positive = 0.25F;
 
@@ -64,17 +98,29 @@ int main() {
     assert(!output.probe_active);
     expectNear(std::fabs(output.desired_vq_v), config.pump_v_high);
 
-    // One genuine body turning point at full pump amplitude is enough to
-    // re-arm the next probe. Alternate the synthetic body-rate sign so every
-    // loop iteration actually creates one new half-cycle transition.
-    input.now_us += 1000U;
+    // Rearm still needs only one genuine body turning point, but the turn must
+    // now satisfy dwell, persistence, and excursion gates.
+    const float turn_rate = (capture % 2U) == 0U ? -0.2F : 0.2F;
+    input.now_us += 100000U;
     input.theta_rad = degToRad(vertices_deg[capture] + 20.0F);
-    input.theta_rate_rad_s = (capture % 2U) == 0U ? -0.2F : 0.2F;
+    input.theta_rate_rad_s = turn_rate;
+    output = runner.update(input);
+    assert(output.state == triwhirl::SwingIdState::kRearm);
+
+    input.now_us += 25000U;
+    input.theta_rad = degToRad(vertices_deg[capture] + 20.0F);
+    input.theta_rate_rad_s = turn_rate;
     output = runner.update(input);
     assert(output.state == triwhirl::SwingIdState::kPump);
     assert(output.pump_active);
     expectNear(std::fabs(output.desired_vq_v), config.pump_v_high);
   }
+}
 
+}  // namespace
+
+int main() {
+  testRateChatterDoesNotCreateHalfCycles();
+  testProbeScheduleAndRearm();
   return 0;
 }
