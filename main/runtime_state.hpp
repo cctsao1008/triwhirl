@@ -38,7 +38,9 @@ using triwhirl::motor::ThreePwmBridge;
 inline constexpr float kTwoPi = 6.28318530717958647692F;
 inline constexpr float kMaxElectricalHz = 30.0F;
 inline constexpr float kWheelVelocityFilterTauS = 0.01F;
-inline constexpr float kMotorVectorLimitV = triwhirl::board::kBringupPhaseAmplitudeMaxV;
+// Match the golden TRC-V1.1 SimpleFOC motor.voltage_limit=4 V for normal FOC.
+// Calibration remains independently limited to the proven 3 V alignment field.
+inline constexpr float kMotorVectorLimitV = triwhirl::board::kMotorRuntimeVectorLimitV;
 // Match the vendor/SimpleFOC bring-up baseline: 3 V alignment field and one
 // electrical revolution for direction/pole-pair observation. The existing
 // non-blocking state machine still performs the sweep on the 1 kHz control clock.
