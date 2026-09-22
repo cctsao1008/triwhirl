@@ -59,6 +59,44 @@ void testSwingAndCaptureLaw() {
   assert(output.phase == triwhirl::StandupPhase::kSwingLow);
 }
 
+void testVendorGyroEnvelopeOnCapture() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  assert(std::fabs(config.gyro_rate_limit_rad_s - degToRad(250.0F)) < 1.0e-5F);
+  triwhirl::StandupController controller(config);
+
+  triwhirl::StandupControllerInput input{};
+  input.valid = true;
+  input.now_us = 1000U;
+  input.theta_rad = degToRad(45.0F);
+  input.theta_rate_rad_s = 12.0F;  // wider runtime IMU sees > vendor +/-250 dps
+  input.wheel_rate_rad_s = 0.0F;
+  controller.reset(input);
+  auto swing = controller.update(input);
+  assert(swing.phase == triwhirl::StandupPhase::kSwingHigh);
+
+  // At the first Balance tick the golden firmware has just executed Gyro=0 in
+  // the swing branch. Therefore its first filtered rate is
+  // 0.4 * clamp(+12 rad/s, +250 deg/s) = +100 deg/s.
+  input.now_us += 1000U;
+  input.theta_rad = degToRad(68.0F);
+  auto capture = controller.update(input);
+  assert(capture.phase == triwhirl::StandupPhase::kBalance);
+  assert(capture.valid);
+  const float expected_target = -0.92F * 100.0F;
+  assert(std::fabs(capture.target_velocity_rad_s - expected_target) < 0.02F);
+  assert(std::fabs(capture.target_velocity_rad_s) < config.velocity_target_limit_rad_s);
+
+  // A second saturated sample follows the exact seller 0.6/0.4 recurrence:
+  // Gyro = 0.6*100 + 0.4*250 = 160 deg/s.
+  input.now_us += 1000U;
+  auto second = controller.update(input);
+  const float expected_second_target = -0.92F * 160.0F;
+  // The target itself is limited to +/-140 rad/s, matching the golden firmware.
+  assert(std::fabs(second.target_velocity_rad_s + 140.0F) < 1.0e-5F);
+  assert(expected_second_target < -140.0F);
+}
+
 void testVelocityOutputRamp() {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = degToRad(68.0F);
@@ -144,6 +182,7 @@ void testStableTransitionAndRecovery() {
 
 int main() {
   testSwingAndCaptureLaw();
+  testVendorGyroEnvelopeOnCapture();
   testVelocityOutputRamp();
   testPeriodicVerticesShareBalanceLaw();
   testStableTransitionAndRecovery();
