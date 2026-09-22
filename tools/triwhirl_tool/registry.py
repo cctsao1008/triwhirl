@@ -136,6 +136,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
         description="Apply H-infinity gains and run a guarded near-upright balance trial over BLE.",
     ),
     ToolCommand(
+        group="control",
+        name="standup",
+        handler="commands.standup:standup_main",
+        description="Run vendor-aligned autonomous swing-up and self-balance over BLE.",
+    ),
+    ToolCommand(
         group="id",
         name="actuator-uart",
         script="parameter_id/acquire.py",
