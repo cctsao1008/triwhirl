@@ -179,14 +179,15 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
       ESP_LOGI(kTag, "init attempt=%u stage=wake ok", attempt + 1U);
       vTaskDelay(pdMS_TO_TICKS(kWakeSettleMs));
 
-      // These are the known-good settings used by the pre-FIFO runtime. Keep
-      // each stage separate so a physical unit reports the exact first failure.
-      if (!writeRegister(kRegSampleRateDivider, 0x00U)) {
+      // Low-latency control profile: with DLPF_CFG=0 the gyro output rate is
+      // 8 kHz, so SMPLRT_DIV=7 preserves a 1-kHz FIFO/control sample rate while
+      // using the MPU6050's lowest-delay 256-Hz gyro / 260-Hz accel bandwidth.
+      if (!writeRegister(kRegSampleRateDivider, 0x07U)) {
         ESP_LOGW(kTag, "init attempt=%u stage=sample_rate failed", attempt + 1U);
         discard_device();
         continue;
       }
-      if (!writeRegister(kRegConfig, 0x02U)) {
+      if (!writeRegister(kRegConfig, 0x00U)) {
         ESP_LOGW(kTag, "init attempt=%u stage=dlpf failed", attempt + 1U);
         discard_device();
         continue;
