@@ -83,6 +83,30 @@ async def _balance_status(transport, timeout: float) -> tuple[str, dict[str, str
     return line, _parse_key_values(line, "balance")
 
 
+async def _start_with_transient_retry(transport, timeout: float) -> str:
+    # The latest-only sensor pipeline can expose a sub-millisecond instant where
+    # imu_sample_valid is false even though the next generation is already on the
+    # way. Do not make the operator restart the whole gyro-calibration sequence
+    # for that admission race. Firmware still enforces its bounded freshness
+    # envelope after start.
+    last_error: RuntimeError | None = None
+    for attempt in range(4):
+        await transport.send("balance start")
+        try:
+            return await _wait_console(
+                transport,
+                prefixes=("OK balance start",),
+                timeout_s=timeout,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            if "ERR balance start rejected reason=imu" not in str(exc) or attempt == 3:
+                raise
+            await asyncio.sleep(0.08)
+    assert last_error is not None
+    raise last_error
+
+
 async def _run(args: argparse.Namespace) -> int:
     pole_pairs, sensor_dir, offset_rad = _load_motor_config(args.motor_config)
     client, transport = await _open_line_transport(args)
@@ -130,14 +154,7 @@ async def _run(args: argparse.Namespace) -> int:
         # Firmware therefore selects the built-in TRC-V1.1 vendor standup path:
         # 0.42/0.168 V swing-up -> LQR wheel-velocity target -> velocity PI -> Vq.
         print("starting vendor-aligned autonomous standup (upright reference 68 deg)")
-        await transport.send("balance start")
-        print(
-            await _wait_console(
-                transport,
-                prefixes=("OK balance start",),
-                timeout_s=args.timeout,
-            )
-        )
+        print(await _start_with_transient_retry(transport, args.timeout))
         started = True
 
         if args.duration == 0.0:
