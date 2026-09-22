@@ -98,8 +98,9 @@ class RuntimeLogger {
   bool start();
   bool stop();
 
-  // The control task calls record() once per control tick. This only copies the
-  // fixed-size record into an SRAM stream buffer and never touches flash.
+  // The control task calls record() once per control tick. Probe/critical
+  // records remain full-rate; coarse PumpActive intervals may be intentionally
+  // thinned before the SRAM queue so flash traffic cannot starve realtime I/O.
   bool record(const RuntimeLogRecord& record);
 
   // Autonomous control can block flash programming during a near-upright
@@ -134,6 +135,7 @@ class RuntimeLogger {
   volatile std::uint32_t records_written_ = 0U;
   volatile std::uint32_t dropped_records_ = 0U;
   volatile std::uint32_t payload_crc32_ = 0U;
+  std::uint32_t pump_record_counter_ = 0U;
 };
 
 const char* loggerStateName(LoggerState state);
