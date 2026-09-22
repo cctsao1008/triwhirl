@@ -148,14 +148,15 @@ def _evaluate_realtime_acceptance(
         if value != 0:
             failures.append(f"{key}={value}")
 
+    # AS5600 MD/ML/MH/AGC/magnitude are advisory field diagnostics, not
+    # realtime-control validity gates. The vendor baseline uses RAW_ANGLE and
+    # shaft velocity directly without consulting those flags. Acceptance must
+    # follow the states actually consumed by Balance.
     required_status = {
-        "status_ok": 1,
         "sample_ok": 1,
-        "mag": 1,
-        "ml": 0,
-        "mh": 0,
         "vel_valid": 1,
         "imu_ok": 1,
+        "attitude_ok": 1,
     }
     for key, expected in required_status.items():
         actual = _int_field(status, key)
