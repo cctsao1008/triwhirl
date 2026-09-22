@@ -42,6 +42,21 @@ void testSwingAndCaptureLaw() {
   assert(std::isfinite(output.target_velocity_rad_s));
   assert(std::isfinite(output.vq_v));
   assert(std::fabs(output.vq_v) <= config.vq_limit_v + 1.0e-6F);
+
+  // Once captured, a small excursion beyond the 9-deg entry threshold must not
+  // immediately throw the controller back into swing-up. This is the exact
+  // handoff case observed on the physical unit (about 9.4/10.6 deg).
+  input.now_us += 1000U;
+  input.theta_rad = degToRad(68.0F - 10.5F);
+  input.theta_rate_rad_s = 0.1F;
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+
+  input.now_us += 1000U;
+  input.theta_rad = degToRad(68.0F - 12.5F);
+  input.theta_rate_rad_s = -0.2F;
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kSwingLow);
 }
 
 void testPeriodicVerticesShareBalanceLaw() {
