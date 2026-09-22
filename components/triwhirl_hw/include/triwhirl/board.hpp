@@ -51,12 +51,14 @@ constexpr int kKey3Gpio = 2;
 constexpr int kDownloadGpio = 0;
 
 // Golden TRC-V1.1 8 V motor firmware uses BLDCMotor(7), an 8.3 V driver supply,
-// SimpleFOC's 3 V sensor-alignment field, and a 4 V motor voltage limit. A 3 V
-// TriWhirl envelope is still conservative relative to that proven 4 V limit.
+// SimpleFOC's 3 V sensor-alignment field, and a 4 V motor voltage limit. Keep
+// calibration/bring-up excitation at 3 V, but allow the closed-loop FOC path to
+// use the same proven 4 V correction authority during stand-up and balance.
 constexpr int kMotorPolePairs = 7;
 constexpr float kMotorBusNominalV = 8.3F;
 constexpr float kMotorSensorAlignVoltageV = 3.0F;
 constexpr float kBringupPhaseAmplitudeMaxV = 3.0F;
+constexpr float kMotorRuntimeVectorLimitV = 4.0F;
 constexpr float kMotorCalibrationVectorLimitV = 3.0F;
 
 }  // namespace board
