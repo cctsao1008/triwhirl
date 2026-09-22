@@ -105,7 +105,8 @@ class RuntimeLogger {
   bool record(const RuntimeLogRecord& record);
 
   // Autonomous control can block flash programming during a critical window.
-  // SRAM absorbs the records while programming is paused.
+  // Once a swing Pump/Probe record has asserted the autonomous no-flash hold,
+  // attempts to re-enable flash are ignored until stop() finalizes the run.
   void setFlashWritesAllowed(bool allowed);
 
   LoggerStatus status() const;
@@ -129,6 +130,7 @@ class RuntimeLogger {
 
   volatile LoggerState state_ = LoggerState::kUnavailable;
   volatile bool flash_writes_allowed_ = true;
+  volatile bool autonomous_flash_hold_ = false;
   volatile std::uint32_t prepared_bytes_ = 0U;
   volatile std::uint32_t max_records_ = 0U;
   volatile std::uint32_t accepted_records_ = 0U;
