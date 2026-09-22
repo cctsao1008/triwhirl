@@ -10,6 +10,8 @@ namespace drivers {
 namespace {
 constexpr std::uint8_t kStatusRegister = 0x0BU;
 constexpr std::uint8_t kRawAngleHighRegister = 0x0CU;
+constexpr std::uint8_t kAgcRegister = 0x1AU;
+constexpr std::uint8_t kMagnitudeHighRegister = 0x1BU;
 constexpr std::uint8_t kStatusMagnetDetected = 1U << 5;
 constexpr std::uint8_t kStatusMagnetTooWeak = 1U << 4;
 constexpr std::uint8_t kStatusMagnetTooStrong = 1U << 3;
@@ -73,8 +75,9 @@ bool As5600::readRegisters(const std::uint8_t first_register,
   if (device_ == nullptr || data == nullptr || length == 0U) {
     return false;
   }
-  // Any addressed diagnostic/configuration read changes the AS5600 address
-  // pointer. The next runtime RAW ANGLE read must reseed 0x0C first.
+  // Any addressed register transaction changes the AS5600 internal address
+  // pointer. The runtime RAW ANGLE path therefore uses one explicit addressed
+  // transmit-receive transaction and does not depend on retained pointer state.
   raw_angle_pointer_valid_ = false;
   return i2c_master_transmit_receive(device_, &first_register, 1U, data, length,
                                      kI2cTimeoutMs) == ESP_OK;
@@ -91,21 +94,16 @@ bool As5600::readRawAngle(std::uint16_t* const raw_count) {
   const bool profile = timing_profile_enabled_;
   const std::int64_t begin_us = profile ? esp_timer_get_time() : 0;
 
+  bool ok = true;
   std::uint8_t data[2]{};
-  bool ok = false;
-
-  // AS5600 gives RAW ANGLE special address-pointer semantics: when the pointer
-  // is seeded to the high byte (0x0C), reads do not auto-increment it away from
-  // RAW ANGLE. Seed with one bounded repeated-start transaction after any
-  // addressed access, then use a single receive-only transaction at steady
-  // state. This recovers the lower latency of the original fast path without
-  // reintroducing its unbounded 20 ms + 20 ms failure window.
   if (!raw_angle_pointer_valid_) {
     const std::uint8_t first_register = kRawAngleHighRegister;
     ok = i2c_master_transmit_receive(
              device_, &first_register, 1U, data, sizeof(data),
              kRuntimeI2cTimeoutMs) == ESP_OK;
-    raw_angle_pointer_valid_ = ok;
+    if (ok) {
+      raw_angle_pointer_valid_ = true;
+    }
   } else {
     ok = i2c_master_receive(device_, data, sizeof(data),
                             kRuntimeI2cTimeoutMs) == ESP_OK;
@@ -136,7 +134,11 @@ bool As5600::readStatus(As5600Status* const status) {
   const bool profile = timing_profile_enabled_;
   const std::int64_t begin_us = profile ? esp_timer_get_time() : 0;
   std::uint8_t raw = 0U;
-  const bool ok = readRegisters(kStatusRegister, &raw, 1U);
+  std::uint8_t field[3]{};
+  const bool status_ok = readRegisters(kStatusRegister, &raw, 1U);
+  const bool field_ok = status_ok &&
+                        readRegisters(kAgcRegister, field, sizeof(field));
+  const bool ok = status_ok && field_ok;
   if (profile) {
     recordStatusTiming(
         static_cast<std::uint32_t>(esp_timer_get_time() - begin_us));
@@ -149,6 +151,9 @@ bool As5600::readStatus(As5600Status* const status) {
   status->magnet_detected = (raw & kStatusMagnetDetected) != 0U;
   status->magnet_too_weak = (raw & kStatusMagnetTooWeak) != 0U;
   status->magnet_too_strong = (raw & kStatusMagnetTooStrong) != 0U;
+  status->agc = field[0];
+  status->magnitude = static_cast<std::uint16_t>(
+      (static_cast<std::uint16_t>(field[1] & 0x0FU) << 8U) | field[2]);
   return true;
 }
 
