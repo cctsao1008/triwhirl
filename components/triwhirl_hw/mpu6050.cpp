@@ -23,6 +23,7 @@ constexpr std::uint8_t kRegIntPinConfig = 0x37U;
 constexpr std::uint8_t kRegIntEnable = 0x38U;
 constexpr std::uint8_t kRegUserControl = 0x6AU;
 constexpr std::uint8_t kRegPowerManagement1 = 0x6BU;
+constexpr std::uint8_t kRegPowerManagement2 = 0x6CU;
 constexpr std::uint8_t kRegFifoCountHigh = 0x72U;
 constexpr std::uint8_t kRegFifoReadWrite = 0x74U;
 constexpr std::uint8_t kRegWhoAmI = 0x75U;
@@ -30,6 +31,7 @@ constexpr std::uint8_t kRegWhoAmI = 0x75U;
 constexpr std::uint8_t kExpectedWhoAmI = 0x68U;
 constexpr int kI2cTimeoutMs = 20;
 constexpr std::uint32_t kPowerOnSettleMs = 100U;
+constexpr std::uint32_t kDeviceResetSettleMs = 100U;
 constexpr std::uint32_t kWakeSettleMs = 30U;
 constexpr std::uint32_t kRetrySettleMs = 30U;
 constexpr std::uint32_t kFifoPrimeMs = 3U;
@@ -43,8 +45,10 @@ constexpr float kDegToRad = 0.01745329251994329577F;
 constexpr std::uint8_t kRuntimeFifoSources = 0x78U;
 constexpr std::uint8_t kUserControlFifoEnable = 1U << 6;
 constexpr std::uint8_t kUserControlFifoReset = 1U << 2;
+constexpr std::uint8_t kPowerManagementDeviceReset = 1U << 7;
 constexpr std::uint8_t kIntEnableFifoOverflow = 1U << 4;
 constexpr std::uint8_t kIntEnableDataReady = 1U << 0;
+constexpr std::uint16_t kFifoCapacityBytes = 1024U;
 constexpr TickType_t kAsyncTransferWaitTicks = pdMS_TO_TICKS(2);
 
 std::int16_t readBigEndianI16(const std::uint8_t high,
@@ -170,9 +174,38 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
         continue;
       }
 
-      // Wake the device and use the X-axis gyro PLL as the clock source.
+      // Make every MCU reboot start from a known MPU register state. The MPU can
+      // remain powered while the ESP32 resets, so relying on POR defaults here
+      // would make the runtime depend on whichever firmware ran previously.
+      if (!writeRegister(kRegPowerManagement1, kPowerManagementDeviceReset)) {
+        ESP_LOGW(kTag, "init attempt=%u stage=device_reset failed", attempt + 1U);
+        discard_device();
+        continue;
+      }
+      vTaskDelay(pdMS_TO_TICKS(kDeviceResetSettleMs));
+      who_am_i_valid_ = false;
+      std::uint8_t post_reset_who = 0U;
+      const bool post_reset_who_ok = readWhoAmI(&post_reset_who);
+      ESP_LOGI(kTag,
+               "init attempt=%u stage=post_reset_who read_ok=%d value=0x%02x match=%d",
+               attempt + 1U, post_reset_who_ok ? 1 : 0,
+               static_cast<unsigned>(post_reset_who),
+               post_reset_who_ok && post_reset_who == kExpectedWhoAmI ? 1 : 0);
+      if (!post_reset_who_ok || post_reset_who != kExpectedWhoAmI) {
+        discard_device();
+        continue;
+      }
+
+      // Wake the device, use the X-axis gyro PLL as the clock source, and make
+      // all six accel/gyro axes explicitly active rather than relying on reset
+      // defaults in PWR_MGMT_2.
       if (!writeRegister(kRegPowerManagement1, 0x01U)) {
         ESP_LOGW(kTag, "init attempt=%u stage=wake failed", attempt + 1U);
+        discard_device();
+        continue;
+      }
+      if (!writeRegister(kRegPowerManagement2, 0x00U)) {
+        ESP_LOGW(kTag, "init attempt=%u stage=power_mgmt_2 failed", attempt + 1U);
         discard_device();
         continue;
       }
@@ -210,6 +243,40 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
         continue;
       }
       ESP_LOGI(kTag, "init attempt=%u stage=fifo_config ok", attempt + 1U);
+
+      auto verify_register = [this, attempt](const std::uint8_t reg,
+                                              const std::uint8_t expected,
+                                              const char* const name) {
+        std::uint8_t actual = 0U;
+        const bool read_ok = readRegisters(reg, &actual, 1U);
+        const bool match = read_ok && actual == expected;
+        ESP_LOGI(kTag,
+                 "init attempt=%u stage=verify name=%s reg=0x%02x read_ok=%d value=0x%02x expected=0x%02x match=%d",
+                 attempt + 1U, name, static_cast<unsigned>(reg),
+                 read_ok ? 1 : 0, static_cast<unsigned>(actual),
+                 static_cast<unsigned>(expected), match ? 1 : 0);
+        return match;
+      };
+
+      const bool registers_ok =
+          verify_register(kRegPowerManagement1, 0x01U, "pwr_mgmt_1") &&
+          verify_register(kRegPowerManagement2, 0x00U, "pwr_mgmt_2") &&
+          verify_register(kRegSampleRateDivider, 0x07U, "smplrt_div") &&
+          verify_register(kRegConfig, 0x00U, "config") &&
+          verify_register(kRegGyroConfig, 0x10U, "gyro_config") &&
+          verify_register(kRegAccelConfig, 0x08U, "accel_config") &&
+          verify_register(kRegFifoEnable, kRuntimeFifoSources, "fifo_en") &&
+          verify_register(kRegUserControl, kUserControlFifoEnable, "user_ctrl") &&
+          verify_register(kRegIntPinConfig, 0x00U, "int_pin_cfg") &&
+          verify_register(kRegIntEnable,
+                          kIntEnableFifoOverflow | kIntEnableDataReady,
+                          "int_enable");
+      if (!registers_ok) {
+        ESP_LOGW(kTag, "init attempt=%u stage=verify failed", attempt + 1U);
+        discard_device();
+        continue;
+      }
+      ESP_LOGI(kTag, "init attempt=%u stage=verify ok", attempt + 1U);
 
       // Keep the validated physical-board baseline synchronous. DATA_RDY IRQ,
       // not the ESP-IDF I2C completion callback, is the hardware acquisition
@@ -417,6 +484,16 @@ bool Mpu6050::readSample(Mpu6050Sample* const sample) {
   const std::uint16_t fifo_count = static_cast<std::uint16_t>(
       (static_cast<std::uint16_t>(fifo_count_data_[0]) << 8U) |
       fifo_count_data_[1]);
+  if (fifo_count >= kFifoCapacityBytes) {
+    ESP_LOGW(kTag, "fifo full count=%u resetting",
+             static_cast<unsigned>(fifo_count));
+    if (!configureRuntimeFifo()) {
+      fifo_enabled_ = false;
+      ESP_LOGW(kTag, "fifo recovery failed");
+    }
+    return false;
+  }
+
   const std::size_t aligned_bytes =
       static_cast<std::size_t>(fifo_count) -
       (static_cast<std::size_t>(fifo_count) % kFifoSampleBytes);
