@@ -132,7 +132,7 @@ bool Mpu6050::init(const i2c_master_bus_handle_t bus,
       i2c_device_config_t config{};
       config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
       config.device_address = candidate;
-      config.scl_speed_hz = 400000U;
+      config.scl_speed_hz = 1000000U;
       const esp_err_t add_result =
           i2c_master_bus_add_device(bus, &config, &device_);
       ESP_LOGI(kTag, "init attempt=%u stage=add_device addr=0x%02x result=%s",
