@@ -32,7 +32,7 @@ bool IRAM_ATTR realtimeReleaseAlarmCallback(
   return high_priority_task_woken == pdTRUE;
 }
 
-void createRealtimeReleaseTimerOnCore0(void*) {
+void createRealtimeReleaseTimerOnCore1(void*) {
   gptimer_handle_t timer = nullptr;
 
   gptimer_config_t timer_config{};
@@ -95,11 +95,12 @@ bool initRealtimeReleaseTimer() {
   }
 
   // GPTimer peripheral interrupts are allocated on the core that creates the
-  // timer. Create it from a short-lived core-0 task so its periodic ISR stays
-  // away from the core-1 MPU6050/control critical path.
+  // timer. Create it from a short-lived core-1 task so the 1-kHz release ISR
+  // shares the realtime core with the task it wakes and stays isolated from the
+  // Core-0 sensor I/O workload.
   const BaseType_t created = xTaskCreatePinnedToCore(
-      createRealtimeReleaseTimerOnCore0, "triwhirl_release_init", 4096, nullptr,
-      configMAX_PRIORITIES - 1, nullptr, 0);
+      createRealtimeReleaseTimerOnCore1, "triwhirl_release_init", 4096, nullptr,
+      configMAX_PRIORITIES - 1, nullptr, 1);
   if (created != pdPASS) {
     vSemaphoreDelete(realtime_release_init_done);
     realtime_release_init_done = nullptr;
