@@ -706,7 +706,7 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         static_cast<triwhirl::SafetyFault>(snapshot.safety_first_fault);
     const int length = std::snprintf(
         buffer, sizeof(buffer),
-        "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu,imu_ok=%d,attitude_ok=%d,theta_rad=%.6f,theta_rate_rad_s=%.6f,ble_connected=%d,ble_subscribed=%d,fault_mask=0x%08lx,fault_first=%s\r\n",
+        "status,mode=%s,telemetry=%d,vq_v=%.6f,e_hz=%.6f,amp_v=%.6f,config=%d,pole_pairs=%d,sensor_dir=%d,offset_rad=%.6f,e_angle_rad=%.6f,status_ok=%d,sample_ok=%d,mag=%d,ml=%d,mh=%d,agc=%u,magnitude=%u,raw=%u,unwrapped_count=%lld,angle_rad=%.6f,unwrapped_rad=%.6f,vel_rad_s=%.6f,vel_inst_rad_s=%.6f,vel_valid=%d,read_errors=%lu,imu_ok=%d,attitude_ok=%d,theta_rad=%.6f,theta_rate_rad_s=%.6f,ble_connected=%d,ble_subscribed=%d,fault_mask=0x%08lx,fault_first=%s\r\n",
         motorModeName(snapshot.motor_mode), snapshot.telemetry_enabled ? 1 : 0,
         snapshot.motor_vq_v, snapshot.motor_electrical_hz,
         snapshot.motor_amplitude_v, snapshot.motor_config_valid ? 1 : 0,
@@ -717,6 +717,8 @@ bool handleSupervisorReadOnlyCommand(const char* const line) {
         encoder_health.magnet_detected ? 1 : 0,
         encoder_health.magnet_too_weak ? 1 : 0,
         encoder_health.magnet_too_strong ? 1 : 0,
+        static_cast<unsigned>(encoder_health.agc),
+        static_cast<unsigned>(encoder_health.magnitude),
         static_cast<unsigned>(snapshot.encoder_raw_count),
         static_cast<long long>(snapshot.encoder_unwrapped_count),
         snapshot.encoder_angle_rad, snapshot.encoder_unwrapped_rad,
@@ -847,7 +849,7 @@ bool handleTypedRuntimeCommand(const char* const line) {
 
 void consumeBytes(const std::uint8_t* input, const std::size_t received,
                   CommandInputState& state) {
-  if (input == nullptr) {
+  if (input == nullptr || received == 0U) {
     return;
   }
 
