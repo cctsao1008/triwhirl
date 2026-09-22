@@ -11,9 +11,11 @@ namespace {
 
 constexpr std::size_t kCommandTextBytes = 128U;
 constexpr std::uint32_t kDefaultGyroCalibrationSamples = 500U;
-constexpr float kDefaultCalibrationAmplitudeV = 0.6F;
-constexpr float kDefaultCalibrationElectricalHz = 0.5F;
-constexpr float kDefaultCalibrationTurns = 4.0F;
+// Match the vendor/SimpleFOC motor-alignment baseline. The runtime clamps these
+// independently from normal closed-loop Vq limits.
+constexpr float kDefaultCalibrationAmplitudeV = 3.0F;
+constexpr float kDefaultCalibrationElectricalHz = 1.0F;
+constexpr float kDefaultCalibrationTurns = 1.0F;
 constexpr float kDefaultLogSeconds = 45.0F;
 constexpr const char* kSwingConfigUsage =
     "ERR usage: swing config <captures> <pump_low_v> <pump_high_v> <capture_deg> <exit_deg> <rearm_deg> <probe_ms> <rate_switch_rad_s> <polarity> <vertex_a_deg> <max_s>\r\n";
