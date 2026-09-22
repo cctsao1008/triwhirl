@@ -85,6 +85,22 @@ def evaluate(profile: dict[str, str], timing: dict[str, str], status: dict[str, 
 def main() -> None:
     assert evaluate(good_profile(), good_timing(), good_status()) == []
 
+    # A latest-frame mailbox may legitimately cause Core 1 to skip intermediate
+    # generations. Acceptance is about physical sensor acquisition/generation,
+    # not how many distinct sequence numbers Core 1 happened to commit.
+    profile = good_profile()
+    profile["completions"] = "4750"
+    profile["encoder_i2c_reads"] = "5000"
+    profile["mpu_i2c_reads"] = "4999"
+    assert evaluate(profile, good_timing(), good_status()) == []
+
+    profile = good_profile()
+    profile["completions"] = "4995"
+    profile["encoder_i2c_reads"] = "5000"
+    profile["mpu_i2c_reads"] = "4800"
+    failures = evaluate(profile, good_timing(), good_status())
+    assert any("sensor acquisition ratio 0.9600" in failure for failure in failures)
+
     profile = good_profile()
     profile["join_timeouts"] = "2"
     failures = evaluate(profile, good_timing(), good_status())
