@@ -395,7 +395,7 @@ def save_trace(
         "provenance_ok": provenance_ok,
         "host_matches_firmware": host_matches_firmware,
         "trace_lossless": lossless,
-        "trace_acceptance_pass": lossless and provenance_ok,
+        "trace_acceptance_pass": lossless and provenance_ok and host_matches_firmware,
         "raw_bytes": len(capture.raw),
         "notifications": capture.notification_count,
         "receive_duration_s": receive_duration_s,
