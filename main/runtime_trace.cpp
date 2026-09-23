@@ -34,7 +34,9 @@
 namespace triwhirl::runtime {
 namespace {
 
-constexpr std::uint32_t kTraceWriteTimeoutMs = 50U;
+// This worker is Core-0/non-realtime. A long bounded enqueue timeout is safe
+// here and absorbs Windows BLE scheduling gaps without ever blocking Core 1.
+constexpr std::uint32_t kTraceWriteTimeoutMs = 1000U;
 constexpr TickType_t kTraceIdleDelayTicks = pdMS_TO_TICKS(1);
 constexpr float kRadToDeg = 180.0F / triwhirl::kPi;
 constexpr float kTargetVelocityLimitRadS = 140.0F;
@@ -48,6 +50,7 @@ StandupTraceRecord trace_ring[kStandupTraceRingRecords]{};
 std::atomic<std::uint32_t> trace_head{0U};
 std::atomic<std::uint32_t> trace_tail{0U};
 std::atomic<std::uint32_t> trace_sample_seq{0U};
+std::atomic<std::uint32_t> trace_control_tick{0U};
 std::atomic<std::uint32_t> trace_frame_seq{0U};
 std::atomic<std::uint32_t> trace_dropped_records{0U};
 std::atomic<std::uint32_t> trace_last_sample_us{0U};
@@ -206,6 +209,7 @@ void startRuntimeStandupTrace() {
   trace_head.store(0U, std::memory_order_relaxed);
   trace_tail.store(0U, std::memory_order_relaxed);
   trace_sample_seq.store(0U, std::memory_order_relaxed);
+  trace_control_tick.store(0U, std::memory_order_relaxed);
   trace_frame_seq.store(0U, std::memory_order_relaxed);
   trace_dropped_records.store(0U, std::memory_order_relaxed);
   trace_last_sample_us.store(0U, std::memory_order_relaxed);
@@ -220,6 +224,10 @@ void recordRuntimeStandupTrace(const triwhirl::StandupControllerInput& input,
                                const triwhirl::StandupControllerOutput& output,
                                const bool safety_faulted) {
   if (!trace_active.load(std::memory_order_acquire)) return;
+
+  const std::uint32_t control_tick =
+      trace_control_tick.fetch_add(1U, std::memory_order_relaxed);
+  if ((control_tick % kStandupTraceDecimation) != 0U) return;
 
   StandupTraceRecord record{};
   record.sample_seq = trace_sample_seq.fetch_add(1U, std::memory_order_relaxed);
