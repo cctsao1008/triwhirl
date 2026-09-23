@@ -12,10 +12,21 @@
 #include "triwhirl/ble_transport.hpp"
 #include "triwhirl/upright_geometry.hpp"
 
-#ifndef TRIWHIRL_GIT_SHA32
-#define TRIWHIRL_GIT_SHA32 0U
+#ifndef TRIWHIRL_GIT_SHA0
+#define TRIWHIRL_GIT_SHA0 0U
 #endif
-
+#ifndef TRIWHIRL_GIT_SHA1
+#define TRIWHIRL_GIT_SHA1 0U
+#endif
+#ifndef TRIWHIRL_GIT_SHA2
+#define TRIWHIRL_GIT_SHA2 0U
+#endif
+#ifndef TRIWHIRL_GIT_SHA3
+#define TRIWHIRL_GIT_SHA3 0U
+#endif
+#ifndef TRIWHIRL_GIT_SHA4
+#define TRIWHIRL_GIT_SHA4 0U
+#endif
 #ifndef TRIWHIRL_GIT_DIRTY
 #define TRIWHIRL_GIT_DIRTY 1
 #endif
@@ -28,7 +39,9 @@ constexpr TickType_t kTraceIdleDelayTicks = pdMS_TO_TICKS(1);
 constexpr float kRadToDeg = 180.0F / triwhirl::kPi;
 constexpr float kTargetVelocityLimitRadS = 140.0F;
 constexpr float kVqLimitV = 4.0F;
-constexpr std::uint32_t kFirmwareGitSha32 = TRIWHIRL_GIT_SHA32;
+constexpr std::uint32_t kFirmwareGitSha32[5] = {
+    TRIWHIRL_GIT_SHA0, TRIWHIRL_GIT_SHA1, TRIWHIRL_GIT_SHA2,
+    TRIWHIRL_GIT_SHA3, TRIWHIRL_GIT_SHA4};
 constexpr bool kFirmwareGitDirty = TRIWHIRL_GIT_DIRTY != 0;
 
 StandupTraceRecord trace_ring[kStandupTraceRingRecords]{};
@@ -86,7 +99,9 @@ bool sendFrame(const StandupTraceRecord* records,
   const std::uint32_t transport_baseline =
       trace_transport_drop_baseline.load(std::memory_order_relaxed);
   frame.header.transport_dropped_bytes = transport_now - transport_baseline;
-  frame.header.firmware_git_sha32 = kFirmwareGitSha32;
+  for (std::size_t i = 0U; i < 5U; ++i) {
+    frame.header.firmware_git_sha32[i] = kFirmwareGitSha32[i];
+  }
 
   if (sample_count > 0U && records != nullptr) {
     std::memcpy(frame.records, records,
