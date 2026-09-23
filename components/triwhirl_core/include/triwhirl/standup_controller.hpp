@@ -16,10 +16,8 @@ struct StandupControllerConfig {
   // three physical vertices.
   float theta_reference_rad = 0.0F;
 
-  // TRC-V1.1 proven swing/balance handoff envelope. Enter Balance at 9 deg as
-  // the seller firmware does, but once captured keep the local controller until
-  // 12 deg. The small hysteresis prevents a marginal 9.x/10.x-deg excursion
-  // from immediately replacing corrective balance torque with the swing pump.
+  // Keep the proven TRC-V1.1 swing/balance handoff envelope: enter Balance at
+  // 9 deg, hold it until 12 deg, and use the lower swing voltage inside 18 deg.
   float balance_capture_rad = 0.1570796327F;  // 9 deg
   float balance_release_rad = 0.2094395102F;  // 12 deg
   float swing_near_rad = 0.3141592654F;       // 18 deg
@@ -27,38 +25,36 @@ struct StandupControllerConfig {
   float pump_v_high = 0.42F;
   float rate_switch_rad_s = 0.03F;
 
-  // Vendor LQR produces a reaction-wheel velocity target. The units are kept
-  // compatible with the seller firmware: angle/rate in degrees(/s), wheel
-  // velocity and target velocity in rad/s.
-  float lqr_k_angle_unstable = -8.0F;
-  float lqr_k_rate_unstable = 0.92F;
-  float lqr_k_wheel_unstable = 1.6F;
-  float lqr_k_angle_stable = -6.5F;
-  float lqr_k_rate_stable = 0.9F;
-  float lqr_k_wheel_stable = 1.5F;
+  // Trace-tuned commissioning gains. The control structure remains the vendor
+  // style outer state feedback -> reaction-wheel velocity target -> velocity PI,
+  // but these defaults deliberately reduce wheel-momentum reinforcement and
+  // saturation observed in standup-20260923-233829.
+  // Angle/rate are in degrees(/s); wheel and target velocity are in rad/s.
+  float lqr_k_angle_unstable = -3.0F;
+  float lqr_k_rate_unstable = 0.45F;
+  float lqr_k_wheel_unstable = 0.30F;
+  float lqr_k_angle_stable = -2.5F;
+  float lqr_k_rate_stable = 0.35F;
+  float lqr_k_wheel_stable = 0.20F;
 
   // Golden TRC-V1.1 configures the MPU6050 gyro for +/-250 deg/s. Our runtime
-  // deliberately uses a wider sensor range, so clamp only the vendor standup
-  // controller input to the same physical envelope before applying its 0.6/0.4
-  // Gyro filter. This preserves the seller control law without reducing the
-  // global IMU range used by diagnostics/identification.
+  // deliberately uses a wider sensor range, so clamp only the standup-controller
+  // input to that envelope before applying the retained 0.6/0.4 gyro filter.
   float gyro_rate_limit_rad_s = 4.36332313F;  // 250 deg/s
 
-  float velocity_p_unstable = 0.035F;
-  float velocity_i_unstable = 0.8F;
-  float velocity_p_stable = 0.03F;
-  float velocity_i_stable = 0.7F;
-  float velocity_target_limit_rad_s = 140.0F;
-  float vq_limit_v = 4.0F;
-  // The supplied Arduino-FOC 2.1.1 library defaults
-  // DEF_PID_VEL_RAMP=1000 V/s. Preserve that velocity-PI actuator slew limit.
+  // Inner velocity-loop gains and limits are reduced from the vendor baseline
+  // so a near-upright capture damps accumulated wheel momentum instead of
+  // immediately driving the target and Vq rails.
+  float velocity_p_unstable = 0.020F;
+  float velocity_i_unstable = 0.150F;
+  float velocity_p_stable = 0.018F;
+  float velocity_i_stable = 0.100F;
+  float velocity_target_limit_rad_s = 60.0F;
+  float vq_limit_v = 3.0F;
+  // Preserve the Arduino-FOC 2.1.1 velocity-PI slew limit.
   float velocity_output_ramp_v_s = 1000.0F;
 
-  // In the seller controller, last_unstable_time is refreshed only while the
-  // Balance branch is executing with |p_angle| > 5 deg. Swing-up does not
-  // refresh it. Therefore a capture that arrives directly within 5 deg after a
-  // sufficiently long swing can enter the stable gain set immediately and
-  // recenter target_angle on that capture.
+  // Retain the seller stable/recenter timing and momentum-unloading cadence.
   float stable_angle_rad = 0.0872664626F;  // 5 deg
   std::uint32_t stable_delay_us = 1000000U;
   std::uint32_t momentum_adjust_period_us = 2000000U;
