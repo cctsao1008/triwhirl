@@ -10,7 +10,7 @@ namespace triwhirl::runtime {
 inline constexpr std::uint32_t kStandupTraceMagic = 0x52545754U;  // "TWTR"
 inline constexpr std::uint8_t kStandupTraceVersion = 2U;
 inline constexpr std::size_t kStandupTraceRingRecords = 512U;
-inline constexpr std::size_t kStandupTraceRecordsPerFrame = 8U;
+inline constexpr std::size_t kStandupTraceRecordsPerFrame = 7U;
 
 #pragma pack(push, 1)
 struct StandupTraceRecord {
@@ -38,19 +38,19 @@ struct StandupTraceFrameHeader {
   std::uint32_t first_sample_seq = 0U;
   std::uint32_t dropped_records = 0U;
   std::uint32_t transport_dropped_bytes = 0U;
-  std::uint32_t firmware_git_sha32 = 0U;
+  std::uint32_t firmware_git_sha32[5]{};
   std::uint32_t payload_crc32 = 0U;
 };
 #pragma pack(pop)
 
 static_assert(sizeof(StandupTraceRecord) == 26U,
               "standup trace record must remain 26 bytes");
-static_assert(sizeof(StandupTraceFrameHeader) == 32U,
-              "standup trace frame header must remain 32 bytes");
+static_assert(sizeof(StandupTraceFrameHeader) == 48U,
+              "standup trace frame header must remain 48 bytes");
 static_assert(sizeof(StandupTraceFrameHeader) +
-                      kStandupTraceRecordsPerFrame * sizeof(StandupTraceRecord) ==
+                      kStandupTraceRecordsPerFrame * sizeof(StandupTraceRecord) <=
                   240U,
-              "standup trace frame must exactly fit the preferred BLE payload budget");
+              "standup trace frame must fit the preferred BLE payload budget");
 
 enum StandupTraceRecordFlags : std::uint16_t {
   kTracePhaseMask = 0x0003U,
