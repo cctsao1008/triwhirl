@@ -18,8 +18,8 @@ struct StandupControllerConfig {
 
   // TRC-V1.1 proven swing/balance handoff envelope. Enter Balance at 9 deg as
   // the seller firmware does, but once captured keep the local controller until
-  // 12 deg. The small hysteresis prevents a marginal 9.x-deg excursion from
-  // immediately replacing corrective balance torque with the swing pump.
+  // 12 deg. The small hysteresis prevents a marginal 9.x/10.x-deg excursion
+  // from immediately replacing corrective balance torque with the swing pump.
   float balance_capture_rad = 0.1570796327F;  // 9 deg
   float balance_release_rad = 0.2094395102F;  // 12 deg
   float swing_near_rad = 0.3141592654F;       // 18 deg
@@ -54,8 +54,11 @@ struct StandupControllerConfig {
   // DEF_PID_VEL_RAMP=1000 V/s. Preserve that velocity-PI actuator slew limit.
   float velocity_output_ramp_v_s = 1000.0F;
 
-  // Seller firmware considers the body stable after remaining within 5 deg for
-  // one second, then slowly biases the equilibrium to unload wheel momentum.
+  // In the seller controller, last_unstable_time is refreshed only while the
+  // Balance branch is executing with |p_angle| > 5 deg. Swing-up does not
+  // refresh it. Therefore a capture that arrives directly within 5 deg after a
+  // sufficiently long swing can enter the stable gain set immediately and
+  // recenter target_angle on that capture.
   float stable_angle_rad = 0.0872664626F;  // 5 deg
   std::uint32_t stable_delay_us = 1000000U;
   std::uint32_t momentum_adjust_period_us = 2000000U;
