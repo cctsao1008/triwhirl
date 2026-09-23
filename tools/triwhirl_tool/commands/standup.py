@@ -11,6 +11,7 @@ from typing import Sequence
 from ..ble import DEVICE_NAME, TRACE_UUID
 from ..host_log import host_print as print
 from ..host_log import print_session_header
+from ..standup_plot import plot_standup_trace
 from ..standup_trace import StandupTraceCapture, save_trace, trace_end_seen
 from .log import (
     _close_line_transport,
@@ -61,6 +62,16 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable the dedicated binary trace subscription",
     )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="write a four-panel PNG after the trace has been saved",
+    )
+    parser.add_argument(
+        "--show-plot",
+        action="store_true",
+        help="show the generated plot interactively; implies --plot",
+    )
     parser.add_argument("--name", default=DEVICE_NAME)
     parser.add_argument("--address", default=None)
     parser.add_argument("--scan-timeout", type=float, default=10.0)
@@ -94,6 +105,8 @@ def _validate(args: argparse.Namespace) -> None:
         raise RuntimeError("--poll-period must be finite and > 0")
     if not math.isfinite(args.trace_flush_timeout) or args.trace_flush_timeout < 0.0:
         raise RuntimeError("--trace-flush-timeout must be finite and >= 0")
+    if args.no_trace and (args.plot or args.show_plot):
+        raise RuntimeError("--plot/--show-plot require trace capture; remove --no-trace")
 
 
 async def _fault_status(transport, timeout: float) -> tuple[str, dict[str, str]]:
@@ -140,7 +153,13 @@ def _trace_prefix(trace_dir: Path) -> Path:
     return trace_dir / time.strftime("standup-%Y%m%d-%H%M%S")
 
 
-def _save_trace_report(capture: StandupTraceCapture, prefix: Path) -> None:
+def _save_trace_report(
+    capture: StandupTraceCapture,
+    prefix: Path,
+    *,
+    plot: bool = False,
+    show_plot: bool = False,
+) -> None:
     raw_path, csv_path, json_path, summary = save_trace(capture, prefix)
     print(
         "standup_trace,"
@@ -166,6 +185,21 @@ def _save_trace_report(capture: StandupTraceCapture, prefix: Path) -> None:
         or summary["framing_skipped_bytes"]
     ):
         print("WARN standup trace is not lossless; inspect the JSON metadata before tuning")
+
+    if plot or show_plot:
+        try:
+            plot_path = plot_standup_trace(
+                raw_path,
+                prefix.with_suffix(".png"),
+                show=show_plot,
+                title=f"TriWhirl standup trace — {prefix.name}",
+            )
+            print(f"standup_plot={plot_path}")
+        except (OSError, RuntimeError, ValueError) as exc:
+            # Plotting is post-run analysis only. Never invalidate a successful
+            # acquisition because an optional host visualization dependency is
+            # missing or a desktop backend cannot open.
+            print(f"WARN standup plot not generated: {exc}")
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -256,7 +290,12 @@ async def _run(args: argparse.Namespace) -> int:
                 await client.stop_notify(TRACE_UUID)
             except Exception:
                 pass
-            _save_trace_report(trace_capture, trace_prefix)
+            _save_trace_report(
+                trace_capture,
+                trace_prefix,
+                plot=args.plot or args.show_plot,
+                show_plot=args.show_plot,
+            )
             trace_saved = True
 
         print("STANDUP_TRIAL_COMPLETE")
@@ -281,7 +320,12 @@ async def _run(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
             if trace_capture.raw:
-                _save_trace_report(trace_capture, trace_prefix)
+                _save_trace_report(
+                    trace_capture,
+                    trace_prefix,
+                    plot=args.plot or args.show_plot,
+                    show_plot=args.show_plot,
+                )
         await _close_line_transport(client, transport)
 
 
