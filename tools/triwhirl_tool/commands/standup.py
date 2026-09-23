@@ -175,7 +175,7 @@ def _save_trace_report(
         f"ring_drops={summary['ring_dropped_records']},"
         f"transport_drops={summary['transport_dropped_bytes']},"
         f"crc_errors={summary['crc_errors']},"
-        f"firmware={summary['firmware_git_sha8']},"
+        f"firmware={summary['firmware_git_head']},"
         f"dirty={1 if summary['firmware_dirty'] else 0},"
         f"host_match={1 if summary['host_matches_firmware'] else 0},"
         f"dt_min_us={dt_min if dt_min is not None else 'na'},"
