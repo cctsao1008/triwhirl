@@ -8,9 +8,10 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from ..ble import DEVICE_NAME
+from ..ble import DEVICE_NAME, TRACE_UUID
 from ..host_log import host_print as print
 from ..host_log import print_session_header
+from ..standup_trace import StandupTraceCapture, save_trace, trace_end_seen
 from .log import (
     _close_line_transport,
     _normalize_console_line,
@@ -24,7 +25,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run the firmware-owned TRC-V1.1 vendor-aligned autonomous "
-            "swing-up -> balance controller over BLE."
+            "swing-up -> balance controller while capturing its 1 kHz binary trace."
         )
     )
     parser.add_argument(
@@ -40,8 +41,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--poll-period",
         type=float,
-        default=0.10,
-        help="minimum delay between synchronized runtime snapshots",
+        default=1.0,
+        help="supervisory balance-status polling period; realtime data uses trace BLE",
+    )
+    parser.add_argument(
+        "--trace-dir",
+        type=Path,
+        default=Path("artifacts/standup"),
+        help="directory for .twtrace/.csv/.json files written after the trial",
+    )
+    parser.add_argument(
+        "--trace-flush-timeout",
+        type=float,
+        default=2.0,
+        help="seconds to wait for the Core-0 trace worker to flush after balance stop",
+    )
+    parser.add_argument(
+        "--no-trace",
+        action="store_true",
+        help="disable the dedicated binary trace subscription",
     )
     parser.add_argument("--name", default=DEVICE_NAME)
     parser.add_argument("--address", default=None)
@@ -74,21 +92,8 @@ def _validate(args: argparse.Namespace) -> None:
         raise RuntimeError("--duration must be finite and >= 0")
     if not math.isfinite(args.poll_period) or args.poll_period <= 0.0:
         raise RuntimeError("--poll-period must be finite and > 0")
-
-
-def _periodic_error_deg(theta_rad_text: str | None, theta_ref_deg: float) -> float | None:
-    if theta_rad_text is None:
-        return None
-    try:
-        theta_deg = math.degrees(float(theta_rad_text))
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(theta_deg) or not math.isfinite(theta_ref_deg):
-        return None
-    error = math.fmod(theta_deg - theta_ref_deg + 60.0, 120.0)
-    if error < 0.0:
-        error += 120.0
-    return error - 60.0
+    if not math.isfinite(args.trace_flush_timeout) or args.trace_flush_timeout < 0.0:
+        raise RuntimeError("--trace-flush-timeout must be finite and >= 0")
 
 
 async def _fault_status(transport, timeout: float) -> tuple[str, dict[str, str]]:
@@ -103,18 +108,7 @@ async def _balance_status(transport, timeout: float) -> tuple[str, dict[str, str
     return line, _parse_key_values(line, "balance")
 
 
-async def _runtime_status(transport, timeout: float) -> tuple[str, dict[str, str]]:
-    await transport.send("status")
-    line = await _wait_console(transport, prefixes=("status,",), timeout_s=timeout)
-    return line, _parse_key_values(line, "status")
-
-
 async def _start_with_transient_retry(transport, timeout: float) -> str:
-    # The latest-only sensor pipeline can expose a sub-millisecond instant where
-    # imu_sample_valid is false even though the next generation is already on the
-    # way. Do not make the operator restart the whole gyro-calibration sequence
-    # for that admission race. Firmware still enforces its bounded freshness
-    # envelope after start.
     last_error: RuntimeError | None = None
     for attempt in range(4):
         await transport.send("balance start")
@@ -133,11 +127,67 @@ async def _start_with_transient_retry(transport, timeout: float) -> str:
     raise last_error
 
 
+async def _wait_trace_flush(capture: StandupTraceCapture, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if trace_end_seen(capture.raw):
+            return True
+        await asyncio.sleep(0.02)
+    return trace_end_seen(capture.raw)
+
+
+def _trace_prefix(trace_dir: Path) -> Path:
+    return trace_dir / time.strftime("standup-%Y%m%d-%H%M%S")
+
+
+def _save_trace_report(capture: StandupTraceCapture, prefix: Path) -> None:
+    raw_path, csv_path, json_path, summary = save_trace(capture, prefix)
+    print(
+        "standup_trace,"
+        f"records={summary['records']},"
+        f"missing={summary['missing_samples']},"
+        f"ring_drops={summary['ring_dropped_records']},"
+        f"transport_drops={summary['transport_dropped_bytes']},"
+        f"crc_errors={summary['crc_errors']},"
+        f"max_notify_gap_ms={summary['max_notification_gap_ms']:.3f},"
+        f"throughput_kB_s={summary['receive_throughput_kB_s']:.3f}"
+    )
+    print(f"standup_trace_raw={raw_path}")
+    print(f"standup_trace_csv={csv_path}")
+    print(f"standup_trace_meta={json_path}")
+    if (
+        not summary["start_seen"]
+        or not summary["end_seen"]
+        or summary["crc_errors"]
+        or summary["frame_sequence_errors"]
+        or summary["sample_sequence_errors"]
+        or summary["ring_dropped_records"]
+        or summary["transport_dropped_bytes"]
+        or summary["framing_skipped_bytes"]
+    ):
+        print("WARN standup trace is not lossless; inspect the JSON metadata before tuning")
+
+
 async def _run(args: argparse.Namespace) -> int:
     pole_pairs, sensor_dir, offset_rad = _load_motor_config(args.motor_config)
     client, transport = await _open_line_transport(args)
     started = False
+    trace_capture: StandupTraceCapture | None = None
+    trace_prefix: Path | None = None
+    trace_saved = False
     try:
+        if not args.no_trace:
+            trace_capture = StandupTraceCapture()
+            trace_prefix = _trace_prefix(args.trace_dir)
+            try:
+                await client.start_notify(TRACE_UUID, trace_capture.on_notify)
+            except Exception as exc:
+                raise RuntimeError(
+                    "standup trace characteristic unavailable; build/flash the latest firmware"
+                ) from exc
+            await asyncio.sleep(0.05)
+            print("standup trace armed: 1 kHz binary stream -> host RAM")
+
         await transport.send("motor stop")
         print(await _wait_console(transport, prefixes=("OK motor stop",), timeout_s=args.timeout))
 
@@ -176,9 +226,6 @@ async def _run(args: argparse.Namespace) -> int:
         await transport.send("attitude reset")
         print(await _wait_console(transport, prefixes=("OK attitude reset",), timeout_s=args.timeout))
 
-        # After reset there is intentionally no synthesized balance config.
-        # Firmware therefore selects the built-in TRC-V1.1 vendor standup path:
-        # 0.42/0.168 V swing-up -> LQR wheel-velocity target -> velocity PI -> Vq.
         print("starting vendor-aligned autonomous standup (upright reference 68 deg)")
         print(await _start_with_transient_retry(transport, args.timeout))
         started = True
@@ -188,79 +235,53 @@ async def _run(args: argparse.Namespace) -> int:
             started = False
             return 0
 
-        # The previous monitor paired a balance-status snapshot with a second
-        # status request ~100-200 ms later and printed their fields on one line.
-        # That made capture transients look internally inconsistent. Keep the
-        # normal status reply as the single synchronized physical snapshot and
-        # compute the 120-degree-periodic error from its theta_rad locally.
-        balance_line, balance = await _balance_status(transport, args.timeout)
-        print(_normalize_console_line(balance_line))
-        if balance.get("active") != "1":
-            fault_line, _fault = await _fault_status(transport, args.timeout)
-            raise RuntimeError(f"standup became inactive: {balance_line}; {fault_line}")
-        try:
-            theta_ref_deg = float(balance.get("theta_ref_deg", "68.0"))
-        except ValueError:
-            theta_ref_deg = 68.0
-
         deadline = time.monotonic() + args.duration
-        next_balance_refresh = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             await asyncio.sleep(min(args.poll_period, max(0.0, deadline - time.monotonic())))
-
-            _runtime_line, runtime = await _runtime_status(transport, args.timeout)
-            live_error = _periodic_error_deg(runtime.get("theta_rad"), theta_ref_deg)
-            if live_error is None:
-                live_error_text = "?"
-                region = "unknown"
-            else:
-                live_error_text = f"{live_error:.3f}"
-                abs_error = abs(live_error)
-                region = (
-                    "capture" if abs_error < 9.0 else
-                    "near" if abs_error < 18.0 else
-                    "swing"
-                )
-            print(
-                "standup_live,"
-                f"error_deg={live_error_text},"
-                f"region={region},"
-                f"vq_v={runtime.get('vq_v', '?')},"
-                f"theta_rate_rad_s={runtime.get('theta_rate_rad_s', '?')},"
-                f"wheel_rate_rad_s={runtime.get('vel_rad_s', '?')},"
-                f"theta_ref_deg={theta_ref_deg:.3f},"
-                f"fault_mask={runtime.get('fault_mask', '?')}"
-            )
-
-            if runtime.get("fault_mask") not in (None, "0x00000000", "0"):
+            balance_line, balance = await _balance_status(transport, args.timeout)
+            print(_normalize_console_line(balance_line))
+            if balance.get("active") != "1":
                 fault_line, _fault = await _fault_status(transport, args.timeout)
-                raise RuntimeError(f"standup faulted: {fault_line}")
-
-            now = time.monotonic()
-            if now >= next_balance_refresh:
-                balance_line, balance = await _balance_status(transport, args.timeout)
-                print(_normalize_console_line(balance_line))
-                if balance.get("active") != "1":
-                    fault_line, _fault = await _fault_status(transport, args.timeout)
-                    raise RuntimeError(f"standup became inactive: {balance_line}; {fault_line}")
-                try:
-                    theta_ref_deg = float(balance.get("theta_ref_deg", theta_ref_deg))
-                except ValueError:
-                    pass
-                next_balance_refresh = now + 1.0
+                raise RuntimeError(f"standup became inactive: {balance_line}; {fault_line}")
 
         await transport.send("balance stop")
         print(await _wait_console(transport, prefixes=("OK balance stop",), timeout_s=args.timeout))
         started = False
+
+        if trace_capture is not None and trace_prefix is not None:
+            flushed = await _wait_trace_flush(trace_capture, args.trace_flush_timeout)
+            if not flushed:
+                print("WARN standup trace end marker not received before flush timeout")
+            try:
+                await client.stop_notify(TRACE_UUID)
+            except Exception:
+                pass
+            _save_trace_report(trace_capture, trace_prefix)
+            trace_saved = True
+
         print("STANDUP_TRIAL_COMPLETE")
         return 0
     finally:
         if started and client.is_connected:
             try:
                 await transport.send("balance stop")
-                await asyncio.sleep(0.1)
+                await _wait_console(
+                    transport,
+                    prefixes=("OK balance stop",),
+                    timeout_s=min(args.timeout, 1.0),
+                )
+                started = False
             except Exception:
                 pass
+        if trace_capture is not None and trace_prefix is not None and not trace_saved:
+            if client.is_connected:
+                try:
+                    await _wait_trace_flush(trace_capture, min(args.trace_flush_timeout, 0.5))
+                    await client.stop_notify(TRACE_UUID)
+                except Exception:
+                    pass
+            if trace_capture.raw:
+                _save_trace_report(trace_capture, trace_prefix)
         await _close_line_transport(client, transport)
 
 
