@@ -11,12 +11,14 @@ from pathlib import Path
 from typing import Any
 
 TRACE_MAGIC = b"TWTR"
-TRACE_VERSION = 1
-HEADER = struct.Struct("<IBBBBIIIII")
-RECORD = struct.Struct("<IhhhhhhhhhH")
+TRACE_VERSION = 2
+HEADER = struct.Struct("<IBBBBIIIIII")
+RECORD = struct.Struct("<IHhhhhhhhhhH")
 FRAME_START = 1 << 0
 FRAME_END = 1 << 1
 FRAME_OVERRUN = 1 << 2
+FRAME_FIRMWARE_DIRTY = 1 << 3
+RECORD_DT_CLAMPED = 1 << 7
 PHASE_NAMES = {
     0: "idle",
     1: "swing_high",
@@ -51,15 +53,15 @@ class StandupTraceCapture:
 def _git_head() -> str | None:
     try:
         completed = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            ["git", "rev-parse", "--short=8", "HEAD"],
             check=False,
             capture_output=True,
             text=True,
         )
     except OSError:
         return None
-    value = completed.stdout.strip()
-    return value if completed.returncode == 0 and value else None
+    value = completed.stdout.strip().lower()
+    return value if completed.returncode == 0 and len(value) == 8 else None
 
 
 def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> dict[str, Any]:
@@ -79,6 +81,13 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
     end_seen = False
     max_dropped_records = 0
     max_transport_dropped_bytes = 0
+    firmware_git_sha32: int | None = None
+    firmware_identity_errors = 0
+    firmware_dirty = False
+    elapsed_us = 0
+    dt_clamped_records = 0
+    zero_dt_noninitial_records = 0
+    measured_dt_us: list[int] = []
 
     while offset + HEADER.size <= len(data):
         if data[offset : offset + 4] != TRACE_MAGIC:
@@ -99,6 +108,7 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
             first_sample_seq,
             dropped_records,
             transport_dropped_bytes,
+            frame_firmware_git_sha32,
             payload_crc32,
         ) = HEADER.unpack_from(data, offset)
         if magic != int.from_bytes(TRACE_MAGIC, "little"):
@@ -125,6 +135,11 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
             frame_sequence_errors += 1
         expected_frame_seq = (frame_seq + 1) & 0xFFFFFFFF
 
+        if firmware_git_sha32 is None:
+            firmware_git_sha32 = frame_firmware_git_sha32
+        elif frame_firmware_git_sha32 != firmware_git_sha32:
+            firmware_identity_errors += 1
+        firmware_dirty = firmware_dirty or bool(frame_flags & FRAME_FIRMWARE_DIRTY)
         start_seen = start_seen or bool(frame_flags & FRAME_START)
         end_seen = end_seen or bool(frame_flags & FRAME_END)
         max_dropped_records = max(max_dropped_records, dropped_records)
@@ -137,6 +152,7 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
             values = RECORD.unpack_from(payload, index * record_size)
             (
                 sample_seq,
+                dt_us,
                 error_cdeg,
                 theta_rate_mrad_s,
                 filtered_rate_mrad_s,
@@ -158,11 +174,24 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
                     duplicate_or_reordered_samples += 1
             expected_sample_seq = (sample_seq + 1) & 0xFFFFFFFF
 
+            dt_clamped = bool(flags & RECORD_DT_CLAMPED)
+            if records:
+                elapsed_us += dt_us
+                if dt_us == 0:
+                    zero_dt_noninitial_records += 1
+                if dt_clamped:
+                    dt_clamped_records += 1
+                else:
+                    measured_dt_us.append(dt_us)
+            elif dt_clamped:
+                dt_clamped_records += 1
+
             phase_id = flags & 0x0003
             records.append(
                 {
                     "sample_seq": sample_seq,
-                    "t_s": sample_seq * 0.001,
+                    "dt_us": dt_us,
+                    "t_s": elapsed_us * 1.0e-6,
                     "error_deg": error_cdeg * 0.01,
                     "theta_rate_rad_s": theta_rate_mrad_s * 0.001,
                     "filtered_rate_rad_s": filtered_rate_mrad_s * 0.001,
@@ -178,6 +207,7 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
                     "target_saturated": bool(flags & (1 << 4)),
                     "vq_saturated": bool(flags & (1 << 5)),
                     "safety_fault": bool(flags & (1 << 6)),
+                    "dt_clamped": dt_clamped,
                     "flags": flags,
                 }
             )
@@ -191,11 +221,17 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
                 "crc_ok": crc_ok,
                 "dropped_records": dropped_records,
                 "transport_dropped_bytes": transport_dropped_bytes,
+                "firmware_git_sha32": frame_firmware_git_sha32,
                 "record_start": frame_record_start,
             }
         )
         offset += frame_bytes
 
+    dt_min_us = min(measured_dt_us) if measured_dt_us else None
+    dt_max_us = max(measured_dt_us) if measured_dt_us else None
+    dt_mean_us = (
+        sum(measured_dt_us) / len(measured_dt_us) if measured_dt_us else None
+    )
     return {
         "frames": frames,
         "records": records,
@@ -212,6 +248,15 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
         "end_seen": end_seen,
         "max_dropped_records": max_dropped_records,
         "max_transport_dropped_bytes": max_transport_dropped_bytes,
+        "firmware_git_sha32": firmware_git_sha32,
+        "firmware_dirty": firmware_dirty,
+        "firmware_identity_errors": firmware_identity_errors,
+        "dt_clamped_records": dt_clamped_records,
+        "zero_dt_noninitial_records": zero_dt_noninitial_records,
+        "dt_min_us": dt_min_us,
+        "dt_max_us": dt_max_us,
+        "dt_mean_us": dt_mean_us,
+        "control_duration_s": elapsed_us * 1.0e-6 if records else 0.0,
     }
 
 
@@ -240,7 +285,12 @@ def trace_end_seen(raw: bytes | bytearray) -> bool:
     return False
 
 
-def save_trace(capture: StandupTraceCapture, prefix: Path) -> tuple[Path, Path, Path, dict[str, Any]]:
+def save_trace(
+    capture: StandupTraceCapture,
+    prefix: Path,
+    *,
+    run_metadata: dict[str, Any] | None = None,
+) -> tuple[Path, Path, Path, dict[str, Any]]:
     prefix.parent.mkdir(parents=True, exist_ok=True)
     parsed = parse_trace(capture.raw)
     raw_path = prefix.with_suffix(".twtrace")
@@ -252,6 +302,7 @@ def save_trace(capture: StandupTraceCapture, prefix: Path) -> tuple[Path, Path, 
     records = parsed["records"]
     fieldnames = list(records[0].keys()) if records else [
         "sample_seq",
+        "dt_us",
         "t_s",
         "error_deg",
         "theta_rate_rad_s",
@@ -268,6 +319,7 @@ def save_trace(capture: StandupTraceCapture, prefix: Path) -> tuple[Path, Path, 
         "target_saturated",
         "vq_saturated",
         "safety_fault",
+        "dt_clamped",
         "flags",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as stream:
@@ -275,21 +327,75 @@ def save_trace(capture: StandupTraceCapture, prefix: Path) -> tuple[Path, Path, 
         writer.writeheader()
         writer.writerows(records)
 
-    duration_s = 0.0
+    receive_duration_s = 0.0
     if capture.first_notify_ns is not None and capture.last_notify_ns is not None:
-        duration_s = max(0.0, (capture.last_notify_ns - capture.first_notify_ns) * 1e-9)
-    summary = {
-        "format": "TWTR1",
-        "firmware_git_head": _git_head(),
+        receive_duration_s = max(
+            0.0, (capture.last_notify_ns - capture.first_notify_ns) * 1e-9
+        )
+
+    host_git_head = _git_head()
+    firmware_git_sha32 = parsed["firmware_git_sha32"]
+    firmware_git_sha8 = (
+        f"{firmware_git_sha32:08x}" if firmware_git_sha32 is not None else None
+    )
+    provenance_ok = bool(
+        firmware_git_sha8
+        and firmware_git_sha8 != "00000000"
+        and not parsed["firmware_dirty"]
+        and parsed["firmware_identity_errors"] == 0
+    )
+    host_matches_firmware = bool(
+        provenance_ok and host_git_head and host_git_head == firmware_git_sha8
+    )
+    lossless = bool(
+        parsed["start_seen"]
+        and parsed["end_seen"]
+        and parsed["crc_errors"] == 0
+        and parsed["frame_sequence_errors"] == 0
+        and parsed["sample_sequence_errors"] == 0
+        and parsed["missing_samples"] == 0
+        and parsed["duplicate_or_reordered_samples"] == 0
+        and parsed["max_dropped_records"] == 0
+        and parsed["max_transport_dropped_bytes"] == 0
+        and parsed["trailing_bytes"] == 0
+        and parsed["framing_skipped_bytes"] == 0
+        and parsed["dt_clamped_records"] == 0
+        and parsed["zero_dt_noninitial_records"] == 0
+    )
+    control_duration_s = parsed["control_duration_s"]
+    control_rate_hz = (
+        (len(records) - 1) / control_duration_s
+        if len(records) > 1 and control_duration_s > 0.0
+        else 0.0
+    )
+    summary: dict[str, Any] = {
+        "format": "TWTR2",
+        "host_git_head": host_git_head,
+        "firmware_git_sha8": firmware_git_sha8,
+        "firmware_dirty": parsed["firmware_dirty"],
+        "firmware_identity_errors": parsed["firmware_identity_errors"],
+        "provenance_ok": provenance_ok,
+        "host_matches_firmware": host_matches_firmware,
+        "trace_lossless": lossless,
+        "trace_acceptance_pass": lossless and provenance_ok,
         "raw_bytes": len(capture.raw),
         "notifications": capture.notification_count,
-        "receive_duration_s": duration_s,
+        "receive_duration_s": receive_duration_s,
         "receive_throughput_kB_s": (
-            len(capture.raw) / duration_s / 1000.0 if duration_s > 0.0 else 0.0
+            len(capture.raw) / receive_duration_s / 1000.0
+            if receive_duration_s > 0.0
+            else 0.0
         ),
         "max_notification_gap_ms": capture.max_notify_gap_ns * 1e-6,
         "frames": len(parsed["frames"]),
         "records": len(records),
+        "control_duration_s": control_duration_s,
+        "control_rate_hz": control_rate_hz,
+        "control_dt_min_us": parsed["dt_min_us"],
+        "control_dt_max_us": parsed["dt_max_us"],
+        "control_dt_mean_us": parsed["dt_mean_us"],
+        "dt_clamped_records": parsed["dt_clamped_records"],
+        "zero_dt_noninitial_records": parsed["zero_dt_noninitial_records"],
         "start_seen": parsed["start_seen"],
         "end_seen": parsed["end_seen"],
         "crc_errors": parsed["crc_errors"],
@@ -302,5 +408,9 @@ def save_trace(capture: StandupTraceCapture, prefix: Path) -> tuple[Path, Path, 
         "trailing_bytes": parsed["trailing_bytes"],
         "framing_skipped_bytes": parsed["framing_skipped_bytes"],
     }
-    json_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if run_metadata is not None:
+        summary["run"] = run_metadata
+    json_path.write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return raw_path, csv_path, json_path, summary
