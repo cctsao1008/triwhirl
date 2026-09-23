@@ -20,6 +20,7 @@ from tools.triwhirl_tool.standup_trace import (  # noqa: E402
     RECORD,
     RECORD_DT_CLAMPED,
     TRACE_MAGIC,
+    TRACE_RECORDS_PER_FRAME,
     TRACE_VERSION,
     StandupTraceCapture,
     parse_trace,
@@ -27,7 +28,8 @@ from tools.triwhirl_tool.standup_trace import (  # noqa: E402
     trace_end_seen,
 )
 
-FIRMWARE_SHA32 = 0x1234ABCD
+FIRMWARE_WORDS = (0x12345678, 0x90ABCDEF, 0x00112233, 0x44556677, 0x8899AABB)
+FIRMWARE_HEAD = "1234567890abcdef00112233445566778899aabb"
 
 
 def frame(
@@ -35,7 +37,7 @@ def frame(
     first_sample: int,
     records: list[bytes],
     flags: int = 0,
-    firmware_sha32: int = FIRMWARE_SHA32,
+    firmware_words: tuple[int, int, int, int, int] = FIRMWARE_WORDS,
 ) -> bytes:
     payload = b"".join(records)
     crc = zlib.crc32(payload) & 0xFFFFFFFF if payload else 0
@@ -49,7 +51,7 @@ def frame(
         first_sample,
         0,
         0,
-        firmware_sha32,
+        *firmware_words,
         crc,
     ) + payload
 
@@ -72,9 +74,10 @@ def record(seq: int, dt_us: int, flags: int = 0x000B) -> bytes:
 
 
 def main() -> None:
-    assert HEADER.size == 32
+    assert HEADER.size == 48
     assert RECORD.size == 26
-    assert HEADER.size + 8 * RECORD.size == 240
+    assert TRACE_RECORDS_PER_FRAME == 7
+    assert HEADER.size + TRACE_RECORDS_PER_FRAME * RECORD.size == 230
 
     blob = b"".join(
         (
@@ -91,7 +94,7 @@ def main() -> None:
     assert parsed["frame_sequence_errors"] == 0
     assert parsed["sample_sequence_errors"] == 0
     assert parsed["missing_samples"] == 0
-    assert parsed["firmware_git_sha32"] == FIRMWARE_SHA32
+    assert parsed["firmware_git_head"] == FIRMWARE_HEAD
     assert not parsed["firmware_dirty"]
     assert parsed["firmware_identity_errors"] == 0
     assert parsed["dt_min_us"] == 995
@@ -139,10 +142,17 @@ def main() -> None:
     assert dirty_parsed["firmware_dirty"]
     assert dirty_parsed["dt_clamped_records"] == 1
 
+    inconsistent_words = (
+        0xDEADBEEF,
+        FIRMWARE_WORDS[1],
+        FIRMWARE_WORDS[2],
+        FIRMWARE_WORDS[3],
+        FIRMWARE_WORDS[4],
+    )
     inconsistent = b"".join(
         (
             frame(0, 0, [], FRAME_START),
-            frame(1, 0, [record(0, 0)], firmware_sha32=0xDEADBEEF),
+            frame(1, 0, [record(0, 0)], firmware_words=inconsistent_words),
             frame(2, 1, [], FRAME_END),
         )
     )
@@ -164,7 +174,7 @@ def main() -> None:
             run_metadata={"requested_duration_s": 1.0},
         )
         assert summary["format"] == "TWTR2"
-        assert summary["firmware_git_sha8"] == "1234abcd"
+        assert summary["firmware_git_head"] == FIRMWARE_HEAD
         assert summary["provenance_ok"]
         assert summary["trace_lossless"]
         assert summary["control_dt_min_us"] == 995
