@@ -126,7 +126,8 @@ StandupControllerOutput StandupController::update(
   const float dt_s = static_cast<float>(elapsed_us) * 1.0e-6F;
   previous_update_us_ = input.now_us;
 
-  float error_rad = periodicUprightErrorRad(input.theta_rad, theta_reference_rad_);
+  const float error_rad =
+      periodicUprightErrorRad(input.theta_rad, theta_reference_rad_);
   if (!std::isfinite(error_rad)) {
     output_ = output;
     return output_;
@@ -155,13 +156,11 @@ StandupControllerOutput StandupController::update(
     output.stable = false;
     output.valid = true;
 
-    // Golden firmware explicitly assigns Gyro=0 in both swing branches. Keep
-    // the next Balance entry equivalent to one vendor filter update from zero.
+    // Golden firmware assigns Gyro=0 in both swing branches, but it does not
+    // call controllerLQR() there. Therefore target_angle, stable,
+    // last_unstable_time and SimpleFOC PID_velocity state all survive the swing
+    // interval. Only clear the gyro helper and Balance-entry marker here.
     filtered_rate_rad_s_ = 0.0F;
-    resetVelocityLoop();
-    stable_ = false;
-    last_unstable_us_ = input.now_us;
-    last_momentum_adjust_us_ = input.now_us;
     was_balancing_ = false;
     output_ = output;
     return output_;
@@ -171,36 +170,38 @@ StandupControllerOutput StandupController::update(
   //   Gyro = Gyro * 0.6 + gyroZrate * 0.4
   // before controllerLQR(..., -Gyro, ...). Our runtime keeps a wider gyro range
   // globally, so reproduce the seller's sensor saturation only at this control
-  // boundary. Critically, the first Balance sample is 0.4*rate (Gyro was reset
-  // to zero while swinging), not the full raw rate.
+  // boundary. Gyro was cleared by the swing branch, so the first Balance sample
+  // naturally becomes 0.4*rate without resetting any velocity-loop state.
   const float vendor_rate_rad_s = std::clamp(
       input.theta_rate_rad_s, -config_.gyro_rate_limit_rad_s,
       config_.gyro_rate_limit_rad_s);
-  if (!was_balancing_) {
-    filtered_rate_rad_s_ = 0.4F * vendor_rate_rad_s;
-    resetVelocityLoop();
-    last_unstable_us_ = input.now_us;
-    last_momentum_adjust_us_ = input.now_us;
-  } else {
-    filtered_rate_rad_s_ =
-        0.6F * filtered_rate_rad_s_ + 0.4F * vendor_rate_rad_s;
-  }
+  filtered_rate_rad_s_ =
+      0.6F * filtered_rate_rad_s_ + 0.4F * vendor_rate_rad_s;
   was_balancing_ = true;
 
-  if (std::fabs(error_rad) > config_.stable_angle_rad) {
-    stable_ = false;
+  // Match controllerLQR() literally. The seller updates last_unstable_time only
+  // while the Balance branch is active and |p_angle| > 5 deg; swing-up does not
+  // refresh it. Consequently, if the first capture arrives directly inside 5
+  // deg after more than one second of swinging, the golden firmware immediately
+  // recenters target_angle and uses the gentler stable gain/PI set. The previous
+  // TriWhirl implementation restarted that one-second timer on every handoff,
+  // keeping the aggressive unstable controller active for an extra second.
+  if (abs_error > config_.stable_angle_rad) {
     last_unstable_us_ = input.now_us;
-  } else if (!stable_ &&
-             (input.now_us - last_unstable_us_) >= config_.stable_delay_us) {
-    // Seller firmware captures the actual standing angle after one stable
-    // second. Applying the same bounded reference recentering avoids carrying
-    // installation/geometry bias into the steady controller.
+    if (stable_) {
+      theta_reference_rad_ = config_.theta_reference_rad;
+      stable_ = false;
+    }
+  }
+  if (!stable_ &&
+      (input.now_us - last_unstable_us_) > config_.stable_delay_us) {
     theta_reference_rad_ += error_rad;
     stable_ = true;
-    last_momentum_adjust_us_ = input.now_us;
-    error_rad = periodicUprightErrorRad(input.theta_rad, theta_reference_rad_);
   }
 
+  // controllerLQR() uses the p_angle argument from the current outer-loop
+  // iteration even if it just adjusted target_angle. Keep that exact one-sample
+  // behavior; the new reference affects the next update.
   const float error_deg = error_rad * kRadToDeg;
   const float filtered_rate_deg_s = filtered_rate_rad_s_ * kRadToDeg;
   const float k_angle = stable_ ? config_.lqr_k_angle_stable
