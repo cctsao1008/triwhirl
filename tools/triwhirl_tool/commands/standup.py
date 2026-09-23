@@ -37,7 +37,12 @@ def _parser() -> argparse.ArgumentParser:
         default=10.0,
         help="bounded trial duration in seconds; 0 leaves standup active",
     )
-    parser.add_argument("--poll-period", type=float, default=0.25)
+    parser.add_argument(
+        "--poll-period",
+        type=float,
+        default=0.10,
+        help="minimum delay between synchronized runtime snapshots",
+    )
     parser.add_argument("--name", default=DEVICE_NAME)
     parser.add_argument("--address", default=None)
     parser.add_argument("--scan-timeout", type=float, default=10.0)
@@ -69,6 +74,21 @@ def _validate(args: argparse.Namespace) -> None:
         raise RuntimeError("--duration must be finite and >= 0")
     if not math.isfinite(args.poll_period) or args.poll_period <= 0.0:
         raise RuntimeError("--poll-period must be finite and > 0")
+
+
+def _periodic_error_deg(theta_rad_text: str | None, theta_ref_deg: float) -> float | None:
+    if theta_rad_text is None:
+        return None
+    try:
+        theta_deg = math.degrees(float(theta_rad_text))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(theta_deg) or not math.isfinite(theta_ref_deg):
+        return None
+    error = math.fmod(theta_deg - theta_ref_deg + 60.0, 120.0)
+    if error < 0.0:
+        error += 120.0
+    return error - 60.0
 
 
 async def _fault_status(transport, timeout: float) -> tuple[str, dict[str, str]]:
@@ -168,28 +188,66 @@ async def _run(args: argparse.Namespace) -> int:
             started = False
             return 0
 
+        # The previous monitor paired a balance-status snapshot with a second
+        # status request ~100-200 ms later and printed their fields on one line.
+        # That made capture transients look internally inconsistent. Keep the
+        # normal status reply as the single synchronized physical snapshot and
+        # compute the 120-degree-periodic error from its theta_rad locally.
+        balance_line, balance = await _balance_status(transport, args.timeout)
+        print(_normalize_console_line(balance_line))
+        if balance.get("active") != "1":
+            fault_line, _fault = await _fault_status(transport, args.timeout)
+            raise RuntimeError(f"standup became inactive: {balance_line}; {fault_line}")
+        try:
+            theta_ref_deg = float(balance.get("theta_ref_deg", "68.0"))
+        except ValueError:
+            theta_ref_deg = 68.0
+
         deadline = time.monotonic() + args.duration
+        next_balance_refresh = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             await asyncio.sleep(min(args.poll_period, max(0.0, deadline - time.monotonic())))
-            line, status = await _balance_status(transport, args.timeout)
-            print(_normalize_console_line(line))
-            if status.get("active") != "1":
-                fault_line, _fault = await _fault_status(transport, args.timeout)
-                raise RuntimeError(f"standup became inactive: {line}; {fault_line}")
 
-            # Balance status intentionally keeps the synthesized-controller ABI.
-            # Pair it with the normal runtime snapshot so a physical capture trial
-            # records the actuator command and the two rates needed to distinguish
-            # gain/sign/saturation failures without enabling high-rate telemetry.
             _runtime_line, runtime = await _runtime_status(transport, args.timeout)
+            live_error = _periodic_error_deg(runtime.get("theta_rad"), theta_ref_deg)
+            if live_error is None:
+                live_error_text = "?"
+                region = "unknown"
+            else:
+                live_error_text = f"{live_error:.3f}"
+                abs_error = abs(live_error)
+                region = (
+                    "capture" if abs_error < 9.0 else
+                    "near" if abs_error < 18.0 else
+                    "swing"
+                )
             print(
                 "standup_live,"
-                f"error_deg={status.get('error_deg', '?')},"
+                f"error_deg={live_error_text},"
+                f"region={region},"
                 f"vq_v={runtime.get('vq_v', '?')},"
                 f"theta_rate_rad_s={runtime.get('theta_rate_rad_s', '?')},"
                 f"wheel_rate_rad_s={runtime.get('vel_rad_s', '?')},"
+                f"theta_ref_deg={theta_ref_deg:.3f},"
                 f"fault_mask={runtime.get('fault_mask', '?')}"
             )
+
+            if runtime.get("fault_mask") not in (None, "0x00000000", "0"):
+                fault_line, _fault = await _fault_status(transport, args.timeout)
+                raise RuntimeError(f"standup faulted: {fault_line}")
+
+            now = time.monotonic()
+            if now >= next_balance_refresh:
+                balance_line, balance = await _balance_status(transport, args.timeout)
+                print(_normalize_console_line(balance_line))
+                if balance.get("active") != "1":
+                    fault_line, _fault = await _fault_status(transport, args.timeout)
+                    raise RuntimeError(f"standup became inactive: {balance_line}; {fault_line}")
+                try:
+                    theta_ref_deg = float(balance.get("theta_ref_deg", theta_ref_deg))
+                except ValueError:
+                    pass
+                next_balance_refresh = now + 1.0
 
         await transport.send("balance stop")
         print(await _wait_console(transport, prefixes=("OK balance stop",), timeout_s=args.timeout))
