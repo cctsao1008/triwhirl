@@ -166,6 +166,10 @@ bool initRuntimeTrace() {
 }
 
 void startRuntimeStandupTrace() {
+  if (!trace_initialized.load(std::memory_order_acquire) && !initRuntimeTrace()) {
+    trace_active.store(false, std::memory_order_release);
+    return;
+  }
   trace_active.store(false, std::memory_order_release);
   trace_head.store(0U, std::memory_order_relaxed);
   trace_tail.store(0U, std::memory_order_relaxed);
