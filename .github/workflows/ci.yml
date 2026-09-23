@@ -60,6 +60,7 @@ jobs:
           python tools/twtool.py help log stop
           python tools/twtool.py help log session
           python tools/twtool.py help log inspect
+          python tools/twtool.py help log plot-standup
           python tools/twtool.py help diag timing
           python tools/twtool.py help diag timing-reset
           python tools/twtool.py help diag timing-test
