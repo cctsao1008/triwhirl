@@ -4,7 +4,7 @@ This directory contains programs that run on the development host rather than on
 
 ## TriWhirl Toolbox
 
-`twtool` is the canonical host-tool entry point. It presents acquisition, fitting, logging, and analysis as one command tree while legacy scripts are progressively folded into shared modules.
+`twtool` is the canonical host-tool entry point. It presents acquisition, fitting, logging, plotting, and analysis as one command tree while legacy scripts are progressively folded into shared modules.
 
 From the repository root:
 
@@ -33,6 +33,11 @@ log
   download       completed firmware TWLG -> .twlog over BLE
   decode         validate/decode .twlog -> CSV
   inspect        validate + summarize a .twlog without converting it
+  plot-standup   plot a standup .twtrace or decoded standup CSV
+
+control
+  balance        deploy/run a guarded H-infinity near-upright controller
+  standup        autonomous vendor-aligned swing-up -> balance (+ optional plot)
 
 id
   actuator-uart  tethered actuator acquisition
@@ -48,7 +53,7 @@ fit
   body-active    active per-vertex A/B/C fit
 ```
 
-The TWLG commands are native toolbox commands backed by shared BLE/TWLG modules. Identification/fitting commands still route to proven legacy implementations during migration.
+The TWLG and standup-trace commands are native toolbox commands backed by shared BLE/log modules. Identification/fitting commands still route to proven legacy implementations during migration.
 
 ### Firmware logger workflow
 
@@ -81,6 +86,25 @@ python tools/twtool.py log session 45 `
 
 `log inspect` reports the validated TWLG header plus useful acquisition ranges such as body angle, body rate, wheel rate, Vq, dropped records, and fault coverage. Use `--json` for a machine-readable summary.
 
+### Standup trace and plot
+
+`control standup` captures the dedicated 1 kHz binary standup stream into host RAM, then writes `.twtrace`, `.csv`, and `.json` only after the motor has stopped. Add `--plot` to also write a four-panel PNG after the trace is safely persisted:
+
+```powershell
+python tools/twtool.py control standup --duration 10 --plot
+```
+
+Use `--show-plot` to save the PNG and also open it interactively. Plotting is post-run only and never participates in the BLE callback or realtime control path.
+
+Existing standup captures can be replotted independently from either the authoritative raw trace or its decoded CSV:
+
+```powershell
+python tools/twtool.py log plot-standup artifacts/standup/standup-20260923-213000.twtrace
+python tools/twtool.py log plot-standup artifacts/standup/standup-20260923-213000.csv --show
+```
+
+The plot shows upright error with the 9-degree capture / 12-degree release boundaries, body and vendor-filtered gyro rates, wheel rate versus LQR target velocity, and PI/Vq behavior. Matplotlib is imported only when plotting is requested; if it is not installed, install it in the active host environment with `python -m pip install matplotlib`.
+
 Other examples:
 
 ```powershell
@@ -93,6 +117,8 @@ Use `help` to open command-specific argument help through the unified entry poin
 ```powershell
 python tools/twtool.py help log session
 python tools/twtool.py help log inspect
+python tools/twtool.py help log plot-standup
+python tools/twtool.py help control standup
 python tools/twtool.py help id swing
 ```
 
@@ -100,6 +126,6 @@ The old scripts remain available during migration. New host workflows should pre
 
 ## Design boundary
 
-The toolbox is for commissioning, acquisition, identification, logging, analysis, and synthesis. Timing-critical control decisions belong in the ESP32 firmware. BLE is not a real-time control transport: the firmware-owned 1 kHz control/logger path records synchronized data locally and BLE is used for configuration and post-run transfer.
+The toolbox is for commissioning, acquisition, identification, logging, plotting, analysis, and synthesis. Timing-critical control decisions belong in the ESP32 firmware. BLE is not a real-time control transport: standup trace callbacks append binary notifications into host RAM without parsing/plotting/disk I/O, and visualization happens only after the trial.
 
 Do not create a separate `host/` application hierarchy unless TriWhirl later gains an actual host-side runtime application.
