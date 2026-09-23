@@ -82,6 +82,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
         description="Inspect TWLG metadata, timing quality, validity, and signals.",
     ),
     ToolCommand(
+        group="log",
+        name="plot-standup",
+        handler="commands.plot:standup_plot_main",
+        description="Plot a captured standup .twtrace or decoded standup CSV.",
+    ),
+    ToolCommand(
         group="diag",
         name="timing",
         handler="commands.diag:timing_main",
