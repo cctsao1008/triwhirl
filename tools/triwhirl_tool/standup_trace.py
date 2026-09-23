@@ -69,6 +69,11 @@ def _git_words_to_hex(words: tuple[int, int, int, int, int]) -> str:
     return "".join(f"{word:08x}" for word in words)
 
 
+def _resync_to_next_magic(data: bytes, offset: int) -> int | None:
+    next_magic = data.find(TRACE_MAGIC, offset + 4)
+    return next_magic if next_magic >= 0 else None
+
+
 def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> dict[str, Any]:
     data = bytes(raw)
     offset = 0
@@ -125,12 +130,20 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
             or record_size != RECORD.size
             or sample_count > TRACE_RECORDS_PER_FRAME
         ):
-            offset += 1
-            framing_skipped += 1
+            next_magic = data.find(TRACE_MAGIC, offset + 1)
+            if next_magic < 0:
+                break
+            framing_skipped += next_magic - offset
+            offset = next_magic
             continue
 
         frame_bytes = HEADER.size + sample_count * record_size
         if offset + frame_bytes > len(data):
+            next_magic = _resync_to_next_magic(data, offset)
+            if next_magic is not None:
+                framing_skipped += next_magic - offset
+                offset = next_magic
+                continue
             if tolerate_trailing:
                 break
             raise RuntimeError("truncated standup trace frame")
@@ -138,7 +151,20 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
         payload = data[offset + HEADER.size : offset + frame_bytes]
         crc_ok = sample_count == 0 or (zlib.crc32(payload) & 0xFFFFFFFF) == payload_crc32
         if not crc_ok:
+            # A timed-out FreeRTOS stream-buffer write can leave a partial frame
+            # followed by a retry beginning with a fresh TWTR magic. Never trust
+            # the header counters or payload of a CRC-failed data frame; resync
+            # at the next magic so diagnostics report the real drop counters
+            # instead of values decoded from shifted bytes.
             crc_errors += 1
+            next_magic = _resync_to_next_magic(data, offset)
+            if next_magic is not None:
+                framing_skipped += next_magic - offset
+                offset = next_magic
+                continue
+            if tolerate_trailing:
+                break
+            raise RuntimeError("corrupt standup trace frame")
 
         if expected_frame_seq is not None and frame_seq != expected_frame_seq:
             frame_sequence_errors += 1
@@ -234,7 +260,7 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
                 "first_sample_seq": first_sample_seq,
                 "sample_count": sample_count,
                 "flags": frame_flags,
-                "crc_ok": crc_ok,
+                "crc_ok": True,
                 "dropped_records": dropped_records,
                 "transport_dropped_bytes": transport_dropped_bytes,
                 "firmware_git_head": _git_words_to_hex(typed_words),
@@ -380,10 +406,10 @@ def save_trace(
         and parsed["dt_clamped_records"] == 0
         and parsed["zero_dt_noninitial_records"] == 0
     )
-    control_duration_s = parsed["control_duration_s"]
-    control_rate_hz = (
-        (len(records) - 1) / control_duration_s
-        if len(records) > 1 and control_duration_s > 0.0
+    trace_duration_s = parsed["control_duration_s"]
+    trace_sample_rate_hz = (
+        (len(records) - 1) / trace_duration_s
+        if len(records) > 1 and trace_duration_s > 0.0
         else 0.0
     )
     summary: dict[str, Any] = {
@@ -407,11 +433,11 @@ def save_trace(
         "max_notification_gap_ms": capture.max_notify_gap_ns * 1e-6,
         "frames": len(parsed["frames"]),
         "records": len(records),
-        "control_duration_s": control_duration_s,
-        "control_rate_hz": control_rate_hz,
-        "control_dt_min_us": parsed["dt_min_us"],
-        "control_dt_max_us": parsed["dt_max_us"],
-        "control_dt_mean_us": parsed["dt_mean_us"],
+        "trace_duration_s": trace_duration_s,
+        "trace_sample_rate_hz": trace_sample_rate_hz,
+        "trace_dt_min_us": parsed["dt_min_us"],
+        "trace_dt_max_us": parsed["dt_max_us"],
+        "trace_dt_mean_us": parsed["dt_mean_us"],
         "dt_clamped_records": parsed["dt_clamped_records"],
         "zero_dt_noninitial_records": parsed["zero_dt_noninitial_records"],
         "start_seen": parsed["start_seen"],
