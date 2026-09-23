@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import struct
+import sys
 import zlib
+from pathlib import Path
 
-from tools.triwhirl_tool.standup_trace import (
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from tools.triwhirl_tool.standup_trace import (  # noqa: E402
     FRAME_END,
     FRAME_START,
     HEADER,
