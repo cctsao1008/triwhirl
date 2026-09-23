@@ -12,6 +12,14 @@
 #include "triwhirl/ble_transport.hpp"
 #include "triwhirl/upright_geometry.hpp"
 
+#ifndef TRIWHIRL_GIT_SHA32
+#define TRIWHIRL_GIT_SHA32 0U
+#endif
+
+#ifndef TRIWHIRL_GIT_DIRTY
+#define TRIWHIRL_GIT_DIRTY 1
+#endif
+
 namespace triwhirl::runtime {
 namespace {
 
@@ -20,6 +28,8 @@ constexpr TickType_t kTraceIdleDelayTicks = pdMS_TO_TICKS(1);
 constexpr float kRadToDeg = 180.0F / triwhirl::kPi;
 constexpr float kTargetVelocityLimitRadS = 140.0F;
 constexpr float kVqLimitV = 4.0F;
+constexpr std::uint32_t kFirmwareGitSha32 = TRIWHIRL_GIT_SHA32;
+constexpr bool kFirmwareGitDirty = TRIWHIRL_GIT_DIRTY != 0;
 
 StandupTraceRecord trace_ring[kStandupTraceRingRecords]{};
 std::atomic<std::uint32_t> trace_head{0U};
@@ -27,6 +37,8 @@ std::atomic<std::uint32_t> trace_tail{0U};
 std::atomic<std::uint32_t> trace_sample_seq{0U};
 std::atomic<std::uint32_t> trace_frame_seq{0U};
 std::atomic<std::uint32_t> trace_dropped_records{0U};
+std::atomic<std::uint32_t> trace_last_sample_us{0U};
+std::atomic<std::uint32_t> trace_transport_drop_baseline{0U};
 std::atomic<bool> trace_active{false};
 std::atomic<bool> trace_start_pending{false};
 std::atomic<bool> trace_end_pending{false};
@@ -63,13 +75,18 @@ bool sendFrame(const StandupTraceRecord* records,
     StandupTraceRecord records[kStandupTraceRecordsPerFrame]{};
   } frame{};
 
-  frame.header.flags = frame_flags;
+  frame.header.flags = static_cast<std::uint8_t>(
+      frame_flags | (kFirmwareGitDirty ? kTraceFrameFirmwareDirty : 0U));
   frame.header.frame_seq = trace_frame_seq.load(std::memory_order_relaxed);
   frame.header.first_sample_seq = first_sample_seq;
   frame.header.sample_count = sample_count;
   frame.header.dropped_records =
       trace_dropped_records.load(std::memory_order_relaxed);
-  frame.header.transport_dropped_bytes = triwhirl::ble::traceTxDroppedBytes();
+  const std::uint32_t transport_now = triwhirl::ble::traceTxDroppedBytes();
+  const std::uint32_t transport_baseline =
+      trace_transport_drop_baseline.load(std::memory_order_relaxed);
+  frame.header.transport_dropped_bytes = transport_now - transport_baseline;
+  frame.header.firmware_git_sha32 = kFirmwareGitSha32;
 
   if (sample_count > 0U && records != nullptr) {
     std::memcpy(frame.records, records,
@@ -176,6 +193,9 @@ void startRuntimeStandupTrace() {
   trace_sample_seq.store(0U, std::memory_order_relaxed);
   trace_frame_seq.store(0U, std::memory_order_relaxed);
   trace_dropped_records.store(0U, std::memory_order_relaxed);
+  trace_last_sample_us.store(0U, std::memory_order_relaxed);
+  trace_transport_drop_baseline.store(triwhirl::ble::traceTxDroppedBytes(),
+                                      std::memory_order_relaxed);
   trace_end_pending.store(false, std::memory_order_release);
   trace_start_pending.store(true, std::memory_order_release);
   trace_active.store(true, std::memory_order_release);
@@ -188,6 +208,13 @@ void recordRuntimeStandupTrace(const triwhirl::StandupControllerInput& input,
 
   StandupTraceRecord record{};
   record.sample_seq = trace_sample_seq.fetch_add(1U, std::memory_order_relaxed);
+  const std::uint32_t previous_sample_us =
+      trace_last_sample_us.exchange(input.now_us, std::memory_order_relaxed);
+  const std::uint32_t dt_us = previous_sample_us == 0U
+                                  ? 0U
+                                  : input.now_us - previous_sample_us;
+  const bool dt_clamped = dt_us > 0xFFFFU;
+  record.dt_us = static_cast<std::uint16_t>(dt_clamped ? 0xFFFFU : dt_us);
   record.error_cdeg = quantizeSigned(output.theta_error_rad * kRadToDeg, 100.0F);
   record.theta_rate_mrad_s = quantizeSigned(input.theta_rate_rad_s, 1000.0F);
   record.filtered_rate_mrad_s =
@@ -212,6 +239,7 @@ void recordRuntimeStandupTrace(const triwhirl::StandupControllerInput& input,
     record.flags |= kTraceVqSaturated;
   }
   if (safety_faulted) record.flags |= kTraceSafetyFault;
+  if (dt_clamped) record.flags |= kTraceDtClamped;
 
   const std::uint32_t head = trace_head.load(std::memory_order_relaxed);
   const std::uint32_t tail = trace_tail.load(std::memory_order_acquire);
