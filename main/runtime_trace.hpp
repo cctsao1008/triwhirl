@@ -11,6 +11,10 @@ inline constexpr std::uint32_t kStandupTraceMagic = 0x52545754U;  // "TWTR"
 inline constexpr std::uint8_t kStandupTraceVersion = 2U;
 inline constexpr std::size_t kStandupTraceRingRecords = 512U;
 inline constexpr std::size_t kStandupTraceRecordsPerFrame = 7U;
+// Control remains at 1 kHz. Trace capture intentionally records every fifth
+// control update (nominal 200 Hz) so the measured Windows/Bleak link has ample
+// sustained-throughput margin while retaining 5 ms closed-loop resolution.
+inline constexpr std::uint32_t kStandupTraceDecimation = 5U;
 
 #pragma pack(push, 1)
 struct StandupTraceRecord {
