@@ -156,6 +156,14 @@ StandupControllerOutput StandupController::update(
     return output_;
   }
 
+  const bool entering_balance = !was_balancing_;
+  if (entering_balance) {
+    // Each capture attempt starts with a clean inner-loop state. The lossless
+    // 2026-09-23 trace showed failed captures leaving the integrator at -4 V,
+    // which made subsequent captures begin fully saturated.
+    resetVelocityLoop();
+  }
+
   const float vendor_rate_rad_s = std::clamp(
       input.theta_rate_rad_s, -config_.gyro_rate_limit_rad_s,
       config_.gyro_rate_limit_rad_s);
@@ -207,11 +215,21 @@ StandupControllerOutput StandupController::update(
   const float ki = stable_ ? config_.velocity_i_stable
                            : config_.velocity_i_unstable;
   if (dt_s > 0.0F && dt_s < 0.1F) {
-    velocity_integral_v_ +=
+    const float integral_delta =
         0.5F * ki * dt_s *
         (velocity_error + previous_velocity_error_rad_s_);
-    velocity_integral_v_ = std::clamp(
-        velocity_integral_v_, -config_.vq_limit_v, config_.vq_limit_v);
+    const float candidate_integral = std::clamp(
+        velocity_integral_v_ + integral_delta,
+        -config_.vq_limit_v, config_.vq_limit_v);
+    const float candidate_unclamped_vq =
+        kp * velocity_error + candidate_integral;
+    const bool pushes_positive_saturation =
+        candidate_unclamped_vq > config_.vq_limit_v && integral_delta > 0.0F;
+    const bool pushes_negative_saturation =
+        candidate_unclamped_vq < -config_.vq_limit_v && integral_delta < 0.0F;
+    if (!pushes_positive_saturation && !pushes_negative_saturation) {
+      velocity_integral_v_ = candidate_integral;
+    }
   }
   previous_velocity_error_rad_s_ = velocity_error;
 
