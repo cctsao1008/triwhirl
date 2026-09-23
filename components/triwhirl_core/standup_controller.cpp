@@ -134,15 +134,9 @@ StandupControllerOutput StandupController::update(
   }
   const float abs_error = std::fabs(error_rad);
 
-  // Enter the local controller at the seller's 9-degree boundary, but after a
-  // successful capture keep Balance engaged until 12 degrees. This prevents a
-  // near-upright 9.x/10.x-degree transient from instantly switching back to the
-  // 0.168 V swing pump and throwing away the corrective velocity-loop state.
   const bool hold_balance =
       was_balancing_ && abs_error < config_.balance_release_rad;
   if (!hold_balance && abs_error >= config_.balance_capture_rad) {
-    // Follow the seller firmware's proven swing-up law: torque sign follows
-    // body angular-rate sign, with reduced voltage in the near-capture region.
     if (std::fabs(input.theta_rate_rad_s) >= config_.rate_switch_rad_s) {
       swing_rate_sign_ = input.theta_rate_rad_s < 0.0F ? -1 : 1;
     }
@@ -156,22 +150,12 @@ StandupControllerOutput StandupController::update(
     output.stable = false;
     output.valid = true;
 
-    // Golden firmware assigns Gyro=0 in both swing branches, but it does not
-    // call controllerLQR() there. Therefore target_angle, stable,
-    // last_unstable_time and SimpleFOC PID_velocity state all survive the swing
-    // interval. Only clear the gyro helper and Balance-entry marker here.
     filtered_rate_rad_s_ = 0.0F;
     was_balancing_ = false;
     output_ = output;
     return output_;
   }
 
-  // Golden TRC-V1.1 runs the MPU6050 at +/-250 deg/s, then executes
-  //   Gyro = Gyro * 0.6 + gyroZrate * 0.4
-  // before controllerLQR(..., -Gyro, ...). Our runtime keeps a wider gyro range
-  // globally, so reproduce the seller's sensor saturation only at this control
-  // boundary. Gyro was cleared by the swing branch, so the first Balance sample
-  // naturally becomes 0.4*rate without resetting any velocity-loop state.
   const float vendor_rate_rad_s = std::clamp(
       input.theta_rate_rad_s, -config_.gyro_rate_limit_rad_s,
       config_.gyro_rate_limit_rad_s);
@@ -179,13 +163,6 @@ StandupControllerOutput StandupController::update(
       0.6F * filtered_rate_rad_s_ + 0.4F * vendor_rate_rad_s;
   was_balancing_ = true;
 
-  // Match controllerLQR() literally. The seller updates last_unstable_time only
-  // while the Balance branch is active and |p_angle| > 5 deg; swing-up does not
-  // refresh it. Consequently, if the first capture arrives directly inside 5
-  // deg after more than one second of swinging, the golden firmware immediately
-  // recenters target_angle and uses the gentler stable gain/PI set. The previous
-  // TriWhirl implementation restarted that one-second timer on every handoff,
-  // keeping the aggressive unstable controller active for an extra second.
   if (abs_error > config_.stable_angle_rad) {
     last_unstable_us_ = input.now_us;
     if (stable_) {
@@ -199,9 +176,6 @@ StandupControllerOutput StandupController::update(
     stable_ = true;
   }
 
-  // controllerLQR() uses the p_angle argument from the current outer-loop
-  // iteration even if it just adjusted target_angle. Keep that exact one-sample
-  // behavior; the new reference affects the next update.
   const float error_deg = error_rad * kRadToDeg;
   const float filtered_rate_deg_s = filtered_rate_rad_s_ * kRadToDeg;
   const float k_angle = stable_ ? config_.lqr_k_angle_stable
@@ -255,7 +229,11 @@ StandupControllerOutput StandupController::update(
   output.phase = StandupPhase::kBalance;
   output.theta_error_rad = error_rad;
   output.theta_reference_rad = theta_reference_rad_;
+  output.filtered_rate_rad_s = filtered_rate_rad_s_;
   output.target_velocity_rad_s = target_velocity;
+  output.velocity_error_rad_s = velocity_error;
+  output.velocity_integral_v = velocity_integral_v_;
+  output.vq_target_v = vq_target;
   output.vq_v = vq;
   output.stable = stable_;
   output.valid = std::isfinite(vq) && std::isfinite(target_velocity) &&
