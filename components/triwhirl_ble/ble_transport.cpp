@@ -34,7 +34,9 @@ constexpr char kTag[] = "triwhirl_ble";
 constexpr char kDeviceName[] = "TriWhirl";
 constexpr std::size_t kRxBufferBytes = 1024U;
 constexpr std::size_t kTxBufferBytes = 8192U;
+constexpr std::size_t kTraceTxBufferBytes = 8192U;
 constexpr std::size_t kTxScratchBytes = 512U;
+constexpr std::size_t kTraceMaxNotifyBytes = 240U;
 constexpr std::uint16_t kPreferredMtu = 256U;
 
 // UUIDs are expressed in the little-endian byte order expected by
@@ -48,18 +50,25 @@ static const ble_uuid128_t kRxUuid = BLE_UUID128_INIT(
 static const ble_uuid128_t kTxUuid = BLE_UUID128_INIT(
     0x4c, 0x48, 0x57, 0x49, 0x52, 0x54, 0x91, 0xb6,
     0x3a, 0x4f, 0x4d, 0x8f, 0x02, 0x00, 0xf1, 0x54);
+static const ble_uuid128_t kTraceUuid = BLE_UUID128_INIT(
+    0x4c, 0x48, 0x57, 0x49, 0x52, 0x54, 0x91, 0xb6,
+    0x3a, 0x4f, 0x4d, 0x8f, 0x03, 0x00, 0xf1, 0x54);
 
 StreamBufferHandle_t rx_stream = nullptr;
 StreamBufferHandle_t tx_stream = nullptr;
+StreamBufferHandle_t trace_tx_stream = nullptr;
 volatile std::uint16_t connection_handle = BLE_HS_CONN_HANDLE_NONE;
 volatile bool tx_subscribed = false;
+volatile bool trace_tx_subscribed = false;
 volatile bool initialized = false;
 std::uint16_t tx_value_handle = 0U;
+std::uint16_t trace_value_handle = 0U;
 std::uint8_t own_addr_type = 0U;
 std::uint32_t rx_dropped_bytes = 0U;
 std::uint32_t tx_dropped_bytes = 0U;
+std::uint32_t trace_tx_dropped_bytes = 0U;
 
-ble_gatt_chr_def characteristics[3]{};
+ble_gatt_chr_def characteristics[4]{};
 ble_gatt_svc_def services[2]{};
 
 int startAdvertising();
@@ -118,6 +127,12 @@ void buildGattTable() {
   characteristics[1].val_handle = &tx_value_handle;
 
   characteristics[2] = {};
+  characteristics[2].uuid = &kTraceUuid.u;
+  characteristics[2].access_cb = characteristicAccess;
+  characteristics[2].flags = BLE_GATT_CHR_F_NOTIFY;
+  characteristics[2].val_handle = &trace_value_handle;
+
+  characteristics[3] = {};
 
   services[0] = {};
   services[0].type = BLE_GATT_SVC_TYPE_PRIMARY;
@@ -136,6 +151,7 @@ int gapEvent(ble_gap_event* event, void*) {
       if (event->connect.status == 0) {
         connection_handle = event->connect.conn_handle;
         tx_subscribed = false;
+        trace_tx_subscribed = false;
       } else {
         startAdvertising();
       }
@@ -144,12 +160,15 @@ int gapEvent(ble_gap_event* event, void*) {
     case BLE_GAP_EVENT_DISCONNECT:
       connection_handle = BLE_HS_CONN_HANDLE_NONE;
       tx_subscribed = false;
+      trace_tx_subscribed = false;
       startAdvertising();
       return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
       if (event->subscribe.attr_handle == tx_value_handle) {
         tx_subscribed = event->subscribe.cur_notify != 0;
+      } else if (event->subscribe.attr_handle == trace_value_handle) {
+        trace_tx_subscribed = event->subscribe.cur_notify != 0;
       }
       return 0;
 
@@ -195,6 +214,7 @@ void onReset(int reason) {
   ESP_LOGE(kTag, "NimBLE reset reason=%d", reason);
   connection_handle = BLE_HS_CONN_HANDLE_NONE;
   tx_subscribed = false;
+  trace_tx_subscribed = false;
 }
 
 void onSync() {
@@ -214,17 +234,18 @@ void hostTask(void*) {
   nimble_port_freertos_deinit();
 }
 
-bool notifyChunk(const std::uint8_t* data, const std::size_t length) {
+bool notifyChunk(const std::uint16_t value_handle,
+                 const std::uint8_t* data,
+                 const std::size_t length) {
   const std::uint16_t conn = connection_handle;
-  if (conn == BLE_HS_CONN_HANDLE_NONE || !tx_subscribed || data == nullptr ||
-      length == 0U) {
+  if (conn == BLE_HS_CONN_HANDLE_NONE || data == nullptr || length == 0U) {
     return false;
   }
   os_mbuf* om = ble_hs_mbuf_from_flat(data, length);
   if (om == nullptr) {
     return false;
   }
-  return ble_gatts_notify_custom(conn, tx_value_handle, om) == 0;
+  return ble_gatts_notify_custom(conn, value_handle, om) == 0;
 }
 
 void txTask(void*) {
@@ -247,15 +268,51 @@ void txTask(void*) {
     std::size_t offset = 0U;
     while (offset < received) {
       const std::size_t count = std::min(chunk, received - offset);
-      while (!notifyChunk(buffer + offset, count)) {
+      while (!notifyChunk(tx_value_handle, buffer + offset, count)) {
         if (connection_handle == BLE_HS_CONN_HANDLE_NONE || !tx_subscribed) {
           tx_dropped_bytes += static_cast<std::uint32_t>(received - offset);
           offset = received;
           break;
         }
-        // NimBLE can temporarily reject a notification while controller buffers
-        // are full. Preserve ordering and retry instead of dropping binary dump
-        // bytes. Backpressure propagates through tx_stream to writeBlocking().
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
+      if (offset < received) {
+        offset += count;
+      }
+    }
+  }
+}
+
+void traceTxTask(void*) {
+  std::uint8_t buffer[kTxScratchBytes];
+  while (true) {
+    const std::size_t received = xStreamBufferReceive(
+        trace_tx_stream, buffer, sizeof(buffer), portMAX_DELAY);
+    if (received == 0U) {
+      continue;
+    }
+
+    const std::uint16_t conn = connection_handle;
+    if (conn == BLE_HS_CONN_HANDLE_NONE || !trace_tx_subscribed) {
+      trace_tx_dropped_bytes += static_cast<std::uint32_t>(received);
+      continue;
+    }
+
+    const std::uint16_t mtu = ble_att_mtu(conn);
+    const std::size_t att_payload =
+        mtu > 3U ? static_cast<std::size_t>(mtu - 3U) : 20U;
+    const std::size_t chunk = std::min(att_payload, kTraceMaxNotifyBytes);
+    std::size_t offset = 0U;
+    while (offset < received) {
+      const std::size_t count = std::min(chunk, received - offset);
+      while (!notifyChunk(trace_value_handle, buffer + offset, count)) {
+        if (connection_handle == BLE_HS_CONN_HANDLE_NONE ||
+            !trace_tx_subscribed) {
+          trace_tx_dropped_bytes +=
+              static_cast<std::uint32_t>(received - offset);
+          offset = received;
+          break;
+        }
         vTaskDelay(pdMS_TO_TICKS(1));
       }
       if (offset < received) {
@@ -276,6 +333,41 @@ bool initNvs() {
   return result == ESP_OK;
 }
 
+std::size_t writeBlockingTo(StreamBufferHandle_t stream,
+                            volatile std::uint32_t* dropped,
+                            const std::uint8_t* data,
+                            const std::size_t length,
+                            const std::uint32_t timeout_ms) {
+  if (data == nullptr || length == 0U || stream == nullptr ||
+      connection_handle == BLE_HS_CONN_HANDLE_NONE) {
+    return 0U;
+  }
+
+  const TickType_t start = xTaskGetTickCount();
+  const TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+  std::size_t total = 0U;
+  while (total < length) {
+    if (connection_handle == BLE_HS_CONN_HANDLE_NONE) {
+      break;
+    }
+    const TickType_t elapsed = xTaskGetTickCount() - start;
+    if (elapsed >= timeout) {
+      break;
+    }
+    const TickType_t remaining = timeout - elapsed;
+    const std::size_t sent = xStreamBufferSend(
+        stream, data + total, length - total, remaining);
+    if (sent == 0U) {
+      break;
+    }
+    total += sent;
+  }
+  if (total < length && dropped != nullptr) {
+    *dropped += static_cast<std::uint32_t>(length - total);
+  }
+  return total;
+}
+
 }  // namespace
 
 bool init() {
@@ -288,7 +380,8 @@ bool init() {
 
   rx_stream = xStreamBufferCreate(kRxBufferBytes, 1U);
   tx_stream = xStreamBufferCreate(kTxBufferBytes, 1U);
-  if (rx_stream == nullptr || tx_stream == nullptr) {
+  trace_tx_stream = xStreamBufferCreate(kTraceTxBufferBytes, 1U);
+  if (rx_stream == nullptr || tx_stream == nullptr || trace_tx_stream == nullptr) {
     return false;
   }
 
@@ -320,6 +413,10 @@ bool init() {
                               nullptr, 0) != pdPASS) {
     return false;
   }
+  if (xTaskCreatePinnedToCore(traceTxTask, "triwhirl_trace_tx", 4096, nullptr,
+                              2, nullptr, 0) != pdPASS) {
+    return false;
+  }
 
   initialized = true;
   nimble_port_freertos_init(hostTask);
@@ -348,34 +445,16 @@ std::size_t write(const std::uint8_t* data, const std::size_t length) {
 std::size_t writeBlocking(const std::uint8_t* data,
                           const std::size_t length,
                           const std::uint32_t timeout_ms) {
-  if (data == nullptr || length == 0U || tx_stream == nullptr ||
-      connection_handle == BLE_HS_CONN_HANDLE_NONE || !tx_subscribed) {
-    return 0U;
-  }
+  if (!tx_subscribed) return 0U;
+  return writeBlockingTo(tx_stream, &tx_dropped_bytes, data, length, timeout_ms);
+}
 
-  const TickType_t start = xTaskGetTickCount();
-  const TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
-  std::size_t total = 0U;
-  while (total < length) {
-    if (connection_handle == BLE_HS_CONN_HANDLE_NONE || !tx_subscribed) {
-      break;
-    }
-    const TickType_t elapsed = xTaskGetTickCount() - start;
-    if (elapsed >= timeout) {
-      break;
-    }
-    const TickType_t remaining = timeout - elapsed;
-    const std::size_t sent = xStreamBufferSend(
-        tx_stream, data + total, length - total, remaining);
-    if (sent == 0U) {
-      break;
-    }
-    total += sent;
-  }
-  if (total < length) {
-    tx_dropped_bytes += static_cast<std::uint32_t>(length - total);
-  }
-  return total;
+std::size_t traceWriteBlocking(const std::uint8_t* data,
+                               const std::size_t length,
+                               const std::uint32_t timeout_ms) {
+  if (!trace_tx_subscribed) return 0U;
+  return writeBlockingTo(trace_tx_stream, &trace_tx_dropped_bytes, data, length,
+                         timeout_ms);
 }
 
 bool connected() {
@@ -386,12 +465,20 @@ bool subscribed() {
   return tx_subscribed;
 }
 
+bool traceSubscribed() {
+  return trace_tx_subscribed;
+}
+
 std::uint32_t rxDroppedBytes() {
   return rx_dropped_bytes;
 }
 
 std::uint32_t txDroppedBytes() {
   return tx_dropped_bytes;
+}
+
+std::uint32_t traceTxDroppedBytes() {
+  return trace_tx_dropped_bytes;
 }
 
 }  // namespace ble
@@ -408,10 +495,16 @@ std::size_t write(const std::uint8_t*, std::size_t) { return 0U; }
 std::size_t writeBlocking(const std::uint8_t*, std::size_t, std::uint32_t) {
   return 0U;
 }
+std::size_t traceWriteBlocking(const std::uint8_t*, std::size_t,
+                               std::uint32_t) {
+  return 0U;
+}
 bool connected() { return false; }
 bool subscribed() { return false; }
+bool traceSubscribed() { return false; }
 std::uint32_t rxDroppedBytes() { return 0U; }
 std::uint32_t txDroppedBytes() { return 0U; }
+std::uint32_t traceTxDroppedBytes() { return 0U; }
 
 }  // namespace ble
 }  // namespace triwhirl
