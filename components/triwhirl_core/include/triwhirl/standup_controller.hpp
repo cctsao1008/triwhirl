@@ -80,7 +80,11 @@ struct StandupControllerOutput {
   StandupPhase phase = StandupPhase::kIdle;
   float theta_reference_rad = 0.0F;
   float theta_error_rad = 0.0F;
+  float filtered_rate_rad_s = 0.0F;
   float target_velocity_rad_s = 0.0F;
+  float velocity_error_rad_s = 0.0F;
+  float velocity_integral_v = 0.0F;
+  float vq_target_v = 0.0F;
   float vq_v = 0.0F;
 };
 
