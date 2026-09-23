@@ -12,7 +12,8 @@ from typing import Any
 
 TRACE_MAGIC = b"TWTR"
 TRACE_VERSION = 2
-HEADER = struct.Struct("<IBBBBIIIIII")
+TRACE_RECORDS_PER_FRAME = 7
+HEADER = struct.Struct("<IBBBBIIIIIIIIII")
 RECORD = struct.Struct("<IHhhhhhhhhhH")
 FRAME_START = 1 << 0
 FRAME_END = 1 << 1
@@ -53,7 +54,7 @@ class StandupTraceCapture:
 def _git_head() -> str | None:
     try:
         completed = subprocess.run(
-            ["git", "rev-parse", "--short=8", "HEAD"],
+            ["git", "rev-parse", "HEAD"],
             check=False,
             capture_output=True,
             text=True,
@@ -61,7 +62,11 @@ def _git_head() -> str | None:
     except OSError:
         return None
     value = completed.stdout.strip().lower()
-    return value if completed.returncode == 0 and len(value) == 8 else None
+    return value if completed.returncode == 0 and len(value) == 40 else None
+
+
+def _git_words_to_hex(words: tuple[int, int, int, int, int]) -> str:
+    return "".join(f"{word:08x}" for word in words)
 
 
 def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> dict[str, Any]:
@@ -81,7 +86,7 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
     end_seen = False
     max_dropped_records = 0
     max_transport_dropped_bytes = 0
-    firmware_git_sha32: int | None = None
+    firmware_git_words: tuple[int, int, int, int, int] | None = None
     firmware_identity_errors = 0
     firmware_dirty = False
     elapsed_us = 0
@@ -98,24 +103,28 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
             offset = next_magic
             continue
 
-        (
-            magic,
-            version,
-            record_size,
-            sample_count,
-            frame_flags,
-            frame_seq,
-            first_sample_seq,
-            dropped_records,
-            transport_dropped_bytes,
-            frame_firmware_git_sha32,
-            payload_crc32,
-        ) = HEADER.unpack_from(data, offset)
+        unpacked = HEADER.unpack_from(data, offset)
+        magic = unpacked[0]
+        version = unpacked[1]
+        record_size = unpacked[2]
+        sample_count = unpacked[3]
+        frame_flags = unpacked[4]
+        frame_seq = unpacked[5]
+        first_sample_seq = unpacked[6]
+        dropped_records = unpacked[7]
+        transport_dropped_bytes = unpacked[8]
+        frame_firmware_words = tuple(unpacked[9:14])
+        payload_crc32 = unpacked[14]
+
         if magic != int.from_bytes(TRACE_MAGIC, "little"):
             offset += 1
             framing_skipped += 1
             continue
-        if version != TRACE_VERSION or record_size != RECORD.size or sample_count > 8:
+        if (
+            version != TRACE_VERSION
+            or record_size != RECORD.size
+            or sample_count > TRACE_RECORDS_PER_FRAME
+        ):
             offset += 1
             framing_skipped += 1
             continue
@@ -135,9 +144,16 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
             frame_sequence_errors += 1
         expected_frame_seq = (frame_seq + 1) & 0xFFFFFFFF
 
-        if firmware_git_sha32 is None:
-            firmware_git_sha32 = frame_firmware_git_sha32
-        elif frame_firmware_git_sha32 != firmware_git_sha32:
+        typed_words = (
+            int(frame_firmware_words[0]),
+            int(frame_firmware_words[1]),
+            int(frame_firmware_words[2]),
+            int(frame_firmware_words[3]),
+            int(frame_firmware_words[4]),
+        )
+        if firmware_git_words is None:
+            firmware_git_words = typed_words
+        elif typed_words != firmware_git_words:
             firmware_identity_errors += 1
         firmware_dirty = firmware_dirty or bool(frame_flags & FRAME_FIRMWARE_DIRTY)
         start_seen = start_seen or bool(frame_flags & FRAME_START)
@@ -221,7 +237,7 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
                 "crc_ok": crc_ok,
                 "dropped_records": dropped_records,
                 "transport_dropped_bytes": transport_dropped_bytes,
-                "firmware_git_sha32": frame_firmware_git_sha32,
+                "firmware_git_head": _git_words_to_hex(typed_words),
                 "record_start": frame_record_start,
             }
         )
@@ -231,6 +247,11 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
     dt_max_us = max(measured_dt_us) if measured_dt_us else None
     dt_mean_us = (
         sum(measured_dt_us) / len(measured_dt_us) if measured_dt_us else None
+    )
+    firmware_git_head = (
+        _git_words_to_hex(firmware_git_words)
+        if firmware_git_words is not None
+        else None
     )
     return {
         "frames": frames,
@@ -248,7 +269,7 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
         "end_seen": end_seen,
         "max_dropped_records": max_dropped_records,
         "max_transport_dropped_bytes": max_transport_dropped_bytes,
-        "firmware_git_sha32": firmware_git_sha32,
+        "firmware_git_head": firmware_git_head,
         "firmware_dirty": firmware_dirty,
         "firmware_identity_errors": firmware_identity_errors,
         "dt_clamped_records": dt_clamped_records,
@@ -276,7 +297,7 @@ def trace_end_seen(raw: bytes | bytearray) -> bool:
             if (
                 version == TRACE_VERSION
                 and record_size == RECORD.size
-                and sample_count <= 8
+                and sample_count <= TRACE_RECORDS_PER_FRAME
                 and pos + frame_bytes <= len(data)
                 and flags & FRAME_END
             ):
@@ -334,18 +355,15 @@ def save_trace(
         )
 
     host_git_head = _git_head()
-    firmware_git_sha32 = parsed["firmware_git_sha32"]
-    firmware_git_sha8 = (
-        f"{firmware_git_sha32:08x}" if firmware_git_sha32 is not None else None
-    )
+    firmware_git_head = parsed["firmware_git_head"]
     provenance_ok = bool(
-        firmware_git_sha8
-        and firmware_git_sha8 != "00000000"
+        firmware_git_head
+        and firmware_git_head != "0" * 40
         and not parsed["firmware_dirty"]
         and parsed["firmware_identity_errors"] == 0
     )
     host_matches_firmware = bool(
-        provenance_ok and host_git_head and host_git_head == firmware_git_sha8
+        provenance_ok and host_git_head and host_git_head == firmware_git_head
     )
     lossless = bool(
         parsed["start_seen"]
@@ -371,7 +389,7 @@ def save_trace(
     summary: dict[str, Any] = {
         "format": "TWTR2",
         "host_git_head": host_git_head,
-        "firmware_git_sha8": firmware_git_sha8,
+        "firmware_git_head": firmware_git_head,
         "firmware_dirty": parsed["firmware_dirty"],
         "firmware_identity_errors": parsed["firmware_identity_errors"],
         "provenance_ok": provenance_ok,
