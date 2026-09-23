@@ -21,12 +21,17 @@ from .log import (
     _wait_console,
 )
 
+CONTROL_RATE_HZ = 1000
+TRACE_DECIMATION = 5
+TRACE_RATE_HZ = CONTROL_RATE_HZ // TRACE_DECIMATION
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run the firmware-owned TRC-V1.1 vendor-aligned autonomous "
-            "swing-up -> balance controller while capturing its 1 kHz binary trace."
+            "swing-up -> balance controller while capturing its decimated "
+            "binary control trace."
         )
     )
     parser.add_argument(
@@ -164,13 +169,14 @@ def _save_trace_report(
     raw_path, csv_path, json_path, summary = save_trace(
         capture, prefix, run_metadata=run_metadata
     )
-    dt_min = summary["control_dt_min_us"]
-    dt_max = summary["control_dt_max_us"]
-    dt_mean = summary["control_dt_mean_us"]
+    dt_min = summary["trace_dt_min_us"]
+    dt_max = summary["trace_dt_max_us"]
+    dt_mean = summary["trace_dt_mean_us"]
     print(
         "standup_trace,"
         f"acceptance={'PASS' if summary['trace_acceptance_pass'] else 'FAIL'},"
         f"records={summary['records']},"
+        f"trace_rate_hz={summary['trace_sample_rate_hz']:.3f},"
         f"missing={summary['missing_samples']},"
         f"ring_drops={summary['ring_dropped_records']},"
         f"transport_drops={summary['transport_dropped_bytes']},"
@@ -204,9 +210,6 @@ def _save_trace_report(
             )
             print(f"standup_plot={plot_path}")
         except (OSError, RuntimeError, ValueError) as exc:
-            # Plotting is post-run analysis only. Never invalidate a successful
-            # acquisition because an optional host visualization dependency is
-            # missing or a desktop backend cannot open.
             print(f"WARN standup plot not generated: {exc}")
 
 
@@ -216,6 +219,9 @@ async def _run(args: argparse.Namespace) -> int:
         "requested_duration_s": args.duration,
         "imu_calibration_samples": args.imu_samples,
         "upright_reference_deg": 68.0,
+        "control_rate_hz_nominal": CONTROL_RATE_HZ,
+        "trace_decimation": TRACE_DECIMATION,
+        "trace_rate_hz_nominal": TRACE_RATE_HZ,
         "motor_config": {
             "pole_pairs": pole_pairs,
             "sensor_dir": sensor_dir,
@@ -238,7 +244,9 @@ async def _run(args: argparse.Namespace) -> int:
                     "standup trace characteristic unavailable; build/flash the latest firmware"
                 ) from exc
             await asyncio.sleep(0.05)
-            print("standup trace armed: 1 kHz binary stream -> host RAM")
+            print(
+                f"standup trace armed: {TRACE_RATE_HZ} Hz from 1 kHz control -> host RAM"
+            )
 
         await transport.send("motor stop")
         print(await _wait_console(transport, prefixes=("OK motor stop",), timeout_s=args.timeout))
