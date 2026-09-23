@@ -97,6 +97,48 @@ void testVendorGyroEnvelopeOnCapture() {
   assert(expected_second_target < -140.0F);
 }
 
+void testVendorStableCaptureAfterSwing() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  triwhirl::StandupController controller(config);
+
+  triwhirl::StandupControllerInput input{};
+  input.valid = true;
+  input.now_us = 1000U;
+  input.theta_rad = degToRad(0.0F);
+  input.theta_rate_rad_s = 0.5F;
+  input.wheel_rate_rad_s = 0.0F;
+  controller.reset(input);
+
+  // The golden outer loop spends this entire interval in torque-mode swing-up;
+  // controllerLQR() is not called, so last_unstable_time is not refreshed.
+  input.now_us += config.stable_delay_us + 1000U;
+  auto swing = controller.update(input);
+  assert(swing.phase == triwhirl::StandupPhase::kSwingHigh);
+
+  // Arriving directly inside +/-5 deg after that swing immediately satisfies the
+  // seller's stable-time test. It recenters target_angle and uses the stable
+  // LQR/velocity-PI gain set on this very first capture call.
+  input.now_us += 1000U;
+  input.theta_rad = degToRad(67.0F);  // -1 deg relative to the nominal 68 deg.
+  input.theta_rate_rad_s = 0.0F;
+  input.wheel_rate_rad_s = 0.0F;
+  const auto capture = controller.update(input);
+  assert(capture.phase == triwhirl::StandupPhase::kBalance);
+  assert(capture.stable);
+  assert(std::fabs(capture.theta_reference_rad - degToRad(67.0F)) < 1.0e-5F);
+  // controllerLQR() still uses the current call's original p_angle (-1 deg), so
+  // stable K_angle=-6.5 produces +6.5 rad/s before the velocity PI.
+  assert(std::fabs(capture.target_velocity_rad_s - 6.5F) < 0.02F);
+
+  // The shifted reference takes effect on the next outer-loop iteration.
+  input.now_us += 1000U;
+  const auto next = controller.update(input);
+  assert(next.phase == triwhirl::StandupPhase::kBalance);
+  assert(next.stable);
+  assert(std::fabs(next.theta_error_rad) < 1.0e-5F);
+}
+
 void testVelocityOutputRamp() {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = degToRad(68.0F);
@@ -183,6 +225,7 @@ void testStableTransitionAndRecovery() {
 int main() {
   testSwingAndCaptureLaw();
   testVendorGyroEnvelopeOnCapture();
+  testVendorStableCaptureAfterSwing();
   testVelocityOutputRamp();
   testPeriodicVerticesShareBalanceLaw();
   testStableTransitionAndRecovery();
