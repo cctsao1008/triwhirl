@@ -6,7 +6,7 @@ import json
 import math
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from ..ble import DEVICE_NAME, TRACE_UUID
 from ..host_log import host_print as print
@@ -157,34 +157,42 @@ def _save_trace_report(
     capture: StandupTraceCapture,
     prefix: Path,
     *,
+    run_metadata: dict[str, Any],
     plot: bool = False,
     show_plot: bool = False,
 ) -> None:
-    raw_path, csv_path, json_path, summary = save_trace(capture, prefix)
+    raw_path, csv_path, json_path, summary = save_trace(
+        capture, prefix, run_metadata=run_metadata
+    )
+    dt_min = summary["control_dt_min_us"]
+    dt_max = summary["control_dt_max_us"]
+    dt_mean = summary["control_dt_mean_us"]
     print(
         "standup_trace,"
+        f"acceptance={'PASS' if summary['trace_acceptance_pass'] else 'FAIL'},"
         f"records={summary['records']},"
         f"missing={summary['missing_samples']},"
         f"ring_drops={summary['ring_dropped_records']},"
         f"transport_drops={summary['transport_dropped_bytes']},"
         f"crc_errors={summary['crc_errors']},"
+        f"firmware={summary['firmware_git_sha8']},"
+        f"dirty={1 if summary['firmware_dirty'] else 0},"
+        f"host_match={1 if summary['host_matches_firmware'] else 0},"
+        f"dt_min_us={dt_min if dt_min is not None else 'na'},"
+        f"dt_mean_us={dt_mean if dt_mean is not None else 'na'},"
+        f"dt_max_us={dt_max if dt_max is not None else 'na'},"
         f"max_notify_gap_ms={summary['max_notification_gap_ms']:.3f},"
         f"throughput_kB_s={summary['receive_throughput_kB_s']:.3f}"
     )
     print(f"standup_trace_raw={raw_path}")
     print(f"standup_trace_csv={csv_path}")
     print(f"standup_trace_meta={json_path}")
-    if (
-        not summary["start_seen"]
-        or not summary["end_seen"]
-        or summary["crc_errors"]
-        or summary["frame_sequence_errors"]
-        or summary["sample_sequence_errors"]
-        or summary["ring_dropped_records"]
-        or summary["transport_dropped_bytes"]
-        or summary["framing_skipped_bytes"]
-    ):
+    if not summary["trace_lossless"]:
         print("WARN standup trace is not lossless; inspect the JSON metadata before tuning")
+    if not summary["provenance_ok"]:
+        print("WARN firmware provenance is unavailable or dirty; rebuild from a clean git commit")
+    elif not summary["host_matches_firmware"]:
+        print("WARN host checkout and flashed firmware commits differ")
 
     if plot or show_plot:
         try:
@@ -204,6 +212,16 @@ def _save_trace_report(
 
 async def _run(args: argparse.Namespace) -> int:
     pole_pairs, sensor_dir, offset_rad = _load_motor_config(args.motor_config)
+    run_metadata: dict[str, Any] = {
+        "requested_duration_s": args.duration,
+        "imu_calibration_samples": args.imu_samples,
+        "upright_reference_deg": 68.0,
+        "motor_config": {
+            "pole_pairs": pole_pairs,
+            "sensor_dir": sensor_dir,
+            "offset_rad": offset_rad,
+        },
+    }
     client, transport = await _open_line_transport(args)
     started = False
     trace_capture: StandupTraceCapture | None = None
@@ -293,6 +311,7 @@ async def _run(args: argparse.Namespace) -> int:
             _save_trace_report(
                 trace_capture,
                 trace_prefix,
+                run_metadata=run_metadata,
                 plot=args.plot or args.show_plot,
                 show_plot=args.show_plot,
             )
@@ -323,6 +342,7 @@ async def _run(args: argparse.Namespace) -> int:
                 _save_trace_report(
                     trace_capture,
                     trace_prefix,
+                    run_metadata=run_metadata,
                     plot=args.plot or args.show_plot,
                     show_plot=args.show_plot,
                 )
