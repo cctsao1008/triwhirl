@@ -164,6 +164,27 @@ def main() -> None:
     corrupt_parsed = parse_trace(corrupted)
     assert corrupt_parsed["crc_errors"] >= 1
 
+    # Regression for the first hardware trace: a timed-out byte-stream enqueue
+    # had emitted a partial prefix and then retried the complete frame. The
+    # decoder must resynchronize at the retried TWTR magic without trusting the
+    # CRC-failed frame's counters/provenance.
+    retried = frame(1, 0, [record(0, 0), record(1, 1000)])
+    partial_retry = b"".join(
+        (
+            frame(0, 0, [], FRAME_START),
+            retried[:16],
+            retried,
+            frame(2, 2, [], FRAME_END),
+        )
+    )
+    retry_parsed = parse_trace(partial_retry, tolerate_trailing=False)
+    assert retry_parsed["crc_errors"] == 1
+    assert retry_parsed["framing_skipped_bytes"] == 16
+    assert retry_parsed["frame_sequence_errors"] == 0
+    assert retry_parsed["sample_sequence_errors"] == 0
+    assert retry_parsed["firmware_identity_errors"] == 0
+    assert len(retry_parsed["records"]) == 2
+
     capture = StandupTraceCapture()
     capture.raw.extend(blob)
     with tempfile.TemporaryDirectory() as temporary:
@@ -177,8 +198,9 @@ def main() -> None:
         assert summary["firmware_git_head"] == FIRMWARE_HEAD
         assert summary["provenance_ok"]
         assert summary["trace_lossless"]
-        assert summary["control_dt_min_us"] == 995
-        assert summary["control_dt_max_us"] == 1005
+        assert summary["trace_dt_min_us"] == 995
+        assert summary["trace_dt_max_us"] == 1005
+        assert abs(summary["trace_sample_rate_hz"] - 1000.0) < 1e-9
         saved = json.loads(json_path.read_text(encoding="utf-8"))
         assert saved["run"]["requested_duration_s"] == 1.0
 
