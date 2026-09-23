@@ -96,7 +96,7 @@ python tools/twtool.py control standup --duration 10 --plot
 
 The TWTR2 trace records the measured inter-sample `dt_us` from the firmware control clock rather than reconstructing time from an assumed 1 kHz period. Each frame also carries the full 160-bit git commit embedded into the flashed firmware plus a dirty-worktree flag. The JSON sidecar records the host commit separately and reports whether host and firmware revisions match.
 
-The end-of-run `standup_trace` summary reports a formal acquisition result. `acceptance=PASS` requires START/END markers, valid CRC and frame/sample sequences, no missing/reordered samples, no ESP32 ring or BLE transport drops, no malformed/trailing bytes, no clamped/zero noninitial `dt_us`, and clean firmware provenance. BLE transport-drop accounting is reset logically at the start of each trace so an older failed run does not contaminate the next run.
+The end-of-run `standup_trace` summary reports a strict acquisition result. `acceptance=PASS` requires START/END markers, valid CRC and frame/sample sequences, no missing/reordered samples, no ESP32 ring or BLE transport drops, no malformed/trailing bytes, no clamped/zero noninitial `dt_us`, clean firmware provenance, and an exact host/firmware git-commit match. BLE transport-drop accounting is reset logically at the start of each trace so an older failed run does not contaminate the next run.
 
 Use `--show-plot` to save the PNG and also open it interactively. Plotting is post-run only and never participates in the BLE callback or realtime control path.
 
