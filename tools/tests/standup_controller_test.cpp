@@ -206,7 +206,9 @@ void testConditionalAntiWindup() {
   config.lqr_k_angle_unstable = -10.0F;
   config.lqr_k_rate_unstable = 0.0F;
   config.lqr_k_wheel_unstable = 0.0F;
-  config.velocity_p_unstable = 0.0F;
+  // Proportional action alone is deliberately beyond the 1 V output rail. The
+  // integral must therefore be held instead of accumulating in the same sign.
+  config.velocity_p_unstable = 0.10F;
   config.velocity_i_unstable = 100.0F;
   config.velocity_target_limit_rad_s = 60.0F;
   config.vq_limit_v = 1.0F;
@@ -226,9 +228,8 @@ void testConditionalAntiWindup() {
     output = controller.update(input);
   }
   assert(output.phase == triwhirl::StandupPhase::kBalance);
-  // Conditional integration must not pin the integral at the output rail while
-  // the velocity error keeps asking for more voltage in the saturated direction.
-  assert(std::fabs(output.velocity_integral_v) < config.vq_limit_v - 1.0e-4F);
+  assert(std::fabs(output.vq_target_v - config.vq_limit_v) < 1.0e-6F);
+  assert(std::fabs(output.velocity_integral_v) < 1.0e-6F);
 }
 
 void testPeriodicVerticesShareBalanceLaw() {
