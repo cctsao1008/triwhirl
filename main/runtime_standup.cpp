@@ -6,6 +6,7 @@
 #include "runtime_egress.hpp"
 #include "runtime_release.hpp"
 #include "runtime_state.hpp"
+#include "runtime_trace.hpp"
 #include "triwhirl/safety.hpp"
 #include "triwhirl/upright_geometry.hpp"
 
@@ -13,14 +14,7 @@ namespace triwhirl::runtime {
 namespace {
 
 constexpr float kDefaultThetaReferenceRad = 68.0F * triwhirl::kPi / 180.0F;
-// The vendor velocity target is limited to 140 rad/s. Keep a small physical
-// margin above that target before treating wheel speed as a hard standup fault.
 constexpr float kStandupWheelHardLimitRadS = 160.0F;
-// The Core-0 sensor pipeline is latest-only and may occasionally skip one IMU
-// generation without an actual I2C failure. Do not turn that isolated scheduler
-// phase slip into an immediate standup fault. Six milliseconds matches the
-// runtime's existing 3 ms nominal + 3 ms transient sensor-freshness envelope;
-// a genuinely stale IMU stream still stops the motor within a few control ticks.
 constexpr std::uint32_t kStandupImuGraceUs = 6000U;
 
 triwhirl::StandupControllerConfig standup_config{};
@@ -57,6 +51,7 @@ void tripStandupFault(const triwhirl::SafetyFault fault) {
   state::safety_latch.trip(fault);
   standup_active = false;
   standup_last_valid_imu_us = 0U;
+  stopRuntimeStandupTrace();
   state::stopMotor();
   if ((before & triwhirl::safetyFaultMask(fault)) == 0U) {
     RuntimeStateEvent event{};
@@ -123,6 +118,8 @@ StandupStartFailure startRuntimeStandup() {
   state::vq_command_v = state::clampFinite(
       output.vq_v, -state::kMotorVectorLimitV, state::kMotorVectorLimitV);
   state::motor_mode = state::MotorMode::kFoc;
+  startRuntimeStandupTrace();
+  recordRuntimeStandupTrace(input, output, false);
   return StandupStartFailure::kNone;
 }
 
@@ -133,6 +130,7 @@ void stopRuntimeStandup() {
   }
   standup_active = false;
   standup_last_valid_imu_us = 0U;
+  stopRuntimeStandupTrace();
   state::stopMotor();
 }
 
@@ -145,12 +143,14 @@ void updateRuntimeStandup(const std::uint32_t now_us) {
   if (state::safety_latch.faulted()) {
     standup_active = false;
     standup_last_valid_imu_us = 0U;
+    stopRuntimeStandupTrace();
     state::stopMotor();
     return;
   }
   if (state::motor_mode != state::MotorMode::kFoc) {
     standup_active = false;
     standup_last_valid_imu_us = 0U;
+    stopRuntimeStandupTrace();
     state::stopMotor();
     return;
   }
@@ -171,14 +171,15 @@ void updateRuntimeStandup(const std::uint32_t now_us) {
     return;
   }
 
-  const auto output =
-      standup_controller.update(currentStandupInput(now_us, imu_usable));
+  const auto input = currentStandupInput(now_us, imu_usable);
+  const auto output = standup_controller.update(input);
   if (!output.valid || !std::isfinite(output.vq_v)) {
     tripStandupFault(triwhirl::SafetyFault::kInvalidNumeric);
     return;
   }
   state::vq_command_v = state::clampFinite(
       output.vq_v, -state::kMotorVectorLimitV, state::kMotorVectorLimitV);
+  recordRuntimeStandupTrace(input, output, state::safety_latch.faulted());
 }
 
 bool runtimeStandupActive() { return standup_active; }
