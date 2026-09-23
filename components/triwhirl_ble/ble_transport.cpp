@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/message_buffer.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "host/ble_att.h"
@@ -38,6 +39,10 @@ constexpr std::size_t kTraceTxBufferBytes = 8192U;
 constexpr std::size_t kTxScratchBytes = 512U;
 constexpr std::size_t kTraceMaxNotifyBytes = 240U;
 constexpr std::uint16_t kPreferredMtu = 256U;
+constexpr std::uint16_t kFastConnIntervalMin = 6U;   // 7.5 ms
+constexpr std::uint16_t kFastConnIntervalMax = 12U;  // 15 ms
+constexpr std::uint16_t kFastConnLatency = 0U;
+constexpr std::uint16_t kFastConnSupervisionTimeout = 400U;  // 4 s
 
 // UUIDs are expressed in the little-endian byte order expected by
 // BLE_UUID128_INIT.
@@ -56,7 +61,7 @@ static const ble_uuid128_t kTraceUuid = BLE_UUID128_INIT(
 
 StreamBufferHandle_t rx_stream = nullptr;
 StreamBufferHandle_t tx_stream = nullptr;
-StreamBufferHandle_t trace_tx_stream = nullptr;
+MessageBufferHandle_t trace_tx_messages = nullptr;
 volatile std::uint16_t connection_handle = BLE_HS_CONN_HANDLE_NONE;
 volatile bool tx_subscribed = false;
 volatile bool trace_tx_subscribed = false;
@@ -141,6 +146,20 @@ void buildGattTable() {
   services[1] = {};
 }
 
+void requestFastConnectionParameters(const std::uint16_t handle) {
+  ble_gap_upd_params params{};
+  params.itvl_min = kFastConnIntervalMin;
+  params.itvl_max = kFastConnIntervalMax;
+  params.latency = kFastConnLatency;
+  params.supervision_timeout = kFastConnSupervisionTimeout;
+  params.min_ce_len = 0U;
+  params.max_ce_len = 0U;
+  const int rc = ble_gap_update_params(handle, &params);
+  if (rc != 0) {
+    ESP_LOGW(kTag, "BLE connection-parameter update request failed rc=%d", rc);
+  }
+}
+
 int gapEvent(ble_gap_event* event, void*) {
   if (event == nullptr) {
     return 0;
@@ -152,6 +171,7 @@ int gapEvent(ble_gap_event* event, void*) {
         connection_handle = event->connect.conn_handle;
         tx_subscribed = false;
         trace_tx_subscribed = false;
+        requestFastConnectionParameters(event->connect.conn_handle);
       } else {
         startAdvertising();
       }
@@ -286,8 +306,10 @@ void txTask(void*) {
 void traceTxTask(void*) {
   std::uint8_t buffer[kTxScratchBytes];
   while (true) {
-    const std::size_t received = xStreamBufferReceive(
-        trace_tx_stream, buffer, sizeof(buffer), portMAX_DELAY);
+    // MessageBuffer preserves each TWTR frame as an atomic unit. A producer
+    // timeout therefore cannot leave a partial frame in the BLE byte stream.
+    const std::size_t received = xMessageBufferReceive(
+        trace_tx_messages, buffer, sizeof(buffer), portMAX_DELAY);
     if (received == 0U) {
       continue;
     }
@@ -380,8 +402,8 @@ bool init() {
 
   rx_stream = xStreamBufferCreate(kRxBufferBytes, 1U);
   tx_stream = xStreamBufferCreate(kTxBufferBytes, 1U);
-  trace_tx_stream = xStreamBufferCreate(kTraceTxBufferBytes, 1U);
-  if (rx_stream == nullptr || tx_stream == nullptr || trace_tx_stream == nullptr) {
+  trace_tx_messages = xMessageBufferCreate(kTraceTxBufferBytes);
+  if (rx_stream == nullptr || tx_stream == nullptr || trace_tx_messages == nullptr) {
     return false;
   }
 
@@ -452,9 +474,16 @@ std::size_t writeBlocking(const std::uint8_t* data,
 std::size_t traceWriteBlocking(const std::uint8_t* data,
                                const std::size_t length,
                                const std::uint32_t timeout_ms) {
-  if (!trace_tx_subscribed) return 0U;
-  return writeBlockingTo(trace_tx_stream, &trace_tx_dropped_bytes, data, length,
-                         timeout_ms);
+  if (!trace_tx_subscribed || data == nullptr || length == 0U ||
+      trace_tx_messages == nullptr ||
+      connection_handle == BLE_HS_CONN_HANDLE_NONE) {
+    return 0U;
+  }
+  // A MessageBuffer send is all-or-nothing. If the queue remains full until the
+  // timeout, the caller still owns the original frame and can retry it intact.
+  // Do not increment dropped bytes here: no frame has been consumed or lost.
+  return xMessageBufferSend(trace_tx_messages, data, length,
+                            pdMS_TO_TICKS(timeout_ms));
 }
 
 bool connected() {
