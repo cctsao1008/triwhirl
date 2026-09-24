@@ -1,154 +1,283 @@
-# TriWhirl
+<p align="center">
+  <img src="docs/assets/triwhirl-mascot.svg" width="240" alt="TriWhirl mascot">
+</p>
 
-TriWhirl is an ESP32-based research platform for autonomous swing-up and robust balancing of a reaction-wheel Reuleaux triangle.
+<h1 align="center">TriWhirl</h1>
 
-The project is built around a native ESP-IDF realtime runtime, project-owned estimation/control code, and a PC-side engineering toolbox for commissioning, logging, identification, fitting, plotting, and controller development.
+<p align="center">
+  <strong>Reaction-Wheel Reuleaux Triangle Control Research</strong>
+</p>
 
-> Current status: active hardware commissioning. The runtime, sensing, motor drive, trace capture, swing-up/balance handoff, and host analysis path are operational. Near-upright control is being tuned from measured hardware traces rather than treated as a finished controller.
+<p align="center">
+  <strong>Three vertices. One reaction wheel. Zero imaginary physics.</strong>
+</p>
 
-## System overview
+<p align="center">
+  <em>Measure first. Capture carefully. Synthesize deliberately.</em>
+</p>
+
+<p align="center">
+  🔺 Geometry &nbsp;·&nbsp; 🌀 Momentum &nbsp;·&nbsp; 🧠 Control &nbsp;·&nbsp; 🔬 Validate
+</p>
+
+TriWhirl is a native ESP-IDF control and system-identification platform for a reaction-wheel-stabilized Reuleaux triangle. It keeps sensing evidence, estimated state, stand-up logic, controller intent, actuator limits, runtime authority, transport, and post-run analysis deliberately separate so that the control stack cannot claim more certainty—or more authority—than the measured hardware supports.
+
+> **Curved triangle. Hard evidence. No host-assisted balance.**
+
+---
+
+## 🧠 Architecture
+
+The realtime path is firmware-owned from sensing through actuation:
 
 ```text
 AS5600 + MPU6050
-       |
-       v
+       ↓
+SensorFrame
+       ↓
 state estimation
-       |
-       v
-safety / supervisor
-       |
-       v
-swing-up / balance controller
-       |
-       v
-reaction-wheel velocity target
-       |
-       v
-velocity PI -> Vq
-       |
-       v
-native MCPWM -> EG2133 -> BLDC
+       ↓
+safety / supervisor authority
+       ↓
+stand-up / balance controller
+       ↓
+bounded Vq command
+       ↓
+native MCPWM
+       ↓
+EG2133 -> BLDC -> reaction wheel
 ```
 
-The deterministic sensor / estimator / control path runs at 1 kHz. UART, BLE, logging, plotting, and other engineering interfaces stay outside realtime control authority.
-
-The upright geometry is treated as 120-degree periodic, so the same local balance law can be applied around all three physical vertices.
-
-## Current control work
-
-The autonomous stand-up path currently consists of:
-
-1. reaction-wheel swing-up using the proven TRC-V1.1 handoff structure;
-2. a guarded capture window around the local upright;
-3. an outer state-feedback law producing a reaction-wheel velocity target;
-4. an inner velocity PI producing `Vq`;
-5. bounded actuator output, slew limiting, capture hysteresis, PI reset on recapture, and conditional anti-windup.
-
-The current commissioning baseline intentionally uses conservative trace-tuned gains and limits:
+Engineering transports remain outside realtime control authority:
 
 ```text
-velocity target limit : +/-60 rad/s
-Vq limit              : +/-3.0 V
-velocity output ramp  : 1000 V/s
-balance capture       : 9 deg
-balance release       : 12 deg
+                 ┌─ CH340 / UART
+runtime protocol ┤
+                 └─ NimBLE GATT -> host toolbox
 ```
 
-The repository also contains a guarded H-infinity near-upright deployment path. Controller development remains measurement-driven: firmware records authoritative realtime traces and the host performs post-run analysis rather than participating in the control loop.
+The Reuleaux-triangle upright coordinate is 120-degree periodic. The three physical vertices therefore share one local balance coordinate and one local control formulation rather than being treated as three unrelated equilibria.
 
-## Firmware
+## 🧰 Firmware shape
 
-TriWhirl uses the official Espressif toolchain directly:
-
-- ESP-IDF `v6.1`
-- target: ESP-WROOM-32 / classic ESP32
-- native ESP-IDF C/C++ components and CMake
-- no PlatformIO runtime
-- no Arduino core runtime
-- no SimpleFOC runtime dependency
-
-Build from an activated ESP-IDF v6.1 environment:
-
-```bash
-idf.py build
+```text
+triwhirl/
+├── main/                       application wiring / runtime orchestration
+├── components/
+│   ├── triwhirl_core/          estimation, geometry, control, safety math
+│   ├── triwhirl_hw/            ESP32 board / peripheral integration
+│   └── triwhirl_ble/           native ESP-IDF NimBLE transport
+├── tools/                      commissioning, logging, ID, fitting, synthesis
+├── docs/                       durable technical documentation
+├── CMakeLists.txt
+├── sdkconfig.defaults
+└── README.md
 ```
 
-For the currently verified Windows setup:
+`triwhirl_core` is platform-independent project logic and does not depend on Arduino, PlatformIO, SimpleFOC, or ESP32 peripheral APIs. Hardware ownership stays in `triwhirl_hw`; application composition stays in `main/`.
 
-```bash
-idf.py -p COM28 flash
-idf.py -p COM28 monitor
+## 🎯 Control lanes
+
+TriWhirl deliberately keeps the commissioning controller and the research controller conceptually separate.
+
+```text
+                    autonomous stand-up
+                           │
+                   reaction-wheel swing-up
+                           │
+                     upright capture
+                           │
+              ┌────────────┴────────────┐
+              │                         │
+     commissioning lane          research lane
+              │                         │
+  state feedback / velocity PI     identified plant
+              │                         │
+   bounded Vq + anti-windup         H∞ synthesis
+              │                         │
+     hardware reference         guarded deployment
 ```
 
-The board uses a CH340 USB/UART path and requires manual ESP32 download-mode entry on the verified hardware. See [Development](docs/development.md) for the exact procedure.
+The current autonomous stand-up path uses a vendor-aligned state-feedback / velocity-PI controller as a **commissioning baseline**. It exists to validate sensor coordinates, motor sign, capture behavior, actuator authority, timing, and traceability on the real hardware. It is not a claim that LQR has replaced the research objective.
 
-## Host toolbox
+The research path remains:
 
-`twtool` is the canonical PC-side entry point:
+```text
+measurement
+    ↓
+local plant identification
+    ↓
+model + uncertainty
+    ↓
+H∞ synthesis
+    ↓
+guarded near-upright deployment
+    ↓
+hardware comparison against the commissioning baseline
+```
+
+## 🌀 Stand-up architecture
+
+The autonomous hardware sequence is:
+
+```text
+SwingHigh / SwingLow
+        ↓
+   capture window
+        ↓
+      Balance
+        ↓
+state-feedback wheel-velocity target
+        ↓
+velocity PI
+        ↓
+       Vq
+```
+
+The commissioning controller includes capture/release hysteresis, bounded wheel-velocity targets, bounded `Vq`, actuator slew limiting, velocity-PI reset on recapture, and conditional anti-windup. These mechanisms prevent a failed capture from silently carrying saturated integral state into the next attempt.
+
+Controller tuning remains trace-driven. Temporary gain values and experiment-specific tuning history belong in code, captures, and Issues rather than being promoted into permanent physical truth in this README.
+
+## 🛡️ Actuation authority
+
+```text
+controller intent
+      ↓
+limit / safety policy
+      ↓
+authorized Vq
+      ↓
+3-PWM electrical realization
+      ↓
+EG2133 gate driver
+      ↓
+reaction-wheel motor
+```
+
+UART, BLE, Python, plotting, and browser/host state do not grant motor authority. Transport disconnects do not own the realtime control state.
+
+Because the board ties each EG2133 active-high high-side command and active-low low-side command to one complementary MCU signal, a zero-duty command produces the board-defined low-side zero vector rather than a guaranteed high-impedance motor disconnect. Electrical semantics are therefore documented separately from abstract controller intent.
+
+## 🔬 Validation and evidence
+
+TriWhirl treats captured hardware data as evidence, not decoration.
+
+The dedicated stand-up trace records controller state and measured sample timing in firmware, then transfers the completed capture to the host for analysis. Plotting and disk I/O occur after the realtime experiment rather than inside the control path.
+
+A normal commissioning run is:
+
+```powershell
+python tools/twtool.py control standup --duration 10 --plot
+```
+
+The host produces the authoritative raw trace plus decoded analysis artifacts:
+
+```text
+.twtrace    binary stand-up evidence
+.csv        decoded samples
+.json       provenance / acceptance metadata
+.png        post-run visualization
+```
+
+Trace acceptance checks framing, CRC, sequence continuity, transport/ring drops, timing integrity, firmware provenance, and host/firmware revision agreement. The trace stores measured `dt_us`; analysis does not invent a perfect sample period after the fact.
+
+Existing runs can be replotted independently:
+
+```powershell
+python tools/twtool.py log plot-standup artifacts/standup/<capture>.twtrace
+```
+
+## 📏 Physical parameter gate
+
+Unknown physical values remain explicit unknowns until measured or identified. Current examples include final safe continuous/transient `Vq`, hard reaction-wheel speed limits, bus behavior under load, battery ADC transfer function, and final robust-control uncertainty bounds.
+
+```text
+physical measurement / experiment
+              ↓
+      identified evidence
+              ↓
+       admissible parameter
+              ↓
+      controller / safety use
+```
+
+A convenient number from a seller sketch, simulation, or temporary tuning run does not become a TriWhirl physical fact merely because the controller happens to move.
+
+## 🧪 Identification and H∞ workflow
+
+Host-side engineering tools support actuator, body, and swing identification without moving realtime control authority off the ESP32.
+
+```text
+hardware experiment
+      ↓
+firmware-owned synchronized capture
+      ↓
+host decode / inspect
+      ↓
+plant fitting
+      ↓
+uncertainty characterization
+      ↓
+H∞ synthesis
+      ↓
+firmware coefficients / guarded trial
+```
+
+The ESP32 runtime does not depend on Python or an online convex solver. Identification, fitting, and controller synthesis are offline engineering operations whose outputs are consumed by deterministic firmware.
+
+## 🧰 Host toolbox
+
+`twtool` is the canonical host entry point:
 
 ```powershell
 python tools/twtool.py --help
 python tools/twtool.py --list
 ```
 
-The main command groups are:
+Current command groups:
 
 ```text
 log      firmware logging, download, decode, inspection, plotting
 control  autonomous stand-up and guarded balance deployment
-id       actuator/body/swing identification experiments
+id       actuator / body / swing identification experiments
 fit      model fitting from measured data
 ```
 
-### Stand-up commissioning
-
-Run an autonomous hardware trial and save the dedicated stand-up trace:
+Examples:
 
 ```powershell
 python tools/twtool.py control standup --duration 10 --plot
+python tools/twtool.py id swing --probes 12 -o artifacts/auto-swing-id-01.csv
+python tools/twtool.py log inspect artifacts/run-01.twlog
 ```
 
-The command captures the firmware-owned 1 kHz binary trace into host RAM during the run, then writes the raw `.twtrace`, decoded `.csv`, `.json` metadata, and optional PNG only after the motor has stopped.
+See [`tools/README.md`](tools/README.md) for the complete host workflow.
 
-The trace carries measured sample timing and firmware git provenance. Post-run acceptance checks validate framing, CRC, sample continuity, transport drops, timing integrity, and host/firmware revision agreement.
+## 🔧 Build
 
-Existing captures can be replotted independently:
-
-```powershell
-python tools/twtool.py log plot-standup artifacts/standup/<capture>.twtrace
-```
-
-See [Host tools](tools/README.md) for the full workflow.
-
-## Repository layout
+TriWhirl uses the official Espressif toolchain directly:
 
 ```text
-triwhirl/
-├── main/                       application wiring and runtime orchestration
-├── components/
-│   ├── triwhirl_core/          platform-independent estimation/control/safety
-│   ├── triwhirl_hw/            ESP32 board and peripheral integration
-│   └── triwhirl_ble/           native ESP-IDF NimBLE transport
-├── tools/                      host-side commissioning and research toolbox
-├── docs/                       technical documentation
-├── CMakeLists.txt
-├── sdkconfig.defaults
-└── README.md
+ESP-IDF      v6.1
+target       ESP-WROOM-32 / classic ESP32
+runtime      native ESP-IDF C/C++ + CMake
 ```
 
-## Design boundaries
+Build:
 
-TriWhirl deliberately separates realtime control from engineering transport and analysis:
+```bash
+idf.py build
+```
 
-- the ESP32 owns sensing, estimation, safety, control, and synchronized acquisition;
-- BLE and UART are configuration/debug transports, not realtime control paths;
-- Python tooling performs experiment orchestration and post-run analysis only;
-- hardware-specific ESP-IDF code stays outside `triwhirl_core`;
-- unknown physical limits remain explicit until they are measured or identified.
+Flash the currently verified Windows setup:
 
-This separation is intentional: reproducible traces and hardware evidence are preferred over hidden assumptions or host-assisted timing.
+```bash
+idf.py -p COM28 flash
+```
 
-## Documentation
+The board uses a CH340 USB/UART path and requires manual ESP32 ROM download-mode entry on the verified hardware. See [`docs/development.md`](docs/development.md) for the exact procedure.
+
+## 📚 Documentation
 
 - [Architecture](docs/architecture.md)
 - [Hardware](docs/hardware.md)
@@ -156,6 +285,12 @@ This separation is intentional: reproducible traces and hardware evidence are pr
 - [Motor bring-up](docs/motor-bringup.md)
 - [Host tools](tools/README.md)
 - [Parameter identification](tools/parameter_id/README.md)
+
+## 📚 Documentation principle
+
+> **README explains the system. Issues explain the journey. Code proves the current state.**
+
+README and durable documentation explain architecture, control boundaries, runtime authority, hardware semantics, validation interpretation, and research workflow. GitHub Issues preserve experiments, tuning, temporary constraints, implementation steps, and closure records. Code, configuration, captured evidence, and tests remain the authoritative proof of executable behavior.
 
 ## License
 
