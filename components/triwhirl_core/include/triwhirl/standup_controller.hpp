@@ -26,11 +26,14 @@ struct StandupControllerConfig {
   float rate_switch_rad_s = 0.03F;
 
   // Trace-tuned commissioning gains. The control structure remains the vendor
-  // style outer state feedback -> reaction-wheel velocity target -> velocity PI,
-  // but these defaults deliberately reduce wheel-momentum reinforcement and
-  // saturation observed in standup-20260923-233829.
+  // style outer state feedback -> reaction-wheel velocity target -> velocity PI.
+  // standup-20260925-021640 showed a low-energy capture reversing direction at
+  // about +5.3 deg instead of reaching the upright: the retained rate damping
+  // was braking the approach before the reduced -3 angle term had enough
+  // authority against gravity. Increase only the unstable angle term for the
+  // next A/B trial; wheel feedback and rate damping stay fixed.
   // Angle/rate are in degrees(/s); wheel and target velocity are in rad/s.
-  float lqr_k_angle_unstable = -3.0F;
+  float lqr_k_angle_unstable = -4.0F;
   float lqr_k_rate_unstable = 0.45F;
   float lqr_k_wheel_unstable = 0.30F;
   float lqr_k_angle_stable = -2.5F;
@@ -42,12 +45,9 @@ struct StandupControllerConfig {
   // input to that envelope before applying the retained 0.6/0.4 gyro filter.
   float gyro_rate_limit_rad_s = 4.36332313F;  // 250 deg/s
 
-  // The first conservative trace removed Vq saturation and wheel runaway, but
-  // standup-20260924-223239 showed that the capture velocity loop was too soft:
-  // the body crossed the upright while Vq remained below about 1.5 V. Restore
-  // the vendor proportional velocity gain for the unstable/capture lane while
-  // keeping the reduced integral gain, reduced wheel feedback, anti-windup, and
-  // recapture reset. Stable gains remain untouched until stable=true is reached.
+  // The first conservative trace removed Vq saturation and wheel runaway. Keep
+  // the restored vendor proportional velocity gain for this angle-authority
+  // experiment so the only controller variable changed from 275d055 is Ktheta.
   float velocity_p_unstable = 0.035F;
   float velocity_i_unstable = 0.150F;
   float velocity_p_stable = 0.018F;
