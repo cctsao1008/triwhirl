@@ -16,7 +16,7 @@ void testTunedDefaults() {
   assert(std::fabs(config.lqr_k_angle_stable + 2.5F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_rate_stable - 0.35F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_wheel_stable - 0.20F) < 1.0e-6F);
-  assert(std::fabs(config.velocity_p_unstable - 0.020F) < 1.0e-6F);
+  assert(std::fabs(config.velocity_p_unstable - 0.035F) < 1.0e-6F);
   assert(std::fabs(config.velocity_i_unstable - 0.150F) < 1.0e-6F);
   assert(std::fabs(config.velocity_p_stable - 0.018F) < 1.0e-6F);
   assert(std::fabs(config.velocity_i_stable - 0.100F) < 1.0e-6F);
