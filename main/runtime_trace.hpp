@@ -9,14 +9,15 @@ namespace triwhirl::runtime {
 
 inline constexpr std::uint32_t kStandupTraceMagic = 0x52545754U;  // "TWTR"
 inline constexpr std::uint8_t kStandupTraceVersion = 2U;
-inline constexpr std::size_t kStandupTraceRingRecords = 512U;
+// Keep the realtime capture entirely in firmware RAM while standup is active.
+// At 100 Hz, 2048 records hold about 20.5 s of control history before any
+// transport is needed. BLE transfer is deferred until the motor has stopped so
+// observation cannot compete with the Core-0 sensor-acquisition domain.
+inline constexpr std::size_t kStandupTraceRingRecords = 2048U;
 inline constexpr std::size_t kStandupTraceRecordsPerFrame = 7U;
-// Control remains at 1 kHz. Live BLE trace capture intentionally records every
-// tenth control update (nominal 100 Hz). The previous 200-Hz stream required
-// roughly 6.6 kB/s including per-frame headers and could saturate the measured
-// Windows/Bleak link, keeping Core-0 BLE work continuously busy and coinciding
-// with encoder-unavailable trips. 100 Hz keeps 10 ms closed-loop resolution
-// while leaving transport/scheduler margin for the sensor acquisition domain.
+// Control remains at 1 kHz. Trace capture records every tenth control update
+// (nominal 100 Hz), preserving 10 ms closed-loop resolution while the bounded
+// run is buffered locally and dumped over BLE only after standup stops.
 inline constexpr std::uint32_t kStandupTraceDecimation = 10U;
 
 #pragma pack(push, 1)
