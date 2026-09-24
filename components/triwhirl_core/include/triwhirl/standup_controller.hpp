@@ -42,10 +42,13 @@ struct StandupControllerConfig {
   // input to that envelope before applying the retained 0.6/0.4 gyro filter.
   float gyro_rate_limit_rad_s = 4.36332313F;  // 250 deg/s
 
-  // Inner velocity-loop gains and limits are reduced from the vendor baseline
-  // so a near-upright capture damps accumulated wheel momentum instead of
-  // immediately driving the target and Vq rails.
-  float velocity_p_unstable = 0.020F;
+  // The first conservative trace removed Vq saturation and wheel runaway, but
+  // standup-20260924-223239 showed that the capture velocity loop was too soft:
+  // the body crossed the upright while Vq remained below about 1.5 V. Restore
+  // the vendor proportional velocity gain for the unstable/capture lane while
+  // keeping the reduced integral gain, reduced wheel feedback, anti-windup, and
+  // recapture reset. Stable gains remain untouched until stable=true is reached.
+  float velocity_p_unstable = 0.035F;
   float velocity_i_unstable = 0.150F;
   float velocity_p_stable = 0.018F;
   float velocity_i_stable = 0.100F;
