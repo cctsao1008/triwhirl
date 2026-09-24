@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 340" role="img" aria-labelledby="title desc">
+  <title id="title">TriWhirl mascot</title>
+  <desc id="desc">A cute reaction-wheel Reuleaux triangle robot, slightly tilted while balancing, with a central spinning wheel and a smiling face.</desc>
+  <defs>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#4f4a4d" flood-opacity="0.18"/>
+    </filter>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fffaf4"/>
+      <stop offset="1" stop-color="#ffe7d2"/>
+    </linearGradient>
+    <linearGradient id="wheel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#626268"/>
+      <stop offset="1" stop-color="#2f3035"/>
+    </linearGradient>
+    <linearGradient id="hub" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9bd8e8"/>
+      <stop offset="1" stop-color="#6eb8d2"/>
+    </linearGradient>
+  </defs>
+
+  <ellipse cx="210" cy="304" rx="105" ry="14" fill="#dfe8ef" opacity="0.8"/>
+
+  <g filter="url(#shadow)" transform="rotate(-5 210 176)">
+    <!-- Reuleaux-inspired curved triangular body -->
+    <path d="M210 43
+             C286 78 337 151 333 239
+             C268 279 152 279 87 239
+             C83 151 134 78 210 43 Z"
+          fill="url(#body)" stroke="#5b463f" stroke-width="7" stroke-linejoin="round"/>
+
+    <!-- top highlight -->
+    <path d="M153 78 Q210 49 268 78"
+          fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" opacity="0.72"/>
+
+    <!-- face -->
+    <circle cx="169" cy="126" r="25" fill="#fffdfb" stroke="#5b463f" stroke-width="5"/>
+    <circle cx="251" cy="126" r="25" fill="#fffdfb" stroke="#5b463f" stroke-width="5"/>
+    <circle cx="172" cy="130" r="13" fill="#7d4f36"/>
+    <circle cx="254" cy="130" r="13" fill="#7d4f36"/>
+    <circle cx="177" cy="124" r="5" fill="#ffffff"/>
+    <circle cx="259" cy="124" r="5" fill="#ffffff"/>
+    <ellipse cx="139" cy="157" rx="17" ry="8" fill="#ff9fa5" opacity="0.72"/>
+    <ellipse cx="281" cy="157" rx="17" ry="8" fill="#ff9fa5" opacity="0.72"/>
+    <path d="M193 153 Q210 171 227 153" fill="none" stroke="#5b463f" stroke-width="5" stroke-linecap="round"/>
+
+    <!-- reaction wheel -->
+    <circle cx="210" cy="217" r="48" fill="url(#wheel)" stroke="#5b463f" stroke-width="6"/>
+    <circle cx="210" cy="217" r="31" fill="#f7f1eb" stroke="#5b463f" stroke-width="5"/>
+    <circle cx="210" cy="217" r="17" fill="url(#hub)" stroke="#5b463f" stroke-width="4"/>
+    <circle cx="210" cy="217" r="6" fill="#fffdfb" opacity="0.9"/>
+
+    <!-- wheel spokes -->
+    <path d="M210 186 V200 M210 234 V248 M179 217 H193 M227 217 H241"
+          stroke="#5b463f" stroke-width="5" stroke-linecap="round"/>
+
+    <!-- contact accent -->
+    <path d="M151 270 Q210 287 269 270" fill="none" stroke="#c8b59f" stroke-width="5" stroke-linecap="round" opacity="0.8"/>
+  </g>
+
+  <!-- whirl / balance marks -->
+  <path d="M330 82 q24 10 29 31 q4 17 -8 30" fill="none" stroke="#83bce6" stroke-width="7" stroke-linecap="round"/>
+  <path d="M350 71 l13 -11 M363 88 l18 -2 M344 57 l4 -17" stroke="#f6b93b" stroke-width="7" stroke-linecap="round"/>
+  <path d="M88 205 q-19 7 -28 -4" fill="none" stroke="#b9a4d8" stroke-width="6" stroke-linecap="round" opacity="0.9"/>
+  <path d="M324 227 q18 8 27 -2" fill="none" stroke="#b9a4d8" stroke-width="6" stroke-linecap="round" opacity="0.9"/>
+</svg>
