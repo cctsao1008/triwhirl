@@ -34,12 +34,13 @@
 namespace triwhirl::runtime {
 namespace {
 
-// This worker is Core-0/non-realtime. A long bounded enqueue timeout is safe
-// here and absorbs Windows BLE scheduling gaps without ever blocking Core 1.
+// BLE transport is intentionally inactive while standup is running. Once the
+// motor stops, this Core-0 worker may spend up to a second enqueueing each frame
+// without affecting realtime control or sensor acquisition.
 constexpr std::uint32_t kTraceWriteTimeoutMs = 1000U;
 constexpr TickType_t kTraceIdleDelayTicks = pdMS_TO_TICKS(1);
 constexpr float kRadToDeg = 180.0F / triwhirl::kPi;
-constexpr float kTargetVelocityLimitRadS = 140.0F;
+constexpr float kTargetVelocityLimitRadS = 60.0F;
 constexpr float kVqLimitV = 4.0F;
 constexpr std::uint32_t kFirmwareGitSha32[5] = {
     TRIWHIRL_GIT_SHA0, TRIWHIRL_GIT_SHA1, TRIWHIRL_GIT_SHA2,
@@ -129,6 +130,15 @@ bool sendFrame(const StandupTraceRecord* records,
 void traceWorker(void*) {
   StandupTraceRecord batch[kStandupTraceRecordsPerFrame]{};
   while (true) {
+    // Critical invariant: while the motor/controller is active this worker does
+    // not touch BLE at all. Core 1 only appends compact records into the RAM ring.
+    // This removes the measurement-induced Core-0 contention observed when live
+    // 200/100-Hz trace notifications coincided with encoder-unavailable trips.
+    if (trace_active.load(std::memory_order_acquire)) {
+      vTaskDelay(kTraceIdleDelayTicks);
+      continue;
+    }
+
     bool progressed = false;
 
     if (trace_start_pending.load(std::memory_order_acquire)) {
@@ -162,8 +172,7 @@ void traceWorker(void*) {
 
     const std::uint32_t drained_tail = trace_tail.load(std::memory_order_acquire);
     const std::uint32_t drained_head = trace_head.load(std::memory_order_acquire);
-    if (!trace_active.load(std::memory_order_acquire) &&
-        trace_end_pending.load(std::memory_order_acquire) &&
+    if (trace_end_pending.load(std::memory_order_acquire) &&
         !trace_start_pending.load(std::memory_order_acquire) &&
         drained_tail == drained_head) {
       const std::uint8_t frame_flags =
