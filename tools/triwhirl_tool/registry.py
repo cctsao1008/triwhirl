@@ -185,6 +185,12 @@ COMMANDS: tuple[ToolCommand, ...] = (
     ),
     ToolCommand(
         group="plant",
+        name="merge-active",
+        script="parameter_id/merge_active.py",
+        description="Merge separate A/B/C body-active runs with global trial renumbering and provenance.",
+    ),
+    ToolCommand(
+        group="plant",
         name="calibrate",
         handler="commands.plant:calibrate_main",
         description="Fit local plants, build the linear model, and run replay parity with holdout gating.",
