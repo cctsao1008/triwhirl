@@ -12,6 +12,7 @@ void testTunedDefaults() {
   const triwhirl::StandupControllerConfig config{};
   assert(std::fabs(config.lqr_k_angle_unstable + 8.0F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_rate_unstable - 0.35F) < 1.0e-6F);
+  assert(std::fabs(config.lqr_k_rate_recovery_unstable - 0.55F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_wheel_unstable - 0.30F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_angle_stable + 2.5F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_rate_stable - 0.35F) < 1.0e-6F);
@@ -93,13 +94,14 @@ void testVendorGyroEnvelopeOnCapture() {
   auto capture = controller.update(input);
   assert(capture.phase == triwhirl::StandupPhase::kBalance);
   assert(capture.valid);
-  const float expected_target = -0.35F * 100.0F;
+  // At zero angle error with finite rate, recovery damping is selected.
+  const float expected_target = -0.55F * 100.0F;
   assert(std::fabs(capture.target_velocity_rad_s - expected_target) < 0.02F);
 
   input.now_us += 1000U;
   auto second = controller.update(input);
-  // 0.6*100 + 0.4*250 = 160 deg/s; -0.35*160 = -56, below the +/-60 limit.
-  assert(std::fabs(second.target_velocity_rad_s + 56.0F) < 0.02F);
+  // 0.6*100 + 0.4*250 = 160 deg/s; -0.55*160 clips to the -60 limit.
+  assert(std::fabs(second.target_velocity_rad_s + 60.0F) < 1.0e-5F);
 }
 
 void testStableCaptureAfterSwing() {
@@ -205,6 +207,7 @@ void testConditionalAntiWindup() {
   config.theta_reference_rad = degToRad(68.0F);
   config.lqr_k_angle_unstable = -10.0F;
   config.lqr_k_rate_unstable = 0.0F;
+  config.lqr_k_rate_recovery_unstable = 0.0F;
   config.lqr_k_wheel_unstable = 0.0F;
   // Proportional action alone is deliberately beyond the 1 V output rail. The
   // integral must therefore be held instead of accumulating in the same sign.
