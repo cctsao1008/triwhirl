@@ -46,6 +46,8 @@ jobs:
           /tmp/standup-controller-test
       - name: "test: H-infinity balance deployment command"
         run: python tools/tests/hinf_balance_command_test.py
+      - name: "test: H-infinity validated plant gate"
+        run: python tools/tests/hinf_pipeline_gate_test.py
       - name: "test: realtime acceptance evaluator"
         run: python tools/tests/realtime_acceptance_test.py
       - name: "test: host toolbox routing"
