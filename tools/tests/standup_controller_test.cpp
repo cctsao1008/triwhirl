@@ -197,7 +197,9 @@ void testVelocityLoopResetsOnRecapture() {
   assert(output.phase == triwhirl::StandupPhase::kSwingHigh);
 
   input.now_us += 1000U;
-  input.theta_rad = degToRad(68.0F - 8.0F);
+  // Re-enter exactly at the reference with zero wheel/rate so this update does
+  // not immediately rebuild integral after resetVelocityLoop().
+  input.theta_rad = degToRad(68.0F);
   input.theta_rate_rad_s = 0.0F;
   input.wheel_rate_rad_s = 0.0F;
   output = controller.update(input);
