@@ -184,6 +184,18 @@ COMMANDS: tuple[ToolCommand, ...] = (
         description="Supervise firmware-owned reaction-wheel swing identification and download TWLG.",
     ),
     ToolCommand(
+        group="plant",
+        name="calibrate",
+        handler="commands.plant:calibrate_main",
+        description="Fit local plants, build the linear model, and run replay parity with holdout gating.",
+    ),
+    ToolCommand(
+        group="plant",
+        name="replay",
+        handler="commands.plant:replay_main",
+        description="Replay a fitted local plant against active-ID or standup CSV data.",
+    ),
+    ToolCommand(
         group="fit",
         name="actuator",
         script="parameter_id/local_fit.py",
