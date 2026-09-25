@@ -10,7 +10,7 @@ float degToRad(float deg) { return deg * triwhirl::kPi / 180.0F; }
 
 void testTunedDefaults() {
   const triwhirl::StandupControllerConfig config{};
-  assert(std::fabs(config.lqr_k_angle_unstable + 6.0F) < 1.0e-6F);
+  assert(std::fabs(config.lqr_k_angle_unstable + 8.0F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_rate_unstable - 0.45F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_wheel_unstable - 0.30F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_angle_stable + 2.5F) < 1.0e-6F);
