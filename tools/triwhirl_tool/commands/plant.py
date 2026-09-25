@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -168,6 +169,105 @@ def _run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
+def _evaluate_fit_gate(linear_path: Path) -> dict[str, object]:
+    payload = json.loads(linear_path.read_text(encoding="utf-8"))
+    if payload.get("format") != "triwhirl-vertex-normalized-linear-model-v1":
+        raise RuntimeError("linear model uses an unsupported format")
+
+    selected = payload.get("selected_vertices")
+    plants = payload.get("plants")
+    nominal = payload.get("nominal")
+    if not isinstance(selected, list) or not selected:
+        raise RuntimeError("linear model selected no plant vertices")
+    if not isinstance(plants, list) or not plants:
+        raise RuntimeError("linear model contains no plant vertices")
+    if not isinstance(nominal, dict):
+        raise RuntimeError("linear model contains no nominal plant")
+
+    issues: list[str] = []
+    plant_checks: list[dict[str, object]] = []
+    by_vertex = {
+        str(item.get("vertex_id", "")).upper(): item
+        for item in plants
+        if isinstance(item, dict)
+    }
+    for raw_vertex in selected:
+        vertex = str(raw_vertex).upper()
+        plant = by_vertex.get(vertex)
+        if plant is None:
+            issues.append(f"selected vertex {vertex} has no linear plant")
+            continue
+
+        source_status = str(plant.get("source_status", "unknown"))
+        rank = int(plant.get("controllability_rank", 0))
+        eig = plant.get("open_loop_eigenvalues", [])
+        max_real = None
+        if isinstance(eig, list) and eig:
+            real_parts = [
+                float(item.get("real"))
+                for item in eig
+                if isinstance(item, dict) and item.get("real") is not None
+            ]
+            if real_parts and all(math.isfinite(value) for value in real_parts):
+                max_real = max(real_parts)
+
+        plant_issues: list[str] = []
+        if source_status != "candidate":
+            plant_issues.append(f"source_status={source_status}; expected candidate")
+        if rank != 3:
+            plant_issues.append(f"controllability_rank={rank}; expected 3")
+        if max_real is None:
+            plant_issues.append("open-loop eigenvalues are missing or non-finite")
+        elif max_real <= 0.0:
+            plant_issues.append(
+                f"no open-loop unstable mode detected (max real eigenvalue={max_real:.6g})"
+            )
+
+        if plant_issues:
+            issues.extend(f"vertex {vertex}: {item}" for item in plant_issues)
+        plant_checks.append(
+            {
+                "vertex_id": vertex,
+                "source_status": source_status,
+                "controllability_rank": rank,
+                "max_open_loop_real_eigenvalue": max_real,
+                "status": "PASS" if not plant_issues else "FAIL",
+                "issues": plant_issues,
+            }
+        )
+
+    nominal_rank = int(nominal.get("controllability_rank", 0))
+    nominal_eig = nominal.get("open_loop_eigenvalues", [])
+    nominal_real = [
+        float(item.get("real"))
+        for item in nominal_eig
+        if isinstance(item, dict) and item.get("real") is not None
+    ] if isinstance(nominal_eig, list) else []
+    nominal_max_real = (
+        max(nominal_real)
+        if nominal_real and all(math.isfinite(value) for value in nominal_real)
+        else None
+    )
+    if nominal_rank != 3:
+        issues.append(f"nominal controllability_rank={nominal_rank}; expected 3")
+    if nominal_max_real is None:
+        issues.append("nominal open-loop eigenvalues are missing or non-finite")
+    elif nominal_max_real <= 0.0:
+        issues.append(
+            "nominal plant has no open-loop unstable mode "
+            f"(max real eigenvalue={nominal_max_real:.6g})"
+        )
+
+    return {
+        "status": "PASS" if not issues else "FAIL",
+        "selected_vertices": [str(value).upper() for value in selected],
+        "plants": plant_checks,
+        "nominal_controllability_rank": nominal_rank,
+        "nominal_max_open_loop_real_eigenvalue": nominal_max_real,
+        "issues": issues,
+    }
+
+
 def calibrate_main(argv: Sequence[str]) -> int:
     args = _calibrate_parser().parse_args(list(argv))
     repo = Path(__file__).resolve().parents[3]
@@ -210,6 +310,7 @@ def calibrate_main(argv: Sequence[str]) -> int:
     try:
         _run(fit_command)
         _run(linear_command)
+        fit_gate = _evaluate_fit_gate(linear_path)
         replay_source = args.validation if args.validation is not None else args.input
         summary, samples = replay(
             linear_path,
@@ -223,7 +324,13 @@ def calibrate_main(argv: Sequence[str]) -> int:
             "external_holdout" if args.validation is not None else "in_sample_diagnostic"
         )
         summary["validation_mode"] = validation_mode
-        if args.validation is None:
+        summary["fit_gate"] = fit_gate
+        if fit_gate["status"] != "PASS":
+            summary["synthesis_gate"] = {
+                "status": "BLOCKED",
+                "reason": "one or more selected plant fits failed the synthesis fit gate",
+            }
+        elif args.validation is None:
             summary["synthesis_gate"] = {
                 "status": "BLOCKED",
                 "reason": (
@@ -244,12 +351,21 @@ def calibrate_main(argv: Sequence[str]) -> int:
         else:
             summary["synthesis_gate"] = {
                 "status": "PASS",
-                "reason": "independent holdout replay met the supplied parity thresholds",
+                "reason": (
+                    "candidate/full-rank unstable local plants and independent holdout replay "
+                    "met the supplied parity thresholds"
+                ),
             }
 
         write_summary(parity_path, summary)
         write_replay_csv(replay_csv, samples)
 
+        artifact_sha256 = {
+            "fit": _sha256(fit_path),
+            "linear_model": _sha256(linear_path),
+            "parity": _sha256(parity_path),
+            "replay_csv": _sha256(replay_csv),
+        }
         manifest = {
             "format": "triwhirl-plant-calibration-v1",
             "calibration_input": str(args.input),
@@ -263,12 +379,15 @@ def calibrate_main(argv: Sequence[str]) -> int:
             "derivative_window": args.derivative_window,
             "vertex_a_deg": args.vertex_a_deg,
             "include_affine_bias_in_replay": not args.no_bias,
+            "parity_acceptance": summary.get("acceptance"),
+            "fit_gate": fit_gate,
             "artifacts": {
-                "fit": str(fit_path),
-                "linear_model": str(linear_path),
-                "parity": str(parity_path),
-                "replay_csv": str(replay_csv),
+                "fit": fit_path.name,
+                "linear_model": linear_path.name,
+                "parity": parity_path.name,
+                "replay_csv": replay_csv.name,
             },
+            "artifact_sha256": artifact_sha256,
             "synthesis_gate": summary["synthesis_gate"],
             "provenance_note": args.provenance_note,
         }
@@ -278,6 +397,9 @@ def calibrate_main(argv: Sequence[str]) -> int:
         return 1
 
     _print_summary(summary)
+    print(f"fit_gate={fit_gate['status']}")
+    for issue in fit_gate.get("issues", []):
+        print(f"fit_gate_issue={issue}")
     print(f"calibration_manifest={manifest_path}")
     print(f"fit={fit_path}")
     print(f"linear_model={linear_path}")
