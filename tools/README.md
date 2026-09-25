@@ -63,7 +63,9 @@ The TWLG, standup-trace, plant-calibration, and replay commands are native toolb
 
 ### Plant calibration and synthesis gate
 
-The formal controller path is now:
+The active commissioning phase is plant calibration. Freeze standup-gain tuning until the plant calibration/holdout gate is resolved.
+
+The formal controller path is:
 
 ```text
 signed A/B/C active-ID calibration data
@@ -76,7 +78,7 @@ signed A/B/C active-ID calibration data
 
 Use separate calibration and validation acquisitions, merge A/B/C files with `plant merge-active`, then run `plant calibrate`. H-infinity synthesis no longer accepts a raw active-ID CSV as plant authority. `fit hinf` consumes only a calibration manifest whose fit, holdout parity, and synthesis gates are `PASS`, and it verifies the validated linear-model SHA-256 before invoking the solver.
 
-While this calibration phase is active, freeze standup gain tuning and do not use failed closed-loop standup traces as primary fitting data. Standup traces return only as post-fit closed-loop validation evidence.
+Failed closed-loop standup traces are not primary fitting data. They return after the plant exists as additional closed-loop validation evidence.
 
 See `docs/plant-acquisition-runbook.md` and `docs/plant-calibration.md` for the acquisition procedure and promotion contract.
 
