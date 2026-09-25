@@ -11,7 +11,7 @@ float degToRad(float deg) { return deg * triwhirl::kPi / 180.0F; }
 void testTunedDefaults() {
   const triwhirl::StandupControllerConfig config{};
   assert(std::fabs(config.lqr_k_angle_unstable + 8.0F) < 1.0e-6F);
-  assert(std::fabs(config.lqr_k_rate_unstable - 0.45F) < 1.0e-6F);
+  assert(std::fabs(config.lqr_k_rate_unstable - 0.35F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_wheel_unstable - 0.30F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_angle_stable + 2.5F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_rate_stable - 0.35F) < 1.0e-6F);
@@ -93,13 +93,13 @@ void testVendorGyroEnvelopeOnCapture() {
   auto capture = controller.update(input);
   assert(capture.phase == triwhirl::StandupPhase::kBalance);
   assert(capture.valid);
-  const float expected_target = -0.45F * 100.0F;
+  const float expected_target = -0.35F * 100.0F;
   assert(std::fabs(capture.target_velocity_rad_s - expected_target) < 0.02F);
 
   input.now_us += 1000U;
   auto second = controller.update(input);
-  // 0.6*100 + 0.4*250 = 160 deg/s; -0.45*160 = -72, clipped to -60.
-  assert(std::fabs(second.target_velocity_rad_s + 60.0F) < 1.0e-5F);
+  // 0.6*100 + 0.4*250 = 160 deg/s; -0.35*160 = -56, below the +/-60 limit.
+  assert(std::fabs(second.target_velocity_rad_s + 56.0F) < 0.02F);
 }
 
 void testStableCaptureAfterSwing() {
