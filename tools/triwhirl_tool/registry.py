@@ -223,7 +223,7 @@ COMMANDS: tuple[ToolCommand, ...] = (
         group="fit",
         name="hinf",
         script="synthesis/hinf/run_pipeline.py",
-        description="Fit active data, build the robust plant, synthesize H-infinity gains, and emit balance config.",
+        description="Synthesize H-infinity gains only from a holdout-validated plant calibration manifest.",
     ),
 )
 
