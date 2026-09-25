@@ -72,11 +72,14 @@ jobs:
           python tools/twtool.py help control balance
           python tools/twtool.py help control standup
           python tools/twtool.py help id swing
+          python tools/twtool.py help plant merge-active
           python tools/twtool.py help plant calibrate
           python tools/twtool.py help plant replay
           python tools/twtool.py help fit hinf
           python -m tools.triwhirl_tool help log decode
           python -m compileall -q tools/triwhirl_tool model tools/synthesis/hinf
+      - name: "test: active-ID merge contract"
+        run: python tools/tests/merge_active_test.py
       - name: "test: plant replay parity harness"
         run: python tools/tests/plant_replay_test.py
       - name: "test: standup trace framing"
