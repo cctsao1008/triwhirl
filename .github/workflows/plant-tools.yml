@@ -1,0 +1,33 @@
+name: Plant Tools
+
+on:
+  push:
+    paths:
+      - "tools/parameter_id/**"
+      - "tools/triwhirl_tool/**"
+      - "model/**"
+      - "docs/plant-calibration.md"
+      - ".github/workflows/plant-tools.yml"
+  pull_request:
+    paths:
+      - "tools/parameter_id/**"
+      - "tools/triwhirl_tool/**"
+      - "model/**"
+      - "docs/plant-calibration.md"
+      - ".github/workflows/plant-tools.yml"
+
+jobs:
+  plant-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: "toolbox routing"
+        run: |
+          python tools/twtool.py help plant merge-active
+          python tools/twtool.py help plant calibrate
+          python tools/twtool.py help plant replay
+          python -m compileall -q tools/triwhirl_tool tools/parameter_id model
+      - name: "active-ID merge provenance"
+        run: python tools/tests/merge_active_test.py
+      - name: "continuous plant replay parity"
+        run: python tools/tests/plant_replay_test.py
