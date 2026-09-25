@@ -100,7 +100,7 @@ replay-parity.csv
 calibration-manifest.json
 ```
 
-The manifest records SHA-256 hashes of the calibration and validation inputs and of the generated fit/model/parity artifacts. H-infinity synthesis consumes this manifest and verifies the validated linear-model hash before synthesis.
+The manifest records SHA-256 hashes of the calibration and validation inputs and of the generated fit/model/parity artifacts. H-infinity synthesis consumes this manifest and verifies the validated linear-model hash before synthesis. The manifest is provenance metadata, not a cryptographic signature; its purpose is reproducibility and accidental-drift detection inside the engineering workflow.
 
 If `--validation` is omitted, the command still emits an in-sample diagnostic replay, but the synthesis gate is deliberately marked `BLOCKED`.
 
