@@ -27,15 +27,15 @@ struct StandupControllerConfig {
 
   // Trace-tuned commissioning gains. The control structure remains the vendor
   // style outer state feedback -> reaction-wheel velocity target -> velocity PI.
-  // standup-20260925-225754 with Ktheta=-8 and Krate=0.35 crossed the upright,
-  // overshot to about -1.5 deg, returned through zero at roughly 0.94 rad/s, and
-  // then escaped. Keep low damping while moving toward the upright, but use a
-  // stronger recovery rate gain once error and body rate have the same sign
-  // (moving away from zero). Wheel feedback and inner-loop gains stay fixed.
+  // standup-20260925-235050 showed that phase-space-only damping reduced the
+  // first overshoot to about -0.8 deg, but the return crossing still carried
+  // about +0.97 rad/s and escaped. Keep the low approach damping only until the
+  // first upright crossing; after that, latch the stronger recovery damping for
+  // the rest of the capture attempt so subsequent zero crossings are dissipative.
   // Angle/rate are in degrees(/s); wheel and target velocity are in rad/s.
   float lqr_k_angle_unstable = -8.0F;
-  float lqr_k_rate_unstable = 0.35F;           // approaching upright
-  float lqr_k_rate_recovery_unstable = 0.55F;  // moving away / zero crossing
+  float lqr_k_rate_unstable = 0.35F;           // first approach to upright
+  float lqr_k_rate_recovery_unstable = 0.55F;  // post-crossing settling / escape
   float lqr_k_wheel_unstable = 0.30F;
   float lqr_k_angle_stable = -2.5F;
   float lqr_k_rate_stable = 0.35F;
@@ -47,7 +47,7 @@ struct StandupControllerConfig {
   float gyro_rate_limit_rad_s = 4.36332313F;  // 250 deg/s
 
   // Keep the restored vendor proportional velocity gain while testing capture
-  // damping. Reduced integral gain, wheel feedback, anti-windup, and recapture
+  // settling. Reduced integral gain, wheel feedback, anti-windup, and recapture
   // reset remain in place.
   float velocity_p_unstable = 0.035F;
   float velocity_i_unstable = 0.150F;
@@ -110,12 +110,14 @@ class StandupController {
   float velocity_integral_v_ = 0.0F;
   float previous_velocity_error_rad_s_ = 0.0F;
   float previous_vq_v_ = 0.0F;
+  float previous_balance_error_rad_ = 0.0F;
   std::uint32_t previous_update_us_ = 0U;
   std::uint32_t last_unstable_us_ = 0U;
   std::uint32_t last_momentum_adjust_us_ = 0U;
   int swing_rate_sign_ = 1;
   bool stable_ = false;
   bool was_balancing_ = false;
+  bool capture_crossed_upright_ = false;
 };
 
 const char* standupPhaseName(StandupPhase phase);
