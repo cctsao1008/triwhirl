@@ -44,6 +44,8 @@ replay parity
     |
 independent holdout gate
     |
+validated calibration manifest
+    |
 nominal + uncertainty model
     |
 H-infinity synthesis
@@ -78,7 +80,7 @@ Do not fit and validate on the same samples and then call the result validated.
 
 ## One-command calibration
 
-The toolbox calibration command runs the existing active fitter, converts accepted vertex fits into the shared continuous state-space model, and performs replay parity:
+The toolbox calibration command runs the existing active fitter, converts accepted vertex fits into the shared continuous state-space model, evaluates the plant fit gate, and performs replay parity:
 
 ```powershell
 python tools/twtool.py plant calibrate artifacts/calibration.csv `
@@ -98,9 +100,20 @@ replay-parity.csv
 calibration-manifest.json
 ```
 
-The manifest records SHA-256 hashes of the calibration and validation inputs so a synthesis artifact can be traced back to exact datasets.
+The manifest records SHA-256 hashes of the calibration and validation inputs and of the generated fit/model/parity artifacts. H-infinity synthesis consumes this manifest and verifies the validated linear-model hash before synthesis.
 
 If `--validation` is omitted, the command still emits an in-sample diagnostic replay, but the synthesis gate is deliberately marked `BLOCKED`.
+
+### Fit gate
+
+Replay parity alone is not enough. The selected plants must also satisfy the identification/model checks required for robust synthesis. The calibration command therefore blocks promotion unless every selected plant:
+
+- came from a `candidate` active-ID fit rather than `diagnostic_only` data;
+- is controllable at rank 3 in the declared three-state model;
+- retains an open-loop unstable mode at the upright equilibrium;
+- contributes to a nominal plant that is also rank-3 controllable and open-loop unstable.
+
+These checks catch the failure mode where a numerically generated linear model replays acceptably for one dataset but no longer represents the unstable controllable plant that the controller is supposed to stabilize.
 
 ## Replay parity
 
@@ -135,21 +148,24 @@ Do not invent universal RMSE thresholds before the sensor noise floor and repeat
 Once empirical limits are established, enforce them explicitly:
 
 ```powershell
-python tools/twtool.py plant replay model.json validation.csv `
-  -o parity.json `
+python tools/twtool.py plant calibrate artifacts/calibration.csv `
+  --validation artifacts/validation.csv `
   --max-theta-rollout-rmse-deg <limit> `
   --max-rate-rollout-rmse <limit> `
-  --max-wheel-rollout-rmse <limit>
+  --max-wheel-rollout-rmse <limit> `
+  --output-dir artifacts/plant-calibration
 ```
 
 A plant may proceed to H-infinity synthesis only when all of the following are true:
 
-- the fit itself satisfies the existing sample/rank/excitation/significance gates;
+- the fit itself satisfies the sample/rank/excitation/significance gates;
+- the selected linear plants pass the fit gate above;
 - replay uses an independent holdout dataset;
 - the validation experiment stays inside the declared local-angle validity envelope;
-- the supplied parity thresholds pass;
-- the model preserves the observed actuator sign and unstable/stable mode structure;
+- explicit parity thresholds are supplied and pass;
 - A/B/C variation is carried into the uncertainty model rather than silently averaged away.
+
+A holdout replay with no thresholds is `REVIEW`, not `PASS`.
 
 ## Standup traces are validation evidence, not primary fitting data
 
@@ -168,10 +184,22 @@ Do not refit the plant from every failed standup trial. If parity fails, return 
 
 ## H-infinity handoff
 
-Only after holdout parity passes should the existing synthesis path be used:
+H-infinity synthesis no longer accepts a raw active-ID CSV as its authority. It consumes only a calibration manifest whose synthesis gate is `PASS`:
 
 ```powershell
-python tools/twtool.py fit hinf artifacts/calibration.csv ...
+python tools/twtool.py fit hinf `
+  artifacts/plant-calibration/calibration-manifest.json `
+  --output-dir artifacts/hinf
 ```
 
-The robust-control model should then be derived from the validated per-vertex plant family, not from manually tuned standup gains.
+Before synthesis, the pipeline verifies:
+
+- `validation_mode == external_holdout`;
+- `fit_gate.status == PASS`;
+- `parity_acceptance.status == PASS`;
+- `synthesis_gate.status == PASS`;
+- the validated `linear-model.json` SHA-256 still matches the manifest.
+
+It then builds the empirical A/B/C polytopic uncertainty model from that exact validated linear model, runs H-infinity synthesis, emits the balance deployment command, and writes `synthesis-provenance.json` containing the manifest/model/output hashes.
+
+This is deliberately a hard gate: if the calibration is in-sample, thresholds are unset/failed, a selected fit is diagnostic-only, or the validated model has changed, synthesis stops before the solver is invoked.
