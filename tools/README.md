@@ -137,6 +137,9 @@ Other examples:
 ```powershell
 python tools/twtool.py id swing --probes 12 -o artifacts/auto-swing-id-01.csv
 python tools/twtool.py fit body-active artifacts/body-active-B.csv -o artifacts/body-active-B-fit.json
+python tools/twtool.py plant merge-active artifacts/plant-id/calibration/A.csv `
+  artifacts/plant-id/calibration/B.csv artifacts/plant-id/calibration/C.csv `
+  -o artifacts/plant-id/calibration.csv
 python tools/twtool.py plant calibrate artifacts/plant-id/calibration.csv `
   --validation artifacts/plant-id/validation.csv `
   --output-dir artifacts/plant-calibration
