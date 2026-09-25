@@ -33,6 +33,7 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
       config.rate_switch_rad_s,
       config.lqr_k_angle_unstable,
       config.lqr_k_rate_unstable,
+      config.lqr_k_rate_recovery_unstable,
       config.lqr_k_wheel_unstable,
       config.lqr_k_angle_stable,
       config.lqr_k_rate_stable,
@@ -188,8 +189,18 @@ StandupControllerOutput StandupController::update(
   const float filtered_rate_deg_s = filtered_rate_rad_s_ * kRadToDeg;
   const float k_angle = stable_ ? config_.lqr_k_angle_stable
                                 : config_.lqr_k_angle_unstable;
-  const float k_rate = stable_ ? config_.lqr_k_rate_stable
-                               : config_.lqr_k_rate_unstable;
+  float k_rate = stable_ ? config_.lqr_k_rate_stable
+                         : config_.lqr_k_rate_unstable;
+  if (!stable_) {
+    // e * de/dt >= 0 means the body is moving away from the upright (or is
+    // crossing it with finite rate). Use stronger damping only in that half of
+    // phase space; retain the lower gain while approaching so capture energy is
+    // not removed before the body reaches zero error.
+    const bool moving_away_or_crossing = error_deg * filtered_rate_deg_s >= 0.0F;
+    if (moving_away_or_crossing) {
+      k_rate = config_.lqr_k_rate_recovery_unstable;
+    }
+  }
   const float k_wheel = stable_ ? config_.lqr_k_wheel_stable
                                 : config_.lqr_k_wheel_unstable;
 
