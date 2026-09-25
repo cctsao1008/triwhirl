@@ -101,7 +101,7 @@ artifacts/plant-calibration/replay-parity.csv
 artifacts/plant-calibration/calibration-manifest.json
 ```
 
-The first holdout result is a measurement, not an automatic pass. Do not invent RMSE limits after seeing one convenient run. Establish thresholds from repeated validation/noise/repeatability evidence, then rerun with explicit limits:
+The first holdout result is a measurement, not an automatic pass. Use repeated validation/noise/repeatability runs to choose engineering thresholds; do not set the limits merely high enough to make the first result pass. Once justified, rerun with explicit limits:
 
 ```powershell
 python tools/twtool.py plant calibrate `
@@ -125,7 +125,7 @@ synthesis_gate.status
 
 ## 6. Validated H-infinity synthesis
 
-The synthesis pipeline now accepts only the validated calibration manifest. It does not refit from the raw CSV and it refuses to run if the holdout/parity/fit gate is not `PASS` or if the validated linear-model hash changed.
+The synthesis pipeline accepts only the validated calibration manifest. It does not refit from the raw CSV and it refuses to run if the holdout/parity/fit gate is not `PASS` or if the validated linear-model hash changed.
 
 ```powershell
 python tools/twtool.py fit hinf `
