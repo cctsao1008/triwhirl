@@ -27,13 +27,13 @@ struct StandupControllerConfig {
 
   // Trace-tuned commissioning gains. The control structure remains the vendor
   // style outer state feedback -> reaction-wheel velocity target -> velocity PI.
-  // standup-20260925-222148 reached about +1 deg but the first capture still
-  // reversed before the upright. Restore the vendor -8 angle term while keeping
-  // reduced wheel feedback/integral protections to add approach authority without
-  // reintroducing the original momentum runaway.
+  // standup-20260925-223404 with Ktheta=-8 reached about +0.7 deg, but the body
+  // rate crossed zero around +1.45 deg and the capture reversed before upright.
+  // Keep the restored angle authority and reduce only approach-rate damping for
+  // the next A/B trial. Wheel feedback and inner-loop gains remain fixed.
   // Angle/rate are in degrees(/s); wheel and target velocity are in rad/s.
   float lqr_k_angle_unstable = -8.0F;
-  float lqr_k_rate_unstable = 0.45F;
+  float lqr_k_rate_unstable = 0.35F;
   float lqr_k_wheel_unstable = 0.30F;
   float lqr_k_angle_stable = -2.5F;
   float lqr_k_rate_stable = 0.35F;
@@ -44,9 +44,9 @@ struct StandupControllerConfig {
   // input to that envelope before applying the retained 0.6/0.4 gyro filter.
   float gyro_rate_limit_rad_s = 4.36332313F;  // 250 deg/s
 
-  // Keep the restored vendor proportional velocity gain while testing angle
-  // authority. Reduced integral gain, wheel feedback, anti-windup, and recapture
-  // reset remain in place so Ktheta is still the only dynamics variable changed.
+  // Keep the restored vendor proportional velocity gain while testing capture
+  // damping. Reduced integral gain, wheel feedback, anti-windup, and recapture
+  // reset remain in place so Krate is the only dynamics variable changed.
   float velocity_p_unstable = 0.035F;
   float velocity_i_unstable = 0.150F;
   float velocity_p_stable = 0.018F;
