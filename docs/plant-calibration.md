@@ -2,6 +2,8 @@
 
 This document defines the plant-modeling gate between hardware commissioning and H-infinity synthesis.
 
+The current commissioning phase is **plant calibration**, not standup-gain tuning. Freeze standup controller gain iteration while this phase is active.
+
 The objective is not to tune the standup controller until the hardware appears to balance. The objective is to build a local physical model that can reproduce measured near-upright motion under the same measured actuator input, validate that model on data not used for fitting, and only then promote it into robust-control synthesis.
 
 ## State and input contract
