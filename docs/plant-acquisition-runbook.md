@@ -2,7 +2,7 @@
 
 This runbook is the hardware data-collection companion to [`plant-calibration.md`](plant-calibration.md).
 
-The standup commissioning controller is frozen while this dataset is collected. Do not use failed standup traces as fitting data.
+The standup commissioning controller is frozen while this dataset is collected. Do not tune standup gains, change the plant coordinate convention, or use failed standup traces as fitting data during this phase.
 
 ## 1. Preflight
 
