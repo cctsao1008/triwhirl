@@ -168,6 +168,9 @@ void testVelocityOutputRamp() {
 void testVelocityLoopResetsOnRecapture() {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = degToRad(68.0F);
+  // This test isolates recapture reset behavior. Keep proportional action out
+  // of the output rail so anti-windup does not intentionally hold the integral.
+  config.velocity_p_unstable = 0.0F;
   config.velocity_i_unstable = 4.0F;
   triwhirl::StandupController controller(config);
 
