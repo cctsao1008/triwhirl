@@ -16,6 +16,11 @@ float signOr(const float value, const int fallback) {
   return fallback >= 0 ? 1.0F : -1.0F;
 }
 
+bool crossedZero(const float previous, const float current) {
+  return (previous > 0.0F && current <= 0.0F) ||
+         (previous < 0.0F && current >= 0.0F);
+}
+
 }  // namespace
 
 StandupController::StandupController(const StandupControllerConfig& config) {
@@ -82,12 +87,14 @@ bool StandupController::configure(const StandupControllerConfig& config) {
   output_.theta_reference_rad = theta_reference_rad_;
   filtered_rate_rad_s_ = 0.0F;
   resetVelocityLoop();
+  previous_balance_error_rad_ = 0.0F;
   previous_update_us_ = 0U;
   last_unstable_us_ = 0U;
   last_momentum_adjust_us_ = 0U;
   swing_rate_sign_ = 1;
   stable_ = false;
   was_balancing_ = false;
+  capture_crossed_upright_ = false;
   return true;
 }
 
@@ -103,12 +110,14 @@ void StandupController::reset(const StandupControllerInput& input) {
   output_.theta_reference_rad = theta_reference_rad_;
   filtered_rate_rad_s_ = 0.0F;
   resetVelocityLoop();
+  previous_balance_error_rad_ = 0.0F;
   previous_update_us_ = input.now_us;
   last_unstable_us_ = input.now_us;
   last_momentum_adjust_us_ = input.now_us;
   swing_rate_sign_ = input.theta_rate_rad_s < 0.0F ? -1 : 1;
   stable_ = false;
   was_balancing_ = false;
+  capture_crossed_upright_ = false;
 }
 
 StandupControllerOutput StandupController::update(
@@ -152,6 +161,8 @@ StandupControllerOutput StandupController::update(
     output.valid = true;
 
     filtered_rate_rad_s_ = 0.0F;
+    previous_balance_error_rad_ = 0.0F;
+    capture_crossed_upright_ = false;
     was_balancing_ = false;
     output_ = output;
     return output_;
@@ -163,7 +174,17 @@ StandupControllerOutput StandupController::update(
     // 2026-09-23 trace showed failed captures leaving the integrator at -4 V,
     // which made subsequent captures begin fully saturated.
     resetVelocityLoop();
+    capture_crossed_upright_ = false;
+    previous_balance_error_rad_ = error_rad;
+  } else if (!capture_crossed_upright_ &&
+             crossedZero(previous_balance_error_rad_, error_rad)) {
+    // After the first true upright crossing, stay in the higher-damping settling
+    // mode until this capture attempt is released. A pure e*de/dt scheduler fell
+    // back to low damping on the return approach and allowed the second crossing
+    // to retain almost 1 rad/s in standup-20260925-235050.
+    capture_crossed_upright_ = true;
   }
+  previous_balance_error_rad_ = error_rad;
 
   const float vendor_rate_rad_s = std::clamp(
       input.theta_rate_rad_s, -config_.gyro_rate_limit_rad_s,
@@ -192,13 +213,16 @@ StandupControllerOutput StandupController::update(
   float k_rate = stable_ ? config_.lqr_k_rate_stable
                          : config_.lqr_k_rate_unstable;
   if (!stable_) {
-    // e * de/dt >= 0 means the body is moving away from the upright (or is
-    // crossing it with finite rate). Use stronger damping only in that half of
-    // phase space; retain the lower gain while approaching so capture energy is
-    // not removed before the body reaches zero error.
-    const bool moving_away_or_crossing = error_deg * filtered_rate_deg_s >= 0.0F;
-    if (moving_away_or_crossing) {
+    if (capture_crossed_upright_) {
       k_rate = config_.lqr_k_rate_recovery_unstable;
+    } else {
+      // Before the first crossing, retain stronger damping only when already
+      // moving away from zero. While approaching, use the lower gain so swing-up
+      // energy is not removed before reaching the upright.
+      const bool moving_away = error_deg * filtered_rate_deg_s >= 0.0F;
+      if (moving_away) {
+        k_rate = config_.lqr_k_rate_recovery_unstable;
+      }
     }
   }
   const float k_wheel = stable_ ? config_.lqr_k_wheel_stable
