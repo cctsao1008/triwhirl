@@ -235,6 +235,51 @@ void testConditionalAntiWindup() {
   assert(std::fabs(output.velocity_integral_v) < 1.0e-6F);
 }
 
+void testRecoveryDampingLatchesAfterFirstCrossing() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  config.lqr_k_angle_unstable = 0.0F;
+  config.lqr_k_rate_unstable = 0.35F;
+  config.lqr_k_rate_recovery_unstable = 0.55F;
+  config.lqr_k_wheel_unstable = 0.0F;
+  config.velocity_p_unstable = 0.0F;
+  config.velocity_i_unstable = 0.0F;
+  config.velocity_target_limit_rad_s = 100.0F;
+  triwhirl::StandupController controller(config);
+
+  triwhirl::StandupControllerInput input{};
+  input.valid = true;
+  input.now_us = 1000U;
+  input.theta_rad = degToRad(70.0F);  // +2 deg
+  input.theta_rate_rad_s = -1.0F;
+  input.wheel_rate_rad_s = 0.0F;
+  controller.reset(input);
+
+  auto output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+  // First approach still uses 0.35 damping: filtered rate = -0.4 rad/s.
+  const float first_expected = 0.35F * 0.4F * 180.0F / triwhirl::kPi;
+  assert(std::fabs(output.target_velocity_rad_s - first_expected) < 0.02F);
+
+  input.now_us += 1000U;
+  input.theta_rad = degToRad(67.8F);  // Cross to -0.2 deg.
+  input.theta_rate_rad_s = -1.0F;
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+
+  // Return toward zero after the first crossing. The stronger 0.55 damping must
+  // remain latched instead of dropping back to the 0.35 approach gain.
+  input.now_us += 1000U;
+  input.theta_rad = degToRad(67.0F);
+  input.theta_rate_rad_s = 1.0F;
+  output = controller.update(input);
+  input.now_us += 1000U;
+  input.theta_rad = degToRad(67.5F);
+  input.theta_rate_rad_s = 1.0F;
+  output = controller.update(input);
+  assert(output.target_velocity_rad_s < -12.0F);
+}
+
 void testPeriodicVerticesShareBalanceLaw() {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = degToRad(68.0F);
@@ -298,6 +343,7 @@ int main() {
   testVelocityOutputRamp();
   testVelocityLoopResetsOnRecapture();
   testConditionalAntiWindup();
+  testRecoveryDampingLatchesAfterFirstCrossing();
   testPeriodicVerticesShareBalanceLaw();
   testStableTransitionAndRecovery();
   return 0;
