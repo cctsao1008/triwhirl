@@ -101,9 +101,50 @@ artifacts/plant-calibration/replay-parity.csv
 artifacts/plant-calibration/calibration-manifest.json
 ```
 
-The first holdout result is a measurement, not an automatic pass. Do not invent RMSE limits after seeing one convenient run. Establish thresholds from repeated validation/noise/repeatability evidence, then rerun with explicit limits.
+The first holdout result is a measurement, not an automatic pass. Do not invent RMSE limits after seeing one convenient run. Establish thresholds from repeated validation/noise/repeatability evidence, then rerun with explicit limits:
 
-## 6. Standup closed-loop replay
+```powershell
+python tools/twtool.py plant calibrate `
+  artifacts\plant-id\calibration.csv `
+  --validation artifacts\plant-id\validation.csv `
+  --vertices auto `
+  --nominal mean `
+  --max-theta-rollout-rmse-deg <limit> `
+  --max-rate-rollout-rmse <limit> `
+  --max-wheel-rollout-rmse <limit> `
+  --output-dir artifacts\plant-calibration
+```
+
+Do not proceed until `calibration-manifest.json` reports all three of these as `PASS`:
+
+```text
+fit_gate.status
+parity_acceptance.status
+synthesis_gate.status
+```
+
+## 6. Validated H-infinity synthesis
+
+The synthesis pipeline now accepts only the validated calibration manifest. It does not refit from the raw CSV and it refuses to run if the holdout/parity/fit gate is not `PASS` or if the validated linear-model hash changed.
+
+```powershell
+python tools/twtool.py fit hinf `
+  artifacts\plant-calibration\calibration-manifest.json `
+  --output-dir artifacts\hinf
+```
+
+Expected outputs:
+
+```text
+artifacts/hinf/validated-polytope.json
+artifacts/hinf/validated-hinf.json
+artifacts/hinf/validated-balance-command.txt
+artifacts/hinf/synthesis-provenance.json
+```
+
+Keep `synthesis-provenance.json` with the controller artifact. It binds the controller to the exact calibration manifest and validated linear model by SHA-256.
+
+## 7. Standup closed-loop replay
 
 After a plant exists, a lossless standup CSV may be used as additional diagnostic evidence:
 
