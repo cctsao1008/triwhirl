@@ -214,14 +214,17 @@ StandupControllerOutput StandupController::update(
   const float filtered_rate_deg_s = filtered_rate_rad_s_ * kRadToDeg;
 
   if (!capture_crossed_upright_) {
-    // A low-energy approach can reverse a fraction of a degree before crossing
-    // zero.  That is still successful arrival at the upright neighbourhood, so
-    // latch settling as soon as the body is genuinely moving away from zero.
+    // A low-energy approach can reverse just before crossing zero. Treat that as
+    // arrival only inside the same +/-5-degree neighbourhood used for stable
+    // qualification. A reversal farther out is a failed approach and must retain
+    // the original 12-degree release path back to swing-up.
     const float phase_product = error_deg * filtered_rate_deg_s;
     const bool at_zero_with_motion =
         std::fabs(error_deg) < 1.0e-4F &&
         std::fabs(filtered_rate_deg_s) > 1.0e-4F;
-    if (phase_product > 0.0F || at_zero_with_motion) {
+    const bool reversal_near_upright = abs_error <= config_.stable_angle_rad;
+    if (reversal_near_upright &&
+        (phase_product > 0.0F || at_zero_with_motion)) {
       capture_crossed_upright_ = true;
       just_latched_settling = true;
     }
@@ -276,14 +279,14 @@ StandupControllerOutput StandupController::update(
                                  : config_.velocity_p_unstable;
   const float ki = settling_mode ? config_.velocity_i_recovery_unstable
                                  : config_.velocity_i_unstable;
-  // Reaction-wheel polarity matters here: positive Vq accelerates the wheel in
-  // the positive encoder direction, producing an opposite (negative) body torque.
-  // Therefore a positive body rate needs positive Vq to dissipate that motion;
-  // the damping voltage has the SAME sign as body rate in this coordinate.  The
-  // 2026-09-26 15:26 trace proved the previous minus sign was anti-damping: every
-  // settling sample drove Vq opposite the body-error side and accelerated escape.
+  // Empirical coordinate contract from standup-20260926-152656 near upright:
+  //   theta_rate=-2.424 rad/s, Vq=+2.358 V -> next rate=-2.059 rad/s
+  //   theta_rate=+2.753 rad/s, Vq=-2.374 V -> next rate=+2.313 rad/s
+  // Thus Vq and body angular acceleration have the same sign in the software
+  // coordinates. Dissipative damping must command Vq OPPOSITE body rate. This
+  // also matches the vendor outer-rate term, which is proportional to -Gyro.
   const float direct_recovery_vq = settling_mode
-      ? std::clamp(config_.recovery_rate_damping_v_per_rad_s *
+      ? std::clamp(-config_.recovery_rate_damping_v_per_rad_s *
                        filtered_rate_rad_s_,
                    -config_.recovery_rate_damping_limit_v,
                    config_.recovery_rate_damping_limit_v)
@@ -336,7 +339,7 @@ StandupControllerOutput StandupController::update(
   return output_;
 }
 
-const char* standupPhaseName(StandupPhase phase) {
+const char* standupPhaseName(const StandupPhase phase) {
   switch (phase) {
     case StandupPhase::kIdle: return "idle";
     case StandupPhase::kSwingHigh: return "swing_high";
