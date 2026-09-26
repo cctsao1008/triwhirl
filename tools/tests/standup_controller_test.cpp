@@ -56,6 +56,28 @@ void testSwingAndPreSettlingReleaseHysteresis() {
   assert(output.phase == triwhirl::StandupPhase::kSwingLow);
 }
 
+void testWideReversalDoesNotLatchSettling() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  triwhirl::StandupController controller(config);
+
+  // Enter the 9-degree capture region already moving away from upright. A
+  // reversal this far out is a failed approach, not proof that upright was
+  // acquired. It must retain the 12-degree release path back to swing-up.
+  auto input = makeInput(1000U, 60.0F, -1.0F);  // error = -8 deg, moving away
+  controller.reset(input);
+  auto output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+
+  input = makeInput(2000U, 57.5F, -1.0F);  // error = -10.5 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+
+  input = makeInput(3000U, 55.5F, -1.0F);  // error = -12.5 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kSwingLow);
+}
+
 void testVendorGyroEnvelopeOnApproach() {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = degToRad(68.0F);
@@ -220,22 +242,23 @@ void testReactionWheelDampingPolarity() {
   auto output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kBalance);
 
-  // Crossing with negative body rate latches settling. In the TriWhirl motor/
-  // encoder convention, negative body rate needs negative Vq: wheel torque is
-  // opposite body torque, so damping voltage has the SAME sign as body rate.
+  // Hardware trace standup-20260926-152656 establishes the software-coordinate
+  // polarity: positive Vq produces positive body angular acceleration and vice
+  // versa near upright. Therefore damping Vq must have the OPPOSITE sign of
+  // filtered body rate.
   input = makeInput(2000U, 67.8F, -1.0F);
   output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kBalance);
   assert(output.filtered_rate_rad_s < 0.0F);
-  assert(output.vq_target_v < -0.5F);
+  assert(output.vq_target_v > 0.5F);
 
-  // Let the retained 0.6/0.4 filter change sign after the body reverses.
+  // Let the retained 0.6/0.4 filter reverse sign after the body reverses.
   input = makeInput(3000U, 67.9F, 1.0F);
   output = controller.update(input);
   input = makeInput(4000U, 68.1F, 1.0F);
   output = controller.update(input);
   assert(output.filtered_rate_rad_s > 0.0F);
-  assert(output.vq_target_v > 0.5F);
+  assert(output.vq_target_v < -0.5F);
 }
 
 void testVelocityOutputRamp() {
@@ -303,6 +326,7 @@ void testPeriodicVerticesShareBalanceLaw() {
 int main() {
   testTunedDefaults();
   testSwingAndPreSettlingReleaseHysteresis();
+  testWideReversalDoesNotLatchSettling();
   testVendorGyroEnvelopeOnApproach();
   testBilateralSettlingPersistsUntilTrueFall();
   testSettlingClearsApproachIntegralBias();
