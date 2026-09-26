@@ -16,7 +16,6 @@ namespace {
 
 constexpr std::uint32_t kBalanceSensorFreshnessUs = 3000U;
 constexpr float kVendorStandupWheelLimitRadS = 160.0F;
-constexpr float kUprightHalfPeriodRad = 1.0471975512F;  // 60 deg
 
 triwhirl::BalanceControllerConfig balance_config{};
 bool balance_config_valid = false;
@@ -106,13 +105,20 @@ BalanceStartFailure mapStandupStartFailure(const StandupStartFailure failure) {
 
 void mirrorStandupOutput() {
   const auto status = runtimeStandupStatus();
+  const float abs_error = std::fabs(status.output.theta_error_rad);
+  const float abs_wheel_rate = std::fabs(state::wheel_state.velocity_rad_s);
+
   balance_output = {};
   balance_output.valid = status.output.valid;
   balance_output.capture_ready =
-      status.output.phase == triwhirl::StandupPhase::kBalance;
-  balance_output.inside_envelope = status.output.valid;
+      status.output.phase == triwhirl::StandupPhase::kBalance &&
+      abs_error <= status.config.balance_capture_rad &&
+      abs_wheel_rate <= kVendorStandupWheelLimitRadS;
+  balance_output.inside_envelope =
+      abs_error <= status.config.settling_fall_rad &&
+      abs_wheel_rate <= kVendorStandupWheelLimitRadS;
   balance_output.theta_error_rad = status.output.theta_error_rad;
-  balance_output.vq_unsaturated_v = status.output.vq_v;
+  balance_output.vq_unsaturated_v = status.output.vq_unclamped_v;
   balance_output.vq_v = status.output.vq_v;
 }
 
@@ -283,7 +289,7 @@ RuntimeBalanceStatus runtimeBalanceStatus() {
     status.config = {};
     status.config.theta_reference_rad = standup.output.theta_reference_rad;
     status.config.capture_angle_rad = standup.config.balance_capture_rad;
-    status.config.fall_angle_rad = kUprightHalfPeriodRad;
+    status.config.fall_angle_rad = standup.config.settling_fall_rad;
     status.config.vq_limit_v = standup.config.vq_limit_v;
     status.config.wheel_rate_limit_rad_s = kVendorStandupWheelLimitRadS;
     status.output = balance_output;
