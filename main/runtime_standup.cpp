@@ -8,6 +8,7 @@
 #include "runtime_state.hpp"
 #include "runtime_trace.hpp"
 #include "triwhirl/safety.hpp"
+#include "triwhirl/standup_commissioning.hpp"
 #include "triwhirl/upright_geometry.hpp"
 
 namespace triwhirl::runtime {
@@ -84,19 +85,8 @@ bool configureRuntimeStandup(const float theta_reference_rad) {
       !std::isfinite(theta_reference_rad)) {
     return false;
   }
-  triwhirl::StandupControllerConfig config{};
-  config.theta_reference_rad = theta_reference_rad;
-  config.vq_limit_v = state::kMotorVectorLimitV;
-
-  // Keep the already-good first approach unchanged. During bilateral settling,
-  // retain the gentle wheel-velocity P, disable settling integral memory, and add
-  // bounded direct body-rate damping. The sign of that damping is defined by the
-  // measured software-coordinate actuator polarity in StandupController.
-  config.velocity_p_recovery_unstable = 0.035F;
-  config.velocity_i_recovery_unstable = 0.0F;
-  config.recovery_rate_damping_v_per_rad_s = 2.0F;
-  config.recovery_rate_damping_limit_v = 2.5F;
-  config.velocity_target_limit_rad_s = 80.0F;
+  const auto config = triwhirl::makeStandupCommissioningConfig(
+      theta_reference_rad, state::kMotorVectorLimitV);
 
   if (config.pump_v_high > config.vq_limit_v ||
       !standup_controller.configure(config)) {

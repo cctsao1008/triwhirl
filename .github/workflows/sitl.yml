@@ -1,0 +1,36 @@
+name: Standup SITL
+
+on:
+  push:
+    paths:
+      - "components/triwhirl_core/**"
+      - "main/runtime_standup.cpp"
+      - "tools/sitl/**"
+      - ".github/workflows/sitl.yml"
+  pull_request:
+    paths:
+      - "components/triwhirl_core/**"
+      - "main/runtime_standup.cpp"
+      - "tools/sitl/**"
+      - ".github/workflows/sitl.yml"
+
+jobs:
+  deterministic-standup-sitl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native SITL
+        run: |
+          cmake -S tools/sitl -B /tmp/triwhirl-sitl-build
+          cmake --build /tmp/triwhirl-sitl-build --config Release
+      - name: Run invariant and closed-loop gates
+        run: /tmp/triwhirl-sitl-build/triwhirl-standup-sitl --self-test
+      - name: Generate deterministic evidence trace
+        run: |
+          /tmp/triwhirl-sitl-build/triwhirl-standup-sitl \
+            --scenario near-upright-positive \
+            --profile nominal \
+            --duration-ms 200 \
+            --output /tmp/triwhirl-standup-sitl.csv
+          test -s /tmp/triwhirl-standup-sitl.csv
+          head -n 5 /tmp/triwhirl-standup-sitl.csv
