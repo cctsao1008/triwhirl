@@ -19,6 +19,7 @@ from tools.triwhirl_tool.standup_trace import (  # noqa: E402
     HEADER,
     RECORD,
     RECORD_DT_CLAMPED,
+    RECORD_SETTLING,
     TRACE_MAGIC,
     TRACE_RECORDS_PER_FRAME,
     TRACE_VERSION,
@@ -83,7 +84,11 @@ def main() -> None:
         (
             frame(0, 0, [], FRAME_START),
             frame(1, 0, [record(0, 0), record(1, 995)]),
-            frame(2, 2, [record(2, 1005), record(3, 1000, 0x003B)]),
+            frame(
+                2,
+                2,
+                [record(2, 1005), record(3, 1000, 0x003B | RECORD_SETTLING)],
+            ),
             frame(3, 4, [], FRAME_END),
         )
     )
@@ -112,6 +117,8 @@ def main() -> None:
     assert abs(row["wheel_rate_rad_s"] + 23.0) < 1e-9
     assert row["phase"] == "balance"
     assert row["valid"]
+    assert not row["settling"]
+    assert parsed["records"][3]["settling"]
     assert abs(parsed["records"][1]["t_s"] - 0.000995) < 1e-12
     assert trace_end_seen(blob)
 
