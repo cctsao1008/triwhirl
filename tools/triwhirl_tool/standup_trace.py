@@ -20,6 +20,7 @@ FRAME_END = 1 << 1
 FRAME_OVERRUN = 1 << 2
 FRAME_FIRMWARE_DIRTY = 1 << 3
 RECORD_DT_CLAMPED = 1 << 7
+RECORD_SETTLING = 1 << 8
 PHASE_NAMES = {
     0: "idle",
     1: "swing_high",
@@ -151,11 +152,6 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
         payload = data[offset + HEADER.size : offset + frame_bytes]
         crc_ok = sample_count == 0 or (zlib.crc32(payload) & 0xFFFFFFFF) == payload_crc32
         if not crc_ok:
-            # A timed-out FreeRTOS stream-buffer write can leave a partial frame
-            # followed by a retry beginning with a fresh TWTR magic. Never trust
-            # the header counters or payload of a CRC-failed data frame; resync
-            # at the next magic so diagnostics report the real drop counters
-            # instead of values decoded from shifted bytes.
             crc_errors += 1
             next_magic = _resync_to_next_magic(data, offset)
             if next_magic is not None:
@@ -250,6 +246,7 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
                     "vq_saturated": bool(flags & (1 << 5)),
                     "safety_fault": bool(flags & (1 << 6)),
                     "dt_clamped": dt_clamped,
+                    "settling": bool(flags & RECORD_SETTLING),
                     "flags": flags,
                 }
             )
@@ -308,8 +305,6 @@ def parse_trace(raw: bytes | bytearray, *, tolerate_trailing: bool = True) -> di
 
 
 def trace_end_seen(raw: bytes | bytearray) -> bool:
-    # End marker is a header-only frame. Scanning from the last magic keeps this
-    # cheap while the host waits for the Core-0 transport to flush after stop.
     data = bytes(raw)
     pos = data.rfind(TRACE_MAGIC)
     while pos >= 0:
@@ -367,6 +362,7 @@ def save_trace(
         "vq_saturated",
         "safety_fault",
         "dt_clamped",
+        "settling",
         "flags",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as stream:
