@@ -276,8 +276,14 @@ StandupControllerOutput StandupController::update(
                                  : config_.velocity_p_unstable;
   const float ki = settling_mode ? config_.velocity_i_recovery_unstable
                                  : config_.velocity_i_unstable;
+  // Reaction-wheel polarity matters here: positive Vq accelerates the wheel in
+  // the positive encoder direction, producing an opposite (negative) body torque.
+  // Therefore a positive body rate needs positive Vq to dissipate that motion;
+  // the damping voltage has the SAME sign as body rate in this coordinate.  The
+  // 2026-09-26 15:26 trace proved the previous minus sign was anti-damping: every
+  // settling sample drove Vq opposite the body-error side and accelerated escape.
   const float direct_recovery_vq = settling_mode
-      ? std::clamp(-config_.recovery_rate_damping_v_per_rad_s *
+      ? std::clamp(config_.recovery_rate_damping_v_per_rad_s *
                        filtered_rate_rad_s_,
                    -config_.recovery_rate_damping_limit_v,
                    config_.recovery_rate_damping_limit_v)
