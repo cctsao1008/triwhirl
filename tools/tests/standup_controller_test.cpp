@@ -26,6 +26,7 @@ void testTunedDefaults() {
   assert(std::fabs(config.lqr_k_angle_unstable + 8.0F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_rate_unstable - 0.35F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_wheel_unstable - 0.30F) < 1.0e-6F);
+  assert(std::fabs(config.lqr_k_wheel_settling - 1.60F) < 1.0e-6F);
   assert(std::fabs(config.velocity_p_unstable - 0.035F) < 1.0e-6F);
   assert(std::fabs(config.velocity_i_unstable - 0.150F) < 1.0e-6F);
   assert(std::fabs(config.stable_angle_rad - degToRad(5.0F)) < 1.0e-6F);
@@ -61,19 +62,16 @@ void testWideReversalDoesNotLatchSettling() {
   config.theta_reference_rad = degToRad(68.0F);
   triwhirl::StandupController controller(config);
 
-  // Enter the 9-degree capture region already moving away from upright. A
-  // reversal this far out is a failed approach, not proof that upright was
-  // acquired. It must retain the 12-degree release path back to swing-up.
-  auto input = makeInput(1000U, 60.0F, -1.0F);  // error = -8 deg, moving away
+  auto input = makeInput(1000U, 60.0F, -1.0F);
   controller.reset(input);
   auto output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kBalance);
 
-  input = makeInput(2000U, 57.5F, -1.0F);  // error = -10.5 deg
+  input = makeInput(2000U, 57.5F, -1.0F);
   output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kBalance);
 
-  input = makeInput(3000U, 55.5F, -1.0F);  // error = -12.5 deg
+  input = makeInput(3000U, 55.5F, -1.0F);
   output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kSwingLow);
 }
@@ -104,6 +102,7 @@ void testBilateralSettlingPersistsUntilTrueFall() {
   config.lqr_k_angle_unstable = -8.0F;
   config.lqr_k_rate_unstable = 0.0F;
   config.lqr_k_wheel_unstable = 0.0F;
+  config.lqr_k_wheel_settling = 0.0F;
   config.velocity_p_unstable = 0.0F;
   config.velocity_i_unstable = 0.0F;
   config.velocity_p_recovery_unstable = 0.0F;
@@ -183,6 +182,7 @@ void testStableIsStatusOnlyAndReferenceStaysFixed() {
   config.lqr_k_angle_unstable = -8.0F;
   config.lqr_k_rate_unstable = 0.0F;
   config.lqr_k_wheel_unstable = 0.0F;
+  config.lqr_k_wheel_settling = 0.0F;
   config.velocity_p_unstable = 0.0F;
   config.velocity_i_unstable = 0.0F;
   config.velocity_p_recovery_unstable = 0.0F;
@@ -228,6 +228,7 @@ void testReactionWheelDampingPolarity() {
   config.lqr_k_angle_unstable = 0.0F;
   config.lqr_k_rate_unstable = 0.0F;
   config.lqr_k_wheel_unstable = 0.0F;
+  config.lqr_k_wheel_settling = 0.0F;
   config.velocity_p_unstable = 0.0F;
   config.velocity_i_unstable = 0.0F;
   config.velocity_p_recovery_unstable = 0.0F;
@@ -242,23 +243,62 @@ void testReactionWheelDampingPolarity() {
   auto output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kBalance);
 
-  // Hardware trace standup-20260926-152656 establishes the software-coordinate
-  // polarity: positive Vq produces positive body angular acceleration and vice
-  // versa near upright. Therefore damping Vq must have the OPPOSITE sign of
-  // filtered body rate.
   input = makeInput(2000U, 67.8F, -1.0F);
   output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kBalance);
   assert(output.filtered_rate_rad_s < 0.0F);
   assert(output.vq_target_v > 0.5F);
 
-  // Let the retained 0.6/0.4 filter reverse sign after the body reverses.
   input = makeInput(3000U, 67.9F, 1.0F);
   output = controller.update(input);
   input = makeInput(4000U, 68.1F, 1.0F);
   output = controller.update(input);
   assert(output.filtered_rate_rad_s > 0.0F);
   assert(output.vq_target_v < -0.5F);
+}
+
+void testSettlingWheelFeedbackPreservesRestoringVq() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  config.lqr_k_angle_unstable = -8.0F;
+  config.lqr_k_rate_unstable = 0.0F;
+  config.lqr_k_wheel_unstable = 0.0F;
+  config.lqr_k_wheel_settling = 1.60F;
+  config.velocity_p_unstable = 0.0F;
+  config.velocity_i_unstable = 0.0F;
+  config.velocity_p_recovery_unstable = 0.035F;
+  config.velocity_i_recovery_unstable = 0.0F;
+  config.recovery_rate_damping_v_per_rad_s = 0.0F;
+  config.velocity_target_limit_rad_s = 80.0F;
+  config.vq_limit_v = 4.0F;
+  triwhirl::StandupController controller(config);
+
+  auto input = makeInput(1000U, 70.0F, -1.0F, -7.0F);
+  controller.reset(input);
+  auto output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+
+  input = makeInput(2000U, 67.8F, -1.0F, -7.0F);
+  output = controller.update(input);
+  assert(output.settling);
+
+  // Reproduce the failure geometry seen in standup-20260926-205750: a tiny
+  // positive error with the wheel already carrying negative momentum. A
+  // position-only target would yield a positive velocity error and wrong-sign
+  // Vq here. +1.6*wheel keeps the commanded wheel acceleration restoring.
+  input = makeInput(3000U, 68.16F, 0.0F, -6.95F);
+  output = controller.update(input);
+  assert(output.settling);
+  assert(output.target_velocity_rad_s < input.wheel_rate_rad_s);
+  assert(output.velocity_error_rad_s < 0.0F);
+  assert(output.vq_target_v < 0.0F);
+
+  input = makeInput(4000U, 67.84F, 0.0F, 6.95F);
+  output = controller.update(input);
+  assert(output.settling);
+  assert(output.target_velocity_rad_s > input.wheel_rate_rad_s);
+  assert(output.velocity_error_rad_s > 0.0F);
+  assert(output.vq_target_v > 0.0F);
 }
 
 void testVelocityOutputRamp() {
@@ -332,6 +372,7 @@ int main() {
   testSettlingClearsApproachIntegralBias();
   testStableIsStatusOnlyAndReferenceStaysFixed();
   testReactionWheelDampingPolarity();
+  testSettlingWheelFeedbackPreservesRestoringVq();
   testVelocityOutputRamp();
   testConditionalAntiWindup();
   testPeriodicVerticesShareBalanceLaw();
