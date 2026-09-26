@@ -35,6 +35,7 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
       config.lqr_k_rate_unstable,
       config.lqr_k_rate_recovery_unstable,
       config.lqr_k_wheel_unstable,
+      config.lqr_k_wheel_settling,
       config.lqr_k_angle_stable,
       config.lqr_k_rate_stable,
       config.lqr_k_wheel_stable,
@@ -141,8 +142,6 @@ StandupControllerOutput StandupController::update(
   const float dt_s = static_cast<float>(elapsed_us) * 1.0e-6F;
   previous_update_us_ = input.now_us;
 
-  // The upright reference is fixed for the whole run. "stable" is a status
-  // qualification only; it must never recenter the equilibrium.
   const float error_rad =
       periodicUprightErrorRad(input.theta_rad, theta_reference_rad_);
   if (!std::isfinite(error_rad)) {
@@ -151,10 +150,6 @@ StandupControllerOutput StandupController::update(
   }
   const float abs_error = std::fabs(error_rad);
 
-  // Before the first crossing/reversal, preserve the seller-style 9/12-degree
-  // capture hysteresis so a bad approach can immediately return to swing-up.
-  // After settling is latched, keep balancing all the way to the explicit
-  // true-fall guard.
   const float hold_limit_rad = capture_crossed_upright_
                                    ? config_.settling_fall_rad
                                    : config_.balance_release_rad;
@@ -210,10 +205,6 @@ StandupControllerOutput StandupController::update(
   const float filtered_rate_deg_s = filtered_rate_rad_s_ * kRadToDeg;
 
   if (!capture_crossed_upright_) {
-    // A low-energy approach can reverse just before crossing zero. Treat that as
-    // arrival only inside the same +/-5-degree neighbourhood used for stable
-    // qualification. A reversal farther out is a failed approach and must retain
-    // the original 12-degree release path back to swing-up.
     const float phase_product = error_deg * filtered_rate_deg_s;
     const bool at_zero_with_motion =
         std::fabs(error_deg) < 1.0e-4F &&
@@ -226,10 +217,6 @@ StandupControllerOutput StandupController::update(
     }
   }
 
-  // One second inside +/-5 degrees is only a success/qualification flag. The
-  // same bilateral settling law keeps running afterward, and the fixed upright
-  // reference never moves. Leaving +/-5 degrees clears the flag but does not
-  // release settling or stop active correction.
   if (abs_error > config_.stable_angle_rad) {
     last_unstable_us_ = input.now_us;
     stable_ = false;
@@ -250,14 +237,15 @@ StandupControllerOutput StandupController::update(
   const bool settling_mode = capture_crossed_upright_;
   float target_velocity_unclamped = 0.0F;
   if (settling_mode) {
-    // Bilateral local regulator: wheel target is position restoring only. Body
-    // rate damping is applied independently in the Vq path below, so rate/wheel
-    // feedback cannot swamp the sign reversal of the position command.
-    //   error > 0 -> target < 0
-    //   error < 0 -> target > 0
-    target_velocity_unclamped = config_.lqr_k_angle_unstable * error_deg;
+    // Do not make the wheel target position-only. The inner loop later subtracts
+    // measured wheel speed, so position-only targeting lets already-accumulated
+    // wheel momentum cancel the restoring command. Retain the vendor's +1.6
+    // wheel-state feedback in settling while keeping body-rate damping decoupled
+    // in the direct Vq path below.
+    target_velocity_unclamped =
+        config_.lqr_k_angle_unstable * error_deg +
+        config_.lqr_k_wheel_settling * input.wheel_rate_rad_s;
   } else {
-    // First approach remains the already-proven seller-style state feedback.
     target_velocity_unclamped =
         config_.lqr_k_angle_unstable * error_deg +
         config_.lqr_k_rate_unstable * (-filtered_rate_deg_s) +
@@ -274,12 +262,13 @@ StandupControllerOutput StandupController::update(
                                  : config_.velocity_p_unstable;
   const float ki = settling_mode ? config_.velocity_i_recovery_unstable
                                  : config_.velocity_i_unstable;
-  // Empirical coordinate contract from standup-20260926-152656 near upright:
-  //   theta_rate=-2.424 rad/s, Vq=+2.358 V -> next rate=-2.059 rad/s
-  //   theta_rate=+2.753 rad/s, Vq=-2.374 V -> next rate=+2.313 rad/s
-  // Thus Vq and body angular acceleration have the same sign in the software
-  // coordinates. Dissipative damping must command Vq OPPOSITE body rate. This
-  // also matches the vendor outer-rate term, which is proportional to -Gyro.
+
+  // Near upright, the measured software-coordinate actuator sign is positive:
+  // positive Vq produces positive wheel acceleration and positive body angular
+  // acceleration. Therefore dissipative body-rate damping commands Vq opposite
+  // filtered body rate. With recovery P=0.035, the seller's 0.92 rate term would
+  // contribute about 1.85 V/(rad/s), close to the explicit 2.0 V/(rad/s) path;
+  // do not add that rate term again in the settling wheel target.
   const float direct_recovery_vq = settling_mode
       ? std::clamp(-config_.recovery_rate_damping_v_per_rad_s *
                        filtered_rate_rad_s_,
