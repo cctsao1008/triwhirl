@@ -24,6 +24,8 @@ FIT_FIELDS = (
     "trial",
     "vertex_id",
     "vertex_center_deg",
+    "source_vertex_id",
+    "source_vertex_center_deg",
     "phase",
     "theta_ref_rad",
     "planned_vq_v",
@@ -57,11 +59,20 @@ def _vertex_from_flags(flags: int) -> str:
     return found[0]
 
 
+def _local_error_rad(theta_rad: float, center_deg: float) -> float:
+    center_rad = math.radians(center_deg)
+    return math.atan2(
+        math.sin(theta_rad - center_rad),
+        math.cos(theta_rad - center_rad),
+    )
+
+
 def _fit_row(
     *,
     trial: int,
-    vertex_id: str,
-    center_deg: float,
+    source_vertex_id: str,
+    source_center_deg: float,
+    model_center_deg: float,
     phase: str,
     planned_vq_v: float,
     record: tuple[int, float, float, float, float, float, int, int, int],
@@ -77,16 +88,28 @@ def _fit_row(
         _flags,
         _raw_count,
     ) = record
+
+    # All legal upright passages are the same local control coordinate. Preserve
+    # the physical source orientation as provenance, but normalize the actual fit
+    # signal to one canonical upright reference so the downstream legacy fitter
+    # pools every autonomous crossing into one plant instead of inventing A/B/C
+    # controller identities.
+    local_error = _local_error_rad(theta_rad, source_center_deg)
+    model_ref_rad = math.radians(model_center_deg)
+    normalized_theta_rad = model_ref_rad + local_error
+
     return (
-        3,
+        4,
         trial,
-        vertex_id,
-        center_deg,
+        "A",  # compatibility label for the existing fitter; not a control identity
+        model_center_deg,
+        source_vertex_id,
+        source_center_deg,
         phase,
-        math.radians(center_deg),
+        model_ref_rad,
         planned_vq_v,
         t_us,
-        theta_rad,
+        normalized_theta_rad,
         theta_rate_rad_s,
         wheel_rate_rad_s,
         vq_v,
@@ -103,6 +126,7 @@ def extract_fit_rows(
 
     records = list(twlog.iter_records(payload))
     centers = vertex_centers_deg(vertex_a_deg)
+    model_center_deg = centers["A"]
     rows: list[tuple[object, ...]] = []
     trial = 0
     index = 0
@@ -114,33 +138,32 @@ def extract_fit_rows(
             continue
 
         start = index
-        vertex_id = _vertex_from_flags(flags)
+        source_vertex_id = _vertex_from_flags(flags)
         while index < len(records) and (int(records[index][7]) & RECORD_PROBE_ACTIVE):
             current_vertex = _vertex_from_flags(int(records[index][7]))
-            if current_vertex != vertex_id:
+            if current_vertex != source_vertex_id:
                 raise RuntimeError(
                     "vertex flag changed inside one contiguous probe window: "
-                    f"{vertex_id}->{current_vertex}"
+                    f"{source_vertex_id}->{current_vertex}"
                 )
             index += 1
         stop = index
 
         trial += 1
-        center_deg = centers[vertex_id]
+        source_center_deg = centers[source_vertex_id]
         planned_vq_v = float(records[start][4])
         probe_phase = "zero_vector" if abs(planned_vq_v) <= 1.0e-6 else "active"
 
-        # Keep one pre-probe record as the fitter's kinematic anchor.  Native
-        # swing ID now switches from the coarse pump to an independent probe
-        # schedule at Probe entry, so the armed sample may intentionally carry
-        # a different Vq.  The fitter rejects derivative windows that cross
-        # that input transition and uses firmware t_us as the time authority.
+        # Keep one pre-probe record as the fitter's kinematic anchor. Native swing
+        # ID can change from coarse pump to the probe schedule at Probe entry; the
+        # fitter rejects derivative windows that cross that Vq transition.
         if start > 0:
             rows.append(
                 _fit_row(
                     trial=trial,
-                    vertex_id=vertex_id,
-                    center_deg=center_deg,
+                    source_vertex_id=source_vertex_id,
+                    source_center_deg=source_center_deg,
+                    model_center_deg=model_center_deg,
                     phase="armed",
                     planned_vq_v=planned_vq_v,
                     record=records[start - 1],
@@ -151,8 +174,9 @@ def extract_fit_rows(
             rows.append(
                 _fit_row(
                     trial=trial,
-                    vertex_id=vertex_id,
-                    center_deg=center_deg,
+                    source_vertex_id=source_vertex_id,
+                    source_center_deg=source_center_deg,
+                    model_center_deg=model_center_deg,
                     phase=probe_phase,
                     planned_vq_v=planned_vq_v,
                     record=records[probe_index],
@@ -178,6 +202,10 @@ def write_fit_csv(
         writer.writerow(FIT_FIELDS)
         writer.writerows(rows)
     trials = len({int(row[1]) for row in rows})
-    print(f"saved fit-ready swing windows: {trials} trials, {len(rows)} rows")
+    sources = sorted({str(row[4]) for row in rows})
+    print(
+        "saved local-normalized fit-ready swing windows: "
+        f"{trials} trials, {len(rows)} rows, source orientations={','.join(sources)}"
+    )
     print(output_path)
     return trials
