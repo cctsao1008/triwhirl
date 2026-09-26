@@ -223,9 +223,13 @@ StandupControllerOutput StandupController::update(
       k_rate = config_.lqr_k_rate_recovery_unstable;
     } else {
       // Before the first crossing, switch to recovery only after a real reversal
-      // away from zero. Strict >0 avoids treating zero filtered rate at capture
-      // entry as recovery, which would unnecessarily disturb the proven approach.
-      const bool moving_away = error_deg * filtered_rate_deg_s > 0.0F;
+      // away from zero. At exactly zero angle, any finite rate is also recovery;
+      // at nonzero angle with zero rate we stay in the gentler approach loop.
+      const float phase_product = error_deg * filtered_rate_deg_s;
+      const bool at_zero_with_motion =
+          std::fabs(error_deg) < 1.0e-4F &&
+          std::fabs(filtered_rate_deg_s) > 1.0e-4F;
+      const bool moving_away = phase_product > 0.0F || at_zero_with_motion;
       if (moving_away) {
         recovery_mode = true;
         k_rate = config_.lqr_k_rate_recovery_unstable;
