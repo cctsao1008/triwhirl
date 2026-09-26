@@ -46,16 +46,17 @@ struct StandupControllerConfig {
   // input to that envelope before applying the retained 0.6/0.4 gyro filter.
   float gyro_rate_limit_rad_s = 4.36332313F;  // 250 deg/s
 
-  // Approach and recovery use separate wheel-velocity loops. The aggressive
-  // recovery defaults come from standup-20260926-113950: outer recovery target
-  // saturated at -80 rad/s while applied Vq still stayed below the +/-4 V rail,
-  // proving the 0.035 inner P was the remaining authority bottleneck. Use a fast
-  // P-only recovery loop so the first approach remains unchanged but recovery can
-  // spend the available voltage immediately without integral windup.
+  // Approach and recovery may use separate wheel-velocity loops. Defaults keep
+  // the aggressive recovery path used during commissioning; runtime overrides may
+  // deliberately return the recovery PI to the gentler approach P while adding a
+  // direct body-rate damping voltage below. This decouples damping authority from
+  // angle stiffness instead of multiplying both through a larger velocity P.
   float velocity_p_unstable = 0.035F;
   float velocity_i_unstable = 0.150F;
   float velocity_p_recovery_unstable = 0.100F;
   float velocity_i_recovery_unstable = 0.0F;
+  float recovery_rate_damping_v_per_rad_s = 0.0F;
+  float recovery_rate_damping_limit_v = 0.0F;
   float velocity_p_stable = 0.018F;
   float velocity_i_stable = 0.100F;
   float velocity_target_limit_rad_s = 60.0F;
