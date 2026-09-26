@@ -6,12 +6,14 @@ on:
       - "components/triwhirl_core/**"
       - "main/runtime_standup.cpp"
       - "tools/sitl/**"
+      - "tools/visualization/triwhirl-sim-viewer/**"
       - ".github/workflows/sitl.yml"
   pull_request:
     paths:
       - "components/triwhirl_core/**"
       - "main/runtime_standup.cpp"
       - "tools/sitl/**"
+      - "tools/visualization/triwhirl-sim-viewer/**"
       - ".github/workflows/sitl.yml"
 
 jobs:
@@ -23,14 +25,20 @@ jobs:
         run: |
           cmake -S tools/sitl -B /tmp/triwhirl-sitl-build
           cmake --build /tmp/triwhirl-sitl-build --config Release
-      - name: Run invariant and closed-loop gates
+      - name: Run invariant and long-run closed-loop gates
         run: /tmp/triwhirl-sitl-build/triwhirl-standup-sitl --self-test
-      - name: Generate deterministic evidence trace
+      - name: Generate 10-second balance evidence
         run: |
           /tmp/triwhirl-sitl-build/triwhirl-standup-sitl \
-            --scenario near-upright-positive \
+            --scenario balance-demo \
             --profile nominal \
-            --duration-ms 200 \
-            --output /tmp/triwhirl-standup-sitl.csv
-          test -s /tmp/triwhirl-standup-sitl.csv
-          head -n 5 /tmp/triwhirl-standup-sitl.csv
+            --duration-ms 10000 \
+            --require-balance-gate \
+            --output /tmp/triwhirl-balance-demo.csv
+          test -s /tmp/triwhirl-balance-demo.csv
+          head -n 3 /tmp/triwhirl-balance-demo.csv
+          tail -n 3 /tmp/triwhirl-balance-demo.csv
+      - name: Check WebUI bridge syntax
+        run: |
+          python -m py_compile tools/visualization/triwhirl-sim-viewer/serve_live.py
+          python tools/visualization/triwhirl-sim-viewer/serve_live.py --help >/dev/null

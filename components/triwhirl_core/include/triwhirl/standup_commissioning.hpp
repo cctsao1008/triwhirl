@@ -12,10 +12,17 @@ inline StandupControllerConfig makeStandupCommissioningConfig(
   StandupControllerConfig config{};
   config.theta_reference_rad = theta_reference_rad;
   config.vq_limit_v = vq_limit_v;
+
+  // Keep the proven first-approach law untouched. The values below apply only
+  // after the settling latch and are the current simulation-gated commissioning
+  // candidate. They are intentionally shared with firmware even though hardware
+  // use remains blocked until the long-run WebUI/SITL gate is accepted.
+  config.lqr_k_angle_settling = -22.33F;
+  config.lqr_k_wheel_settling = 9.20F;
   config.velocity_p_recovery_unstable = 0.035F;
   config.velocity_i_recovery_unstable = 0.0F;
-  config.recovery_rate_damping_v_per_rad_s = 2.0F;
-  config.recovery_rate_damping_limit_v = 2.5F;
+  config.recovery_rate_damping_v_per_rad_s = 4.31F;
+  config.recovery_rate_damping_limit_v = vq_limit_v;
   config.velocity_target_limit_rad_s = 80.0F;
   return config;
 }

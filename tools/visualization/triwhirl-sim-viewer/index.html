@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TriWhirl Simulation Console</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">△</div>
+        <div>
+          <div class="brand-title">TriWhirl</div>
+          <div class="brand-subtitle">Standup & Balance Simulation Console</div>
+        </div>
+      </div>
+      <div class="top-status">
+        <div class="status-chip" id="model-chip">model: —</div>
+        <div class="status-chip" id="stream-chip">SIM: disconnected</div>
+        <div class="status-chip status-danger">SIMULATION ONLY</div>
+        <div class="status-chip gate-blocked" id="gate-chip">SIM GATE: BLOCKED</div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <main class="main-panel">
+        <section class="scene-card">
+          <div class="section-head">
+            <div>
+              <div class="section-title">Reaction-wheel Reuleaux triangle</div>
+              <div class="section-subtitle">Local upright model · production StandupController · browser is display-only</div>
+            </div>
+            <div class="controls">
+              <label>Plant
+                <select id="profile">
+                  <option value="nominal" selected>Nominal B/C midpoint</option>
+                  <option value="B">Provisional B</option>
+                  <option value="C">Provisional C</option>
+                </select>
+              </label>
+              <label>Speed
+                <select id="speed">
+                  <option value="0.5">0.5×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="2">2×</option>
+                  <option value="5">5×</option>
+                </select>
+              </label>
+              <button id="run">▶ Run 10 s gate</button>
+              <button id="stop" disabled>■ Stop</button>
+            </div>
+          </div>
+
+          <div class="scene-wrap">
+            <canvas id="scene" width="960" height="600"></canvas>
+            <div class="scene-overlay">
+              <span id="time-readout">t = 0.000 s</span>
+              <span id="phase-readout">phase: —</span>
+            </div>
+          </div>
+
+          <div class="plot-card">
+            <div class="plot-title">Rolling 10 s evidence: body error (deg) / applied Vq (V)</div>
+            <canvas id="history" width="960" height="180"></canvas>
+          </div>
+        </section>
+      </main>
+
+      <aside class="right-panel">
+        <section class="info-card">
+          <div class="card-title">True virtual state</div>
+          <div class="kv"><span>θ error</span><strong id="theta">—</strong></div>
+          <div class="kv"><span>θ̇</span><strong id="theta-dot">—</strong></div>
+          <div class="kv"><span>Wheel rate</span><strong id="wheel-rate">—</strong></div>
+          <div class="kv"><span>Wheel angle</span><strong id="wheel-angle">—</strong></div>
+        </section>
+
+        <section class="info-card">
+          <div class="card-title">Production control path</div>
+          <div class="kv"><span>Phase</span><strong id="phase">—</strong></div>
+          <div class="kv"><span>Settling</span><strong id="settling">—</strong></div>
+          <div class="kv"><span>Stable</span><strong id="stable">—</strong></div>
+          <div class="kv"><span>Filtered rate</span><strong id="filtered-rate">—</strong></div>
+          <div class="kv"><span>Wheel target</span><strong id="target">—</strong></div>
+          <div class="kv"><span>Velocity error</span><strong id="velocity-error">—</strong></div>
+          <div class="kv"><span>PI integral</span><strong id="integral">—</strong></div>
+          <div class="kv"><span>Vq unclamped</span><strong id="vq-unclamped">—</strong></div>
+          <div class="kv"><span>Vq applied</span><strong id="vq">—</strong></div>
+        </section>
+
+        <section class="info-card">
+          <div class="card-title">Gate</div>
+          <div class="kv"><span>Scenario</span><strong>3° / −0.5 rad/s</strong></div>
+          <div class="kv"><span>Duration</span><strong>10.0 s</strong></div>
+          <div class="kv"><span>Result</span><strong id="gate-result">—</strong></div>
+          <div class="scope" id="gate-summary">Run the simulation gate.</div>
+        </section>
+
+        <section class="warning-card">
+          <div class="warning-title">PROVISIONAL PLANT EVIDENCE</div>
+          <div class="warning-copy">
+            B/C local fits are commissioning evidence, not a validated digital twin.
+            A visual PASS does not authorize hardware by itself.
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <footer class="statusbar">
+      <span>native controller: 1 kHz</span>
+      <span>RK4 plant: 100 µs</span>
+      <span>display: ≤60 fps via SSE</span>
+      <span>NO PHYSICAL AUTHORITY</span>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

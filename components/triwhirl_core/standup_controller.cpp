@@ -35,6 +35,7 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
       config.lqr_k_rate_unstable,
       config.lqr_k_rate_recovery_unstable,
       config.lqr_k_wheel_unstable,
+      config.lqr_k_angle_settling,
       config.lqr_k_wheel_settling,
       config.lqr_k_angle_stable,
       config.lqr_k_rate_stable,
@@ -237,13 +238,13 @@ StandupControllerOutput StandupController::update(
   const bool settling_mode = capture_crossed_upright_;
   float target_velocity_unclamped = 0.0F;
   if (settling_mode) {
-    // Do not make the wheel target position-only. The inner loop later subtracts
-    // measured wheel speed, so position-only targeting lets already-accumulated
-    // wheel momentum cancel the restoring command. Retain the vendor's +1.6
-    // wheel-state feedback in settling while keeping body-rate damping decoupled
-    // in the direct Vq path below.
+    // Settling has an independent angle gain so local balance tuning does not
+    // perturb the first-approach handoff. Keep wheel-state feedback explicit:
+    // the nested velocity loop later subtracts measured wheel speed, so a gain
+    // above one can preserve restoring acceleration against accumulated wheel
+    // momentum. Body-rate damping remains decoupled in the direct Vq path.
     target_velocity_unclamped =
-        config_.lqr_k_angle_unstable * error_deg +
+        config_.lqr_k_angle_settling * error_deg +
         config_.lqr_k_wheel_settling * input.wheel_rate_rad_s;
   } else {
     target_velocity_unclamped =
@@ -263,12 +264,9 @@ StandupControllerOutput StandupController::update(
   const float ki = settling_mode ? config_.velocity_i_recovery_unstable
                                  : config_.velocity_i_unstable;
 
-  // Near upright, the measured software-coordinate actuator sign is positive:
-  // positive Vq produces positive wheel acceleration and positive body angular
-  // acceleration. Therefore dissipative body-rate damping commands Vq opposite
-  // filtered body rate. With recovery P=0.035, the seller's 0.92 rate term would
-  // contribute about 1.85 V/(rad/s), close to the explicit 2.0 V/(rad/s) path;
-  // do not add that rate term again in the settling wheel target.
+  // In the measured software coordinate, dissipative body-rate feedback must
+  // command Vq opposite filtered body rate. Keep it separate from the wheel
+  // target so the two feedback roles can be audited and commissioned directly.
   const float direct_recovery_vq = settling_mode
       ? std::clamp(-config_.recovery_rate_damping_v_per_rad_s *
                        filtered_rate_rad_s_,

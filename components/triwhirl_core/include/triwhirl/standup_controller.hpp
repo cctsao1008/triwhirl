@@ -29,20 +29,21 @@ struct StandupControllerConfig {
   float pump_v_high = 0.42F;
   float rate_switch_rad_s = 0.03F;
 
-  // Trace-tuned commissioning gains. The first approach keeps the vendor-style
-  // outer state feedback -> reaction-wheel velocity target -> velocity PI path.
-  // After upright acquisition, angle restoring and wheel-momentum feedback form
-  // the wheel target while body-rate damping is applied independently in Vq.
-  // Angle/rate are in degrees(/s); wheel and target velocity are in rad/s.
+  // First-approach seller-style state feedback. Angle/rate are in degrees(/s);
+  // wheel and target velocity are in rad/s.
   float lqr_k_angle_unstable = -8.0F;
   float lqr_k_rate_unstable = 0.35F;
   float lqr_k_rate_recovery_unstable = 0.55F;  // retained legacy tuning field
   float lqr_k_wheel_unstable = 0.30F;
-  // The seller's non-stable LQR uses +1.6 * wheel speed. In the nested velocity
-  // loop this is essential: after subtracting measured wheel speed, a gain above
-  // one preserves restoring wheel acceleration instead of letting accumulated
-  // wheel momentum cancel the angle command.
+
+  // Settling has its own angle gain so local balance commissioning cannot
+  // silently change the already-established swing/capture approach law. The
+  // wheel term remains explicit because the nested wheel-velocity loop later
+  // subtracts measured wheel speed; a gain above one can preserve restoring
+  // wheel acceleration in the presence of accumulated momentum.
+  float lqr_k_angle_settling = -8.0F;
   float lqr_k_wheel_settling = 1.60F;
+
   float lqr_k_angle_stable = -2.5F;  // retained legacy tuning field
   float lqr_k_rate_stable = 0.35F;   // retained legacy tuning field
   float lqr_k_wheel_stable = 0.20F;  // retained legacy tuning field
@@ -52,9 +53,7 @@ struct StandupControllerConfig {
   // input to that envelope before applying the retained 0.6/0.4 gyro filter.
   float gyro_rate_limit_rad_s = 4.36332313F;  // 250 deg/s
 
-  // Approach and settling use separate wheel-velocity PI settings. The runtime
-  // currently uses the same P on both paths, no settling integral, plus bounded
-  // direct body-rate damping in the Vq path.
+  // Approach and settling use separate wheel-velocity PI settings.
   float velocity_p_unstable = 0.035F;
   float velocity_i_unstable = 0.150F;
   float velocity_p_recovery_unstable = 0.100F;
