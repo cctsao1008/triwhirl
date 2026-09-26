@@ -96,6 +96,7 @@ struct StandupControllerOutput {
   float target_velocity_rad_s = 0.0F;
   float velocity_error_rad_s = 0.0F;
   float velocity_integral_v = 0.0F;
+  float vq_unclamped_v = 0.0F;
   float vq_target_v = 0.0F;
   float vq_v = 0.0F;
 };
