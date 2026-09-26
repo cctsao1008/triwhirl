@@ -6,205 +6,230 @@
 
 namespace {
 
-float degToRad(float deg) { return deg * triwhirl::kPi / 180.0F; }
+float degToRad(const float deg) { return deg * triwhirl::kPi / 180.0F; }
+
+triwhirl::StandupControllerInput makeInput(const std::uint32_t now_us,
+                                           const float theta_deg,
+                                           const float rate_rad_s,
+                                           const float wheel_rad_s = 0.0F) {
+  triwhirl::StandupControllerInput input{};
+  input.valid = true;
+  input.now_us = now_us;
+  input.theta_rad = degToRad(theta_deg);
+  input.theta_rate_rad_s = rate_rad_s;
+  input.wheel_rate_rad_s = wheel_rad_s;
+  return input;
+}
 
 void testTunedDefaults() {
   const triwhirl::StandupControllerConfig config{};
   assert(std::fabs(config.lqr_k_angle_unstable + 8.0F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_rate_unstable - 0.35F) < 1.0e-6F);
-  assert(std::fabs(config.lqr_k_rate_recovery_unstable - 0.55F) < 1.0e-6F);
   assert(std::fabs(config.lqr_k_wheel_unstable - 0.30F) < 1.0e-6F);
-  assert(std::fabs(config.lqr_k_angle_stable + 2.5F) < 1.0e-6F);
-  assert(std::fabs(config.lqr_k_rate_stable - 0.35F) < 1.0e-6F);
-  assert(std::fabs(config.lqr_k_wheel_stable - 0.20F) < 1.0e-6F);
   assert(std::fabs(config.velocity_p_unstable - 0.035F) < 1.0e-6F);
   assert(std::fabs(config.velocity_i_unstable - 0.150F) < 1.0e-6F);
-  assert(std::fabs(config.velocity_p_stable - 0.018F) < 1.0e-6F);
-  assert(std::fabs(config.velocity_i_stable - 0.100F) < 1.0e-6F);
-  assert(std::fabs(config.velocity_target_limit_rad_s - 60.0F) < 1.0e-6F);
-  assert(std::fabs(config.vq_limit_v - 3.0F) < 1.0e-6F);
+  assert(std::fabs(config.stable_angle_rad - degToRad(5.0F)) < 1.0e-6F);
+  assert(config.stable_delay_us == 1000000U);
 }
 
-void testSwingAndCaptureLaw() {
+void testSwingAndPreSettlingReleaseHysteresis() {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = degToRad(68.0F);
   triwhirl::StandupController controller(config);
 
-  triwhirl::StandupControllerInput input{};
-  input.valid = true;
-  input.now_us = 1000U;
-  input.theta_rad = degToRad(0.0F);
-  input.theta_rate_rad_s = 0.5F;
-  input.wheel_rate_rad_s = 0.0F;
+  auto input = makeInput(1000U, 0.0F, 0.5F);
   controller.reset(input);
-
   auto output = controller.update(input);
-  assert(output.valid);
   assert(output.phase == triwhirl::StandupPhase::kSwingHigh);
   assert(std::fabs(output.vq_v - 0.42F) < 1.0e-6F);
 
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(68.0F - 12.0F);
-  input.theta_rate_rad_s = -0.4F;
-  output = controller.update(input);
-  assert(output.phase == triwhirl::StandupPhase::kSwingLow);
-  assert(std::fabs(output.vq_v + 0.168F) < 1.0e-6F);
-
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(68.0F - 8.0F);
-  input.theta_rate_rad_s = 0.0F;
-  output = controller.update(input);
-  assert(output.phase == triwhirl::StandupPhase::kBalance);
-  assert(output.valid);
-  assert(std::isfinite(output.target_velocity_rad_s));
-  assert(std::isfinite(output.vq_v));
-  assert(std::fabs(output.vq_v) <= config.vq_limit_v + 1.0e-6F);
-
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(68.0F - 10.5F);
-  input.theta_rate_rad_s = 0.1F;
+  // Enter Balance inside the 9-degree capture envelope while still approaching.
+  input = makeInput(2000U, 60.0F, 0.5F);  // error = -8 deg
   output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kBalance);
 
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(68.0F - 12.5F);
-  input.theta_rate_rad_s = -0.2F;
+  // Before settling has latched, retain the original 12-degree release hysteresis.
+  input = makeInput(3000U, 57.5F, 0.5F);  // error = -10.5 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+
+  input = makeInput(4000U, 55.5F, 0.5F);  // error = -12.5 deg
   output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kSwingLow);
 }
 
-void testVendorGyroEnvelopeOnCapture() {
+void testVendorGyroEnvelopeOnApproach() {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = degToRad(68.0F);
-  assert(std::fabs(config.gyro_rate_limit_rad_s - degToRad(250.0F)) < 1.0e-5F);
+  config.lqr_k_angle_unstable = 0.0F;
+  config.lqr_k_rate_unstable = 0.35F;
+  config.lqr_k_wheel_unstable = 0.0F;
+  config.velocity_target_limit_rad_s = 100.0F;
   triwhirl::StandupController controller(config);
 
-  triwhirl::StandupControllerInput input{};
-  input.valid = true;
-  input.now_us = 1000U;
-  input.theta_rad = degToRad(45.0F);
-  input.theta_rate_rad_s = 12.0F;
-  input.wheel_rate_rad_s = 0.0F;
+  // Negative error with positive rate is still moving toward upright, so this
+  // remains in the approach law. Raw 12 rad/s must be clamped to 250 deg/s
+  // before the retained 0.6/0.4 vendor filter.
+  auto input = makeInput(1000U, 66.0F, 12.0F);
   controller.reset(input);
-  auto swing = controller.update(input);
-  assert(swing.phase == triwhirl::StandupPhase::kSwingHigh);
-
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(68.0F);
-  auto capture = controller.update(input);
-  assert(capture.phase == triwhirl::StandupPhase::kBalance);
-  assert(capture.valid);
-  // At zero angle error with finite rate, recovery damping is selected.
-  const float expected_target = -0.55F * 100.0F;
-  assert(std::fabs(capture.target_velocity_rad_s - expected_target) < 0.02F);
-
-  input.now_us += 1000U;
-  auto second = controller.update(input);
-  // 0.6*100 + 0.4*250 = 160 deg/s; -0.55*160 clips to the -60 limit.
-  assert(std::fabs(second.target_velocity_rad_s + 60.0F) < 1.0e-5F);
-}
-
-void testStableCaptureAfterSwing() {
-  triwhirl::StandupControllerConfig config{};
-  config.theta_reference_rad = degToRad(68.0F);
-  triwhirl::StandupController controller(config);
-
-  triwhirl::StandupControllerInput input{};
-  input.valid = true;
-  input.now_us = 1000U;
-  input.theta_rad = degToRad(0.0F);
-  input.theta_rate_rad_s = 0.5F;
-  input.wheel_rate_rad_s = 0.0F;
-  controller.reset(input);
-
-  input.now_us += config.stable_delay_us + 1000U;
-  auto swing = controller.update(input);
-  assert(swing.phase == triwhirl::StandupPhase::kSwingHigh);
-
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(67.0F);
-  input.theta_rate_rad_s = 0.0F;
-  input.wheel_rate_rad_s = 0.0F;
-  const auto capture = controller.update(input);
-  assert(capture.phase == triwhirl::StandupPhase::kBalance);
-  assert(capture.stable);
-  assert(std::fabs(capture.theta_reference_rad - degToRad(67.0F)) < 1.0e-5F);
-  assert(std::fabs(capture.target_velocity_rad_s - 2.5F) < 0.02F);
-
-  input.now_us += 1000U;
-  const auto next = controller.update(input);
-  assert(next.phase == triwhirl::StandupPhase::kBalance);
-  assert(next.stable);
-  assert(std::fabs(next.theta_error_rad) < 1.0e-5F);
-}
-
-void testVelocityOutputRamp() {
-  triwhirl::StandupControllerConfig config{};
-  config.theta_reference_rad = degToRad(68.0F);
-  assert(std::fabs(config.velocity_output_ramp_v_s - 1000.0F) < 1.0e-6F);
-  triwhirl::StandupController controller(config);
-
-  triwhirl::StandupControllerInput input{};
-  input.valid = true;
-  input.now_us = 1000U;
-  input.theta_rad = degToRad(60.0F);
-  input.theta_rate_rad_s = 0.0F;
-  input.wheel_rate_rad_s = 0.0F;
-  controller.reset(input);
-
-  input.now_us += 1000U;
-  auto first = controller.update(input);
-  assert(first.phase == triwhirl::StandupPhase::kBalance);
-  assert(first.valid);
-  assert(std::fabs(first.vq_v) <= 1.000001F);
-
-  input.now_us += 1000U;
-  auto second = controller.update(input);
-  assert(second.phase == triwhirl::StandupPhase::kBalance);
-  assert(second.valid);
-  assert(std::fabs(second.vq_v - first.vq_v) <= 1.000001F);
-}
-
-void testVelocityLoopResetsOnRecapture() {
-  triwhirl::StandupControllerConfig config{};
-  config.theta_reference_rad = degToRad(68.0F);
-  // This test isolates recapture reset behavior. Keep proportional action out
-  // of the output rail so anti-windup does not intentionally hold the integral.
-  config.velocity_p_unstable = 0.0F;
-  config.velocity_i_unstable = 4.0F;
-  triwhirl::StandupController controller(config);
-
-  triwhirl::StandupControllerInput input{};
-  input.valid = true;
-  input.now_us = 1000U;
-  input.theta_rad = degToRad(60.0F);
-  input.theta_rate_rad_s = 0.0F;
-  input.wheel_rate_rad_s = -20.0F;
-  controller.reset(input);
-
   auto output = controller.update(input);
-  for (int i = 0; i < 100; ++i) {
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+  assert(std::fabs(output.target_velocity_rad_s + 35.0F) < 0.03F);
+
+  input.now_us += 1000U;
+  output = controller.update(input);
+  assert(std::fabs(output.target_velocity_rad_s + 56.0F) < 0.03F);
+}
+
+void testBilateralSettlingPersistsUntilTrueFall() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  config.lqr_k_angle_unstable = -8.0F;
+  config.lqr_k_rate_unstable = 0.0F;
+  config.lqr_k_wheel_unstable = 0.0F;
+  config.velocity_p_unstable = 0.0F;
+  config.velocity_i_unstable = 0.0F;
+  config.velocity_p_recovery_unstable = 0.0F;
+  config.velocity_i_recovery_unstable = 0.0F;
+  config.recovery_rate_damping_v_per_rad_s = 0.0F;
+  config.velocity_target_limit_rad_s = 100.0F;
+  triwhirl::StandupController controller(config);
+
+  auto input = makeInput(1000U, 70.0F, -1.0F);  // +2 deg, approaching
+  controller.reset(input);
+  auto output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+  assert(output.target_velocity_rad_s < 0.0F);
+
+  // Cross to the other side. Settling latches and the wheel target must reverse
+  // with position error instead of continuing a one-sided recovery command.
+  input = makeInput(2000U, 67.8F, -1.0F);  // -0.2 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+  assert(output.target_velocity_rad_s > 1.5F);
+
+  input = makeInput(3000U, 68.5F, 1.0F);  // +0.5 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+  assert(output.target_velocity_rad_s < -3.9F);
+
+  input = makeInput(4000U, 67.5F, -1.0F);  // -0.5 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+  assert(output.target_velocity_rad_s > 3.9F);
+
+  // Once settling is latched, +/-12 degrees is no longer a release boundary.
+  input = makeInput(5000U, 98.0F, 0.0F);  // +30 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+
+  input = makeInput(6000U, 122.0F, 0.0F);  // +54 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+
+  // A genuine fall near the +/-60-degree periodic boundary returns to swing-up.
+  input = makeInput(7000U, 124.0F, 0.5F);  // +56 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kSwingHigh);
+}
+
+void testSettlingClearsApproachIntegralBias() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  config.lqr_k_angle_unstable = -8.0F;
+  config.lqr_k_rate_unstable = 0.0F;
+  config.lqr_k_wheel_unstable = 0.0F;
+  config.velocity_p_unstable = 0.0F;
+  config.velocity_i_unstable = 20.0F;
+  config.velocity_p_recovery_unstable = 0.0F;
+  config.velocity_i_recovery_unstable = 0.0F;
+  config.recovery_rate_damping_v_per_rad_s = 0.0F;
+  triwhirl::StandupController controller(config);
+
+  auto input = makeInput(1000U, 70.0F, -0.1F);
+  controller.reset(input);
+  auto output = controller.update(input);
+  for (int i = 0; i < 20; ++i) {
     input.now_us += 1000U;
     output = controller.update(input);
   }
   assert(output.phase == triwhirl::StandupPhase::kBalance);
   assert(std::fabs(output.velocity_integral_v) > 0.1F);
 
+  // Crossing into settling must remove the one-sided approach integral memory.
   input.now_us += 1000U;
-  input.theta_rad = degToRad(68.0F - 20.0F);
-  input.theta_rate_rad_s = 0.5F;
-  output = controller.update(input);
-  assert(output.phase == triwhirl::StandupPhase::kSwingHigh);
-
-  input.now_us += 1000U;
-  // Re-enter exactly at the reference with zero wheel/rate so this update does
-  // not immediately rebuild integral after resetVelocityLoop().
-  input.theta_rad = degToRad(68.0F);
-  input.theta_rate_rad_s = 0.0F;
-  input.wheel_rate_rad_s = 0.0F;
+  input.theta_rad = degToRad(67.8F);
   output = controller.update(input);
   assert(output.phase == triwhirl::StandupPhase::kBalance);
-  assert(std::fabs(output.velocity_integral_v) < 0.1F);
+  assert(std::fabs(output.velocity_integral_v) < 1.0e-6F);
+}
+
+void testStableIsStatusOnlyAndReferenceStaysFixed() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  config.stable_delay_us = 10000U;
+  config.lqr_k_angle_unstable = -8.0F;
+  config.lqr_k_rate_unstable = 0.0F;
+  config.lqr_k_wheel_unstable = 0.0F;
+  config.velocity_p_unstable = 0.0F;
+  config.velocity_i_unstable = 0.0F;
+  config.velocity_p_recovery_unstable = 0.0F;
+  config.velocity_i_recovery_unstable = 0.0F;
+  config.recovery_rate_damping_v_per_rad_s = 0.0F;
+  triwhirl::StandupController controller(config);
+
+  auto input = makeInput(1000U, 69.0F, 0.0F);  // +1 deg
+  controller.reset(input);
+  auto output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+  assert(!output.stable);
+  assert(std::fabs(output.theta_reference_rad - degToRad(68.0F)) < 1.0e-6F);
+
+  input.now_us = 12000U;
+  output = controller.update(input);
+  assert(output.stable);
+  assert(std::fabs(output.theta_reference_rad - degToRad(68.0F)) < 1.0e-6F);
+  assert(std::fabs(output.theta_error_rad - degToRad(1.0F)) < 1.0e-5F);
+  assert(output.target_velocity_rad_s < -7.9F);
+
+  // Stable status does not freeze or recenter the controller. It keeps correcting
+  // bilaterally on every update.
+  input = makeInput(13000U, 67.0F, 0.0F);  // -1 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+  assert(output.stable);
+  assert(output.target_velocity_rad_s > 7.9F);
+  assert(std::fabs(output.theta_reference_rad - degToRad(68.0F)) < 1.0e-6F);
+
+  // Leaving the +/-5-degree success band clears only the status flag. Settling
+  // stays latched and active rather than falling back to swing at +/-12 degrees.
+  input = makeInput(14000U, 74.0F, 0.0F);  // +6 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+  assert(!output.stable);
+  assert(output.target_velocity_rad_s < 0.0F);
+
+  input = makeInput(15000U, 98.0F, 0.0F);  // +30 deg
+  output = controller.update(input);
+  assert(output.phase == triwhirl::StandupPhase::kBalance);
+}
+
+void testVelocityOutputRamp() {
+  triwhirl::StandupControllerConfig config{};
+  config.theta_reference_rad = degToRad(68.0F);
+  triwhirl::StandupController controller(config);
+
+  auto input = makeInput(1000U, 60.0F, 0.0F);
+  controller.reset(input);
+  input.now_us += 1000U;
+  auto first = controller.update(input);
+  assert(first.phase == triwhirl::StandupPhase::kBalance);
+  assert(std::fabs(first.vq_v) <= 1.000001F);
+
+  input.now_us += 1000U;
+  auto second = controller.update(input);
+  assert(second.phase == triwhirl::StandupPhase::kBalance);
+  assert(std::fabs(second.vq_v - first.vq_v) <= 1.000001F);
 }
 
 void testConditionalAntiWindup() {
@@ -212,24 +237,16 @@ void testConditionalAntiWindup() {
   config.theta_reference_rad = degToRad(68.0F);
   config.lqr_k_angle_unstable = -10.0F;
   config.lqr_k_rate_unstable = 0.0F;
-  config.lqr_k_rate_recovery_unstable = 0.0F;
   config.lqr_k_wheel_unstable = 0.0F;
-  // Proportional action alone is deliberately beyond the 1 V output rail. The
-  // integral must therefore be held instead of accumulating in the same sign.
   config.velocity_p_unstable = 0.10F;
   config.velocity_i_unstable = 100.0F;
   config.velocity_target_limit_rad_s = 60.0F;
   config.vq_limit_v = 1.0F;
+  config.recovery_rate_damping_limit_v = 0.0F;
   triwhirl::StandupController controller(config);
 
-  triwhirl::StandupControllerInput input{};
-  input.valid = true;
-  input.now_us = 1000U;
-  input.theta_rad = degToRad(60.0F);
-  input.theta_rate_rad_s = 0.0F;
-  input.wheel_rate_rad_s = 0.0F;
+  auto input = makeInput(1000U, 60.0F, 0.0F);
   controller.reset(input);
-
   auto output = controller.update(input);
   for (int i = 0; i < 100; ++i) {
     input.now_us += 1000U;
@@ -240,116 +257,34 @@ void testConditionalAntiWindup() {
   assert(std::fabs(output.velocity_integral_v) < 1.0e-6F);
 }
 
-void testRecoveryDampingLatchesAfterFirstCrossing() {
-  triwhirl::StandupControllerConfig config{};
-  config.theta_reference_rad = degToRad(68.0F);
-  config.lqr_k_angle_unstable = 0.0F;
-  config.lqr_k_rate_unstable = 0.35F;
-  config.lqr_k_rate_recovery_unstable = 0.55F;
-  config.lqr_k_wheel_unstable = 0.0F;
-  config.velocity_p_unstable = 0.0F;
-  config.velocity_i_unstable = 0.0F;
-  config.velocity_target_limit_rad_s = 100.0F;
-  triwhirl::StandupController controller(config);
-
-  triwhirl::StandupControllerInput input{};
-  input.valid = true;
-  input.now_us = 1000U;
-  input.theta_rad = degToRad(70.0F);  // +2 deg
-  input.theta_rate_rad_s = -1.0F;
-  input.wheel_rate_rad_s = 0.0F;
-  controller.reset(input);
-
-  auto output = controller.update(input);
-  assert(output.phase == triwhirl::StandupPhase::kBalance);
-  // First approach still uses 0.35 damping: filtered rate = -0.4 rad/s.
-  const float first_expected = 0.35F * 0.4F * 180.0F / triwhirl::kPi;
-  assert(std::fabs(output.target_velocity_rad_s - first_expected) < 0.02F);
-
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(67.8F);  // Cross to -0.2 deg.
-  input.theta_rate_rad_s = -1.0F;
-  output = controller.update(input);
-  assert(output.phase == triwhirl::StandupPhase::kBalance);
-
-  // Return toward zero after the first crossing. The stronger 0.55 damping must
-  // remain latched instead of dropping back to the 0.35 approach gain.
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(67.0F);
-  input.theta_rate_rad_s = 1.0F;
-  output = controller.update(input);
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(67.5F);
-  input.theta_rate_rad_s = 1.0F;
-  output = controller.update(input);
-  assert(output.target_velocity_rad_s < -12.0F);
-}
-
 void testPeriodicVerticesShareBalanceLaw() {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = degToRad(68.0F);
   triwhirl::StandupController controller(config);
 
-  triwhirl::StandupControllerInput input{};
-  input.valid = true;
-  input.now_us = 1000U;
-  input.theta_rate_rad_s = 0.0F;
-  input.wheel_rate_rad_s = 0.0F;
-
-  input.theta_rad = degToRad(68.0F + 3.0F);
+  auto input = makeInput(1000U, 71.0F, 0.0F);
   controller.reset(input);
-  auto a = controller.update(input);
+  const auto a = controller.update(input);
   assert(a.phase == triwhirl::StandupPhase::kBalance);
 
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(-52.0F + 3.0F);
+  input = makeInput(2000U, -49.0F, 0.0F);  // -52 + 3 deg
   controller.reset(input);
-  auto b = controller.update(input);
+  const auto b = controller.update(input);
   assert(b.phase == triwhirl::StandupPhase::kBalance);
   assert(std::fabs(a.theta_error_rad - b.theta_error_rad) < 1.0e-5F);
-}
-
-void testStableTransitionAndRecovery() {
-  triwhirl::StandupControllerConfig config{};
-  config.theta_reference_rad = degToRad(68.0F);
-  triwhirl::StandupController controller(config);
-
-  triwhirl::StandupControllerInput input{};
-  input.valid = true;
-  input.now_us = 1000U;
-  input.theta_rad = degToRad(69.0F);
-  input.theta_rate_rad_s = 0.0F;
-  input.wheel_rate_rad_s = 0.0F;
-  controller.reset(input);
-  auto output = controller.update(input);
-  assert(output.phase == triwhirl::StandupPhase::kBalance);
-  assert(!output.stable);
-
-  input.now_us += config.stable_delay_us + 1000U;
-  output = controller.update(input);
-  assert(output.phase == triwhirl::StandupPhase::kBalance);
-  assert(output.stable);
-
-  input.now_us += 1000U;
-  input.theta_rad = degToRad(68.0F + 25.0F);
-  input.theta_rate_rad_s = 0.3F;
-  output = controller.update(input);
-  assert(output.phase == triwhirl::StandupPhase::kSwingHigh);
-  assert(!output.stable);
 }
 
 }  // namespace
 
 int main() {
   testTunedDefaults();
-  testSwingAndCaptureLaw();
-  testVendorGyroEnvelopeOnCapture();
-  testStableCaptureAfterSwing();
+  testSwingAndPreSettlingReleaseHysteresis();
+  testVendorGyroEnvelopeOnApproach();
+  testBilateralSettlingPersistsUntilTrueFall();
+  testSettlingClearsApproachIntegralBias();
+  testStableIsStatusOnlyAndReferenceStaysFixed();
   testVelocityOutputRamp();
-  testVelocityLoopResetsOnRecapture();
   testConditionalAntiWindup();
-  testRecoveryDampingLatchesAfterFirstCrossing();
   testPeriodicVerticesShareBalanceLaw();
-  testStableTransitionAndRecovery();
   return 0;
 }
