@@ -86,20 +86,23 @@ def main() -> None:
     assert evaluate(good_profile(), good_timing(), good_status()) == []
 
     # A latest-frame mailbox may legitimately cause Core 1 to skip intermediate
-    # generations. Acceptance is about physical sensor acquisition/generation,
+    # generations. Acceptance is about physical encoder acquisition/generation,
     # not how many distinct sequence numbers Core 1 happened to commit.
     profile = good_profile()
     profile["completions"] = "4750"
     profile["encoder_i2c_reads"] = "5000"
-    profile["mpu_i2c_reads"] = "4999"
+    profile["mpu_i2c_reads"] = "4800"
     assert evaluate(profile, good_timing(), good_status()) == []
 
+    # MPU timing-profile sample_reads counts successful FIFO sample decodes, not
+    # physical acquisition attempts. Request-driven fallback can legitimately hit
+    # the FIFO before the next 1-kHz packet exists, so this count must not be used
+    # as the physical sensor-acquisition acceptance denominator.
     profile = good_profile()
-    profile["completions"] = "4995"
-    profile["encoder_i2c_reads"] = "5000"
-    profile["mpu_i2c_reads"] = "4800"
+    profile["encoder_i2c_reads"] = "4800"
+    profile["mpu_i2c_reads"] = "5000"
     failures = evaluate(profile, good_timing(), good_status())
-    assert any("sensor acquisition ratio 0.9600" in failure for failure in failures)
+    assert any("encoder acquisition ratio 0.9600" in failure for failure in failures)
 
     profile = good_profile()
     profile["join_timeouts"] = "2"
