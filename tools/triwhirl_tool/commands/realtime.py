@@ -93,26 +93,26 @@ def _classify_drdy_probe(
 
 
 def _sensor_acquisition_count(profile: Mapping[str, str]) -> tuple[int, str]:
-    """Return the physical dual-sensor acquisition count used by acceptance.
+    """Return the encoder acquisition count used by realtime acceptance.
 
     `parallel_profile.completions` is the number of distinct encoder generations
     committed by Core 1. With a depth-one latest-frame mailbox, Core 1 can
     legitimately skip an intermediate published generation while still consuming
     a newer, nominally-fresh frame on the next control tick. That consumer count
-    therefore is not the Core-0 generation-completion metric documented by the
+    therefore is not the Core-0 encoder-generation metric documented by the
     pre-Balance gate.
 
-    When timing-stage counts are available, use the minimum of the actual AS5600
-    and MPU6050 physical read counts. The independent read/join failure checks
-    remain mandatory. Fall back to the legacy committed-generation count for old
-    firmware/tool output that lacks the stage counters.
+    When timing-stage counts are available, use the AS5600 RAW_ANGLE read count.
+    Do not fold the MPU timing-profile `sample_reads` count into this ratio:
+    Mpu6050::recordSampleTiming() increments it only after a FIFO packet was
+    successfully decoded. In request-driven fallback mode a request may arrive
+    before the next 1-kHz FIFO packet exists, so `sample_reads` is a useful
+    decoded-sample diagnostic but is not a physical I2C-attempt count. IMU and
+    attitude validity remain independently gated below.
     """
 
-    if "encoder_i2c_reads" in profile and "mpu_i2c_reads" in profile:
-        return min(
-            _int_field(profile, "encoder_i2c_reads"),
-            _int_field(profile, "mpu_i2c_reads"),
-        ), "physical_i2c"
+    if "encoder_i2c_reads" in profile:
+        return _int_field(profile, "encoder_i2c_reads"), "encoder_i2c_raw"
     return _int_field(profile, "completions"), "core1_committed"
 
 
@@ -135,7 +135,7 @@ def _evaluate_realtime_acceptance(
         failures.append("sensor pipeline produced no requests")
     elif sensor_acquisitions / requests < min_completion_ratio:
         failures.append(
-            "sensor acquisition ratio "
+            "encoder acquisition ratio "
             f"{sensor_acquisitions / requests:.4f} < {min_completion_ratio:.4f} "
             f"source={acquisition_source}"
         )
@@ -298,18 +298,23 @@ async def _run(args: argparse.Namespace) -> int:
             )
         if "mpu_i2c" in profile_stage_counts:
             profile["mpu_i2c_reads"] = str(profile_stage_counts["mpu_i2c"])
-        if "encoder_i2c_reads" in profile and "mpu_i2c_reads" in profile:
+        if "encoder_i2c_reads" in profile:
             requests = _int_field(profile, "requests")
-            acquisitions, _ = _sensor_acquisition_count(profile)
-            ratio = acquisitions / requests if requests > 0 else 0.0
-            print(
-                "sensor_acquisition,"
-                f"requests={requests},"
-                f"encoder_reads={_int_field(profile, 'encoder_i2c_reads')},"
-                f"imu_reads={_int_field(profile, 'mpu_i2c_reads')},"
-                f"ratio={ratio:.4f},"
-                f"core1_committed={_int_field(profile, 'completions')}"
-            )
+            encoder_reads = _int_field(profile, "encoder_i2c_reads")
+            encoder_ratio = encoder_reads / requests if requests > 0 else 0.0
+            fields = [
+                "sensor_acquisition",
+                f"requests={requests}",
+                f"encoder_reads={encoder_reads}",
+                f"ratio={encoder_ratio:.4f}",
+                f"core1_committed={_int_field(profile, 'completions')}",
+            ]
+            if "mpu_i2c_reads" in profile:
+                mpu_reads = _int_field(profile, "mpu_i2c_reads")
+                mpu_decode_ratio = mpu_reads / requests if requests > 0 else 0.0
+                fields.insert(3, f"imu_decoded_samples={mpu_reads}")
+                fields.insert(4, f"imu_decode_ratio={mpu_decode_ratio:.4f}")
+            print(",".join(fields))
         imu = _parse_key_values(imu_line, "imu")
         drdy_class, drdy_rate_hz, drdy_edge_ratio = _classify_drdy_probe(
             profile, imu, args.seconds
