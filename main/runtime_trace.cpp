@@ -40,8 +40,6 @@ namespace {
 constexpr std::uint32_t kTraceWriteTimeoutMs = 1000U;
 constexpr TickType_t kTraceIdleDelayTicks = pdMS_TO_TICKS(1);
 constexpr float kRadToDeg = 180.0F / triwhirl::kPi;
-constexpr float kTargetVelocityLimitRadS = 60.0F;
-constexpr float kVqLimitV = 4.0F;
 constexpr std::uint32_t kFirmwareGitSha32[5] = {
     TRIWHIRL_GIT_SHA0, TRIWHIRL_GIT_SHA1, TRIWHIRL_GIT_SHA2,
     TRIWHIRL_GIT_SHA3, TRIWHIRL_GIT_SHA4};
@@ -263,15 +261,11 @@ void recordRuntimeStandupTrace(const triwhirl::StandupControllerInput& input,
   record.flags = static_cast<std::uint16_t>(output.phase) & kTracePhaseMask;
   if (output.stable) record.flags |= kTraceStable;
   if (output.valid) record.flags |= kTraceValid;
-  if (std::fabs(output.target_velocity_rad_s) >=
-      kTargetVelocityLimitRadS - 0.01F) {
-    record.flags |= kTraceTargetSaturated;
-  }
-  if (std::fabs(output.vq_target_v) >= kVqLimitV - 0.001F) {
-    record.flags |= kTraceVqSaturated;
-  }
+  if (output.target_saturated) record.flags |= kTraceTargetSaturated;
+  if (output.vq_saturated) record.flags |= kTraceVqSaturated;
   if (safety_faulted) record.flags |= kTraceSafetyFault;
   if (dt_clamped) record.flags |= kTraceDtClamped;
+  if (output.settling) record.flags |= kTraceSettling;
 
   const std::uint32_t head = trace_head.load(std::memory_order_relaxed);
   const std::uint32_t tail = trace_tail.load(std::memory_order_acquire);
