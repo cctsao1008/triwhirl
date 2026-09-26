@@ -175,7 +175,7 @@ COMMANDS: tuple[ToolCommand, ...] = (
         group="id",
         name="body-active",
         script="parameter_id/body_active_ble.py",
-        description="Acquire active local upright identification data over BLE.",
+        description="Acquire signed vertex-agnostic local upright identification data over BLE.",
     ),
     ToolCommand(
         group="id",
@@ -187,7 +187,7 @@ COMMANDS: tuple[ToolCommand, ...] = (
         group="plant",
         name="merge-active",
         script="parameter_id/merge_active.py",
-        description="Merge separate A/B/C body-active runs with global trial renumbering and provenance.",
+        description="Merge independent body-active runs with global trial renumbering and provenance.",
     ),
     ToolCommand(
         group="plant",
@@ -217,7 +217,7 @@ COMMANDS: tuple[ToolCommand, ...] = (
         group="fit",
         name="body-active",
         script="parameter_id/body_active_fit.py",
-        description="Fit active A/B/C upright vertex models.",
+        description="Fit active local upright plant dynamics.",
     ),
     ToolCommand(
         group="fit",
