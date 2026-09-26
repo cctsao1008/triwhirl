@@ -38,9 +38,19 @@ triwhirl::StandupControllerInput currentStandupInput(
   input.now_us = now_us;
   input.theta_rad = state::attitude_state.angle_rad;
   input.theta_rate_rad_s = state::attitude_state.rate_rad_s;
-  input.wheel_rate_rad_s = state::wheel_state.velocity_rad_s;
-  input.valid = state::encoder_sample_valid && state::wheel_state.velocity_valid &&
-                state::imu_ready && imu_usable && state::gyro_bias_valid &&
+
+  // Match SimpleFOC's motor.shaftVelocity() convention used by the vendor
+  // controller: shaft velocity is the raw sensor velocity multiplied by the
+  // calibrated sensor direction. On the current board sensor_dir=+1, so this is
+  // behavior-neutral; it prevents a latent positive-feedback bug on a unit whose
+  // motor calibration reports sensor_dir=-1.
+  const float shaft_direction =
+      static_cast<float>(state::motor_config.sensor_direction);
+  input.wheel_rate_rad_s = shaft_direction * state::wheel_state.velocity_rad_s;
+
+  input.valid = state::motor_config_valid && state::encoder_sample_valid &&
+                state::wheel_state.velocity_valid && state::imu_ready &&
+                imu_usable && state::gyro_bias_valid &&
                 state::attitude_initialized && state::attitude_state.valid &&
                 !state::safety_latch.faulted();
   return input;
@@ -78,14 +88,10 @@ bool configureRuntimeStandup(const float theta_reference_rad) {
   config.theta_reference_rad = theta_reference_rad;
   config.vq_limit_v = state::kMotorVectorLimitV;
 
-  // standup-20260926-122823 proved that multiplying the whole recovery cascade
-  // (Krate=1.20 plus velocity P=0.10) can spend the full +/-4 V rail but couples
-  // angle stiffness and rate damping so strongly that the body chatters around the
-  // upright and still escapes. Keep the already-good first approach unchanged.
-  // In recovery, return to the gentler outer/inner gains and add a bounded direct
-  // body-rate damping voltage. This keeps strong dissipative authority without
-  // multiplying the angle term by the aggressive recovery velocity P.
-  config.lqr_k_rate_recovery_unstable = 0.55F;
+  // Keep the already-good first approach unchanged. During bilateral settling,
+  // retain the gentle wheel-velocity P, disable settling integral memory, and add
+  // bounded direct body-rate damping. The sign of that damping is defined by the
+  // measured software-coordinate actuator polarity in StandupController.
   config.velocity_p_recovery_unstable = 0.035F;
   config.velocity_i_recovery_unstable = 0.0F;
   config.recovery_rate_damping_v_per_rad_s = 2.0F;
@@ -167,6 +173,10 @@ void updateRuntimeStandup(const std::uint32_t now_us) {
     standup_last_valid_imu_us = 0U;
     stopRuntimeStandupTrace();
     state::stopMotor();
+    return;
+  }
+  if (!state::motor_config_valid) {
+    tripStandupFault(triwhirl::SafetyFault::kCalibration);
     return;
   }
   if (!state::encoder_sample_valid || !state::wheel_state.velocity_valid) {
