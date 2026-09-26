@@ -326,6 +326,7 @@ StandupControllerOutput StandupController::update(
   output.target_velocity_rad_s = target_velocity;
   output.velocity_error_rad_s = velocity_error;
   output.velocity_integral_v = velocity_integral_v_;
+  output.vq_unclamped_v = vq_unclamped;
   output.vq_target_v = vq_target;
   output.vq_v = vq;
   output.stable = stable_;
