@@ -4,15 +4,21 @@
 Each trial defines its own local equilibrium from the held posture:
     theta_error = wrap(theta - theta_ref)
 
-No A/B/C label is required.  Any physical upright orientation may be used on any
-trial.  The absolute held angle remains in theta_ref_rad as provenance, while the
+No A/B/C label is required. Any physical upright orientation may be used on any
+trial. The absolute held angle remains in theta_ref_rad as provenance, while the
 identification model is expressed only in local error coordinates.
 
 The IMU is calibrated and attitude is initialized once before telemetry starts.
 Per-trial attitude resets are intentionally avoided: they are unnecessary for a
 local-error model and previously coupled command/reply traffic to the live
-telemetry stream.  Vq is established while the user is still holding the body;
-firmware telemetry must confirm the measured input before release.
+telemetry stream.
+
+Motor-command synchronization is explicit. Before a nonzero Vq command, live
+telemetry is paused and drained until the firmware acknowledges telemetry-off;
+the motor command must then receive its own `OK motor FOC` reply before telemetry
+is re-enabled. This prevents command ACK/ERR records from being silently consumed
+as noise by the telemetry reader and establishes a clean freshness boundary for
+the measured Vq used by identification.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ from acquire_ble import (
     BleLineTransport,
     ensure_motor_config,
 )
-from body_free_ble import prepare_imu
+from body_free_ble import prepare_imu, read_until_prefix
 from body_local_ble import angle_diff, discover, next_telemetry, wait_for_stable_hold
 
 
@@ -86,6 +92,17 @@ def excitation_for_trial(args: argparse.Namespace, trial: int) -> float:
     return pos if sign > 0 else -neg
 
 
+async def set_telemetry(
+    transport: BleLineTransport,
+    enabled: bool,
+    timeout_s: float = 3.0,
+) -> str:
+    command = "telemetry on" if enabled else "telemetry off"
+    prefix = "OK telemetry on" if enabled else "OK telemetry off"
+    await transport.send(command)
+    return await read_until_prefix(transport, prefix, timeout_s)
+
+
 async def arm_input_before_release(
     transport: BleLineTransport,
     writer: csv.writer,
@@ -95,7 +112,16 @@ async def arm_input_before_release(
     total_rows: list[int],
     timeout_s: float = 4.0,
 ) -> tuple[list[str], dict[str, str]]:
+    # Establish a protocol boundary before mutating actuation. With live text
+    # telemetry enabled, an OK/ERR motor reply can otherwise be consumed and
+    # discarded by next_telemetry(), leaving the host unable to distinguish a
+    # rejected command from stale/pre-command telemetry.
+    await set_telemetry(transport, False)
     await transport.send(f"motor vq {planned_vq:.9g}")
+    motor_ack = await read_until_prefix(transport, "OK motor FOC vq_v=", 3.0)
+    print(f"trial {trial}: firmware accepted motor command: {motor_ack}")
+    await set_telemetry(transport, True)
+
     deadline = time.monotonic() + timeout_s
     confirmed = 0
     last_values: list[str] | None = None
@@ -126,8 +152,8 @@ async def arm_input_before_release(
     await transport.send("motor stop")
     measured = None if last_row is None else last_row.get("vq_v")
     raise RuntimeError(
-        f"trial {trial}: Vq did not establish while held before timeout "
-        f"(last measured vq={measured})"
+        f"trial {trial}: motor command was acknowledged but fresh telemetry did not "
+        f"confirm held Vq before timeout (last measured vq={measured})"
     )
 
 
@@ -194,7 +220,7 @@ async def run(args: argparse.Namespace) -> int:
                         "schema_version", "trial", "phase", "theta_ref_rad",
                         "planned_vq_v", *TELEMETRY_FIELDS,
                     ))
-                    await transport.send("telemetry on")
+                    await set_telemetry(transport, True)
 
                     for trial in range(1, args.trials + 1):
                         planned_vq = excitation_for_trial(args, trial)
@@ -224,7 +250,7 @@ async def run(args: argparse.Namespace) -> int:
                             planned_vq, total_rows,
                         )
                         print(
-                            f"trial {trial} INPUT READY: Vq is confirmed by firmware telemetry. "
+                            f"trial {trial} INPUT READY: Vq is confirmed by fresh firmware telemetry. "
                             "Release your fingers now without pushing."
                         )
 
@@ -276,14 +302,18 @@ async def run(args: argparse.Namespace) -> int:
                                 await transport.send("motor stop")
                                 pulse_stop_sent = True
 
-                            phase = "active" if not pulse_stop_sent else "zero_vector"
+                            # Phase follows the measured firmware input, not the
+                            # host command-send timestamp. This keeps transition
+                            # rows honest even if the stop command takes a frame
+                            # to become visible in telemetry.
+                            phase = "active" if abs(measured_vq) > 1.0e-4 else "zero_vector"
                             writer.writerow((
                                 SCHEMA_VERSION, trial, phase, theta_ref,
                                 planned_vq, *values,
                             ))
                             total_rows[0] += 1
                             local_rows += 1
-                            if abs(measured_vq) > 1.0e-9:
+                            if phase == "active":
                                 active_rows += 1
 
                             if deviation >= max_angle_rad:
