@@ -9,11 +9,6 @@ namespace triwhirl {
 namespace {
 
 constexpr float kRadToDeg = 180.0F / kPi;
-// Once settling has been acquired, do not give up at the 12-degree capture
-// hysteresis. Keep the bilateral balance law active until the body is genuinely
-// close to the 60-degree periodic-coordinate boundary. The 5-degree guard keeps
-// us away from the vertex-wrap ambiguity before returning to swing-up.
-constexpr float kSettlingFallRad = 55.0F * kPi / 180.0F;
 
 bool crossedZero(const float previous, const float current) {
   return (previous > 0.0F && current <= 0.0F) ||
@@ -32,6 +27,7 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
       config.balance_capture_rad,
       config.balance_release_rad,
       config.swing_near_rad,
+      config.settling_fall_rad,
       config.pump_v_low,
       config.pump_v_high,
       config.rate_switch_rad_s,
@@ -64,8 +60,8 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
   return config.balance_capture_rad > 0.0F &&
          config.balance_capture_rad < config.balance_release_rad &&
          config.balance_release_rad < config.swing_near_rad &&
-         config.swing_near_rad < kSettlingFallRad &&
-         kSettlingFallRad < kUprightHalfPeriodRad &&
+         config.swing_near_rad < config.settling_fall_rad &&
+         config.settling_fall_rad < kUprightHalfPeriodRad &&
          config.pump_v_low > 0.0F &&
          config.pump_v_low <= config.pump_v_high &&
          config.rate_switch_rad_s >= 0.0F &&
@@ -145,7 +141,7 @@ StandupControllerOutput StandupController::update(
   const float dt_s = static_cast<float>(elapsed_us) * 1.0e-6F;
   previous_update_us_ = input.now_us;
 
-  // The upright reference is fixed for the whole run.  "stable" is a status
+  // The upright reference is fixed for the whole run. "stable" is a status
   // qualification only; it must never recenter the equilibrium.
   const float error_rad =
       periodicUprightErrorRad(input.theta_rad, theta_reference_rad_);
@@ -157,9 +153,10 @@ StandupControllerOutput StandupController::update(
 
   // Before the first crossing/reversal, preserve the seller-style 9/12-degree
   // capture hysteresis so a bad approach can immediately return to swing-up.
-  // After settling is latched, keep balancing all the way to a true-fall guard.
+  // After settling is latched, keep balancing all the way to the explicit
+  // true-fall guard.
   const float hold_limit_rad = capture_crossed_upright_
-                                   ? kSettlingFallRad
+                                   ? config_.settling_fall_rad
                                    : config_.balance_release_rad;
   const bool hold_balance = was_balancing_ && abs_error < hold_limit_rad;
   if (!hold_balance && abs_error >= config_.balance_capture_rad) {
@@ -174,6 +171,7 @@ StandupControllerOutput StandupController::update(
     output.theta_error_rad = error_rad;
     output.theta_reference_rad = theta_reference_rad_;
     output.stable = false;
+    output.settling = false;
     output.valid = true;
 
     filtered_rate_rad_s_ = 0.0F;
@@ -189,8 +187,6 @@ StandupControllerOutput StandupController::update(
   bool just_latched_settling = false;
   const bool entering_balance = !was_balancing_;
   if (entering_balance) {
-    // Every capture attempt starts clean.  The 1-second stable timer also starts
-    // here; time spent swinging does not count toward balance qualification.
     resetVelocityLoop();
     capture_crossed_upright_ = false;
     previous_balance_error_rad_ = error_rad;
@@ -230,10 +226,10 @@ StandupControllerOutput StandupController::update(
     }
   }
 
-  // One second inside +/-5 degrees is only a success/qualification flag.  The
-  // exact same bilateral settling law keeps running afterward, and the fixed
-  // upright reference never moves.  Leaving +/-5 degrees clears the flag but
-  // does not release settling or stop active correction.
+  // One second inside +/-5 degrees is only a success/qualification flag. The
+  // same bilateral settling law keeps running afterward, and the fixed upright
+  // reference never moves. Leaving +/-5 degrees clears the flag but does not
+  // release settling or stop active correction.
   if (abs_error > config_.stable_angle_rad) {
     last_unstable_us_ = input.now_us;
     stable_ = false;
@@ -247,32 +243,31 @@ StandupControllerOutput StandupController::update(
   }
 
   if (just_latched_settling) {
-    // Do not carry the approach PI bias into the bilateral regulator.  Keep the
-    // previous applied Vq for slew continuity, but remove the one-sided integral
-    // memory and derivative history at the mode transition.
     velocity_integral_v_ = 0.0F;
     previous_velocity_error_rad_s_ = 0.0F;
   }
 
   const bool settling_mode = capture_crossed_upright_;
-  float target_velocity = 0.0F;
+  float target_velocity_unclamped = 0.0F;
   if (settling_mode) {
-    // Bilateral local regulator: wheel target is position restoring only.  Body
+    // Bilateral local regulator: wheel target is position restoring only. Body
     // rate damping is applied independently in the Vq path below, so rate/wheel
     // feedback cannot swamp the sign reversal of the position command.
     //   error > 0 -> target < 0
     //   error < 0 -> target > 0
-    target_velocity = config_.lqr_k_angle_unstable * error_deg;
+    target_velocity_unclamped = config_.lqr_k_angle_unstable * error_deg;
   } else {
     // First approach remains the already-proven seller-style state feedback.
-    target_velocity =
+    target_velocity_unclamped =
         config_.lqr_k_angle_unstable * error_deg +
         config_.lqr_k_rate_unstable * (-filtered_rate_deg_s) +
         config_.lqr_k_wheel_unstable * input.wheel_rate_rad_s;
   }
-  target_velocity = std::clamp(target_velocity,
-                               -config_.velocity_target_limit_rad_s,
-                               config_.velocity_target_limit_rad_s);
+  const bool target_saturated =
+      std::fabs(target_velocity_unclamped) > config_.velocity_target_limit_rad_s;
+  const float target_velocity = std::clamp(
+      target_velocity_unclamped, -config_.velocity_target_limit_rad_s,
+      config_.velocity_target_limit_rad_s);
 
   const float velocity_error = target_velocity - input.wheel_rate_rad_s;
   const float kp = settling_mode ? config_.velocity_p_recovery_unstable
@@ -311,9 +306,11 @@ StandupControllerOutput StandupController::update(
   }
   previous_velocity_error_rad_s_ = velocity_error;
 
+  const float vq_unclamped =
+      kp * velocity_error + velocity_integral_v_ + direct_recovery_vq;
+  const bool vq_saturated = std::fabs(vq_unclamped) > config_.vq_limit_v;
   const float vq_target =
-      std::clamp(kp * velocity_error + velocity_integral_v_ + direct_recovery_vq,
-                 -config_.vq_limit_v, config_.vq_limit_v);
+      std::clamp(vq_unclamped, -config_.vq_limit_v, config_.vq_limit_v);
   float vq = vq_target;
   if (dt_s > 0.0F && dt_s < 0.1F) {
     const float max_step = config_.velocity_output_ramp_v_s * dt_s;
@@ -332,6 +329,9 @@ StandupControllerOutput StandupController::update(
   output.vq_target_v = vq_target;
   output.vq_v = vq;
   output.stable = stable_;
+  output.settling = settling_mode;
+  output.target_saturated = target_saturated;
+  output.vq_saturated = vq_saturated;
   output.valid = std::isfinite(vq) && std::isfinite(target_velocity) &&
                  std::isfinite(output.theta_reference_rad) &&
                  std::isfinite(output.theta_error_rad);
