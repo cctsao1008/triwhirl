@@ -40,6 +40,8 @@ def load_standup_records(path: Path) -> list[dict[str, Any]]:
             "target_saturated",
             "vq_saturated",
             "safety_fault",
+            "dt_clamped",
+            "settling",
         }
         result: list[dict[str, Any]] = []
         for row in rows:
@@ -57,20 +59,30 @@ def load_standup_records(path: Path) -> list[dict[str, Any]]:
     raise RuntimeError("standup plot input must be .twtrace or .csv")
 
 
-def _balance_spans(records: list[dict[str, Any]]) -> Iterable[tuple[float, float]]:
+def _boolean_spans(
+    records: list[dict[str, Any]], predicate
+) -> Iterable[tuple[float, float]]:
     start: float | None = None
     previous_t: float | None = None
     for row in records:
         t = float(row["t_s"])
-        balance = row.get("phase") == "balance"
-        if balance and start is None:
+        active = bool(predicate(row))
+        if active and start is None:
             start = t
-        elif not balance and start is not None:
+        elif not active and start is not None:
             yield start, previous_t if previous_t is not None else t
             start = None
         previous_t = t
     if start is not None and previous_t is not None:
         yield start, previous_t
+
+
+def _balance_spans(records: list[dict[str, Any]]) -> Iterable[tuple[float, float]]:
+    return _boolean_spans(records, lambda row: row.get("phase") == "balance")
+
+
+def _settling_spans(records: list[dict[str, Any]]) -> Iterable[tuple[float, float]]:
+    return _boolean_spans(records, lambda row: row.get("settling", False))
 
 
 def plot_standup_records(
@@ -106,8 +118,10 @@ def plot_standup_records(
     axes[0].plot(t, error, label="upright error")
     axes[0].axhline(9.0, linestyle="--", linewidth=0.8, label="capture ±9°")
     axes[0].axhline(-9.0, linestyle="--", linewidth=0.8)
-    axes[0].axhline(12.0, linestyle=":", linewidth=0.8, label="release ±12°")
+    axes[0].axhline(12.0, linestyle=":", linewidth=0.8, label="pre-settling release ±12°")
     axes[0].axhline(-12.0, linestyle=":", linewidth=0.8)
+    axes[0].axhline(55.0, linestyle="-.", linewidth=0.8, label="settling fall ±55°")
+    axes[0].axhline(-55.0, linestyle="-.", linewidth=0.8)
     axes[0].set_ylabel("Error [deg]")
     axes[0].legend(loc="upper right")
 
@@ -117,7 +131,7 @@ def plot_standup_records(
     axes[1].legend(loc="upper right")
 
     axes[2].plot(t, wheel_rate, label="wheel rate")
-    axes[2].plot(t, target_velocity, label="LQR target velocity")
+    axes[2].plot(t, target_velocity, label="wheel target velocity")
     axes[2].set_ylabel("Wheel [rad/s]")
     axes[2].legend(loc="upper right")
 
@@ -128,11 +142,14 @@ def plot_standup_records(
     axes[3].set_xlabel("Time [s]")
     axes[3].legend(loc="upper right")
 
-    spans = list(_balance_spans(records))
+    balance_spans = list(_balance_spans(records))
+    settling_spans = list(_settling_spans(records))
     for axis in axes:
         axis.grid(True, alpha=0.25)
-        for begin, end in spans:
-            axis.axvspan(begin, end, alpha=0.08)
+        for begin, end in balance_spans:
+            axis.axvspan(begin, end, alpha=0.05)
+        for begin, end in settling_spans:
+            axis.axvspan(begin, end, alpha=0.12)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output, dpi=180)
