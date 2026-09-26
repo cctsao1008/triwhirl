@@ -68,6 +68,9 @@ enum StandupTraceRecordFlags : std::uint16_t {
   kTraceVqSaturated = 1U << 5,
   kTraceSafetyFault = 1U << 6,
   kTraceDtClamped = 1U << 7,
+  // Backward-compatible extension of TWTR2: bit 8 was previously unused and
+  // now records the actual post-acquisition bilateral settling latch.
+  kTraceSettling = 1U << 8,
 };
 
 enum StandupTraceFrameFlags : std::uint8_t {
