@@ -46,6 +46,8 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
       config.gyro_rate_limit_rad_s,
       config.velocity_p_unstable,
       config.velocity_i_unstable,
+      config.velocity_p_recovery_unstable,
+      config.velocity_i_recovery_unstable,
       config.velocity_p_stable,
       config.velocity_i_stable,
       config.velocity_target_limit_rad_s,
@@ -68,6 +70,8 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
          config.gyro_rate_limit_rad_s > 0.0F &&
          config.velocity_p_unstable >= 0.0F &&
          config.velocity_i_unstable >= 0.0F &&
+         config.velocity_p_recovery_unstable >= 0.0F &&
+         config.velocity_i_recovery_unstable >= 0.0F &&
          config.velocity_p_stable >= 0.0F &&
          config.velocity_i_stable >= 0.0F &&
          config.velocity_target_limit_rad_s > 0.0F && config.vq_limit_v > 0.0F &&
@@ -212,15 +216,18 @@ StandupControllerOutput StandupController::update(
                                 : config_.lqr_k_angle_unstable;
   float k_rate = stable_ ? config_.lqr_k_rate_stable
                          : config_.lqr_k_rate_unstable;
+  bool recovery_mode = false;
   if (!stable_) {
     if (capture_crossed_upright_) {
+      recovery_mode = true;
       k_rate = config_.lqr_k_rate_recovery_unstable;
     } else {
-      // Before the first crossing, retain stronger damping only when already
-      // moving away from zero. While approaching, use the lower gain so swing-up
-      // energy is not removed before reaching the upright.
-      const bool moving_away = error_deg * filtered_rate_deg_s >= 0.0F;
+      // Before the first crossing, switch to recovery only after a real reversal
+      // away from zero. Strict >0 avoids treating zero filtered rate at capture
+      // entry as recovery, which would unnecessarily disturb the proven approach.
+      const bool moving_away = error_deg * filtered_rate_deg_s > 0.0F;
       if (moving_away) {
+        recovery_mode = true;
         k_rate = config_.lqr_k_rate_recovery_unstable;
       }
     }
@@ -246,9 +253,11 @@ StandupControllerOutput StandupController::update(
 
   const float velocity_error = target_velocity - input.wheel_rate_rad_s;
   const float kp = stable_ ? config_.velocity_p_stable
-                           : config_.velocity_p_unstable;
+                           : (recovery_mode ? config_.velocity_p_recovery_unstable
+                                            : config_.velocity_p_unstable);
   const float ki = stable_ ? config_.velocity_i_stable
-                           : config_.velocity_i_unstable;
+                           : (recovery_mode ? config_.velocity_i_recovery_unstable
+                                            : config_.velocity_i_unstable);
   if (dt_s > 0.0F && dt_s < 0.1F) {
     const float integral_delta =
         0.5F * ki * dt_s *
