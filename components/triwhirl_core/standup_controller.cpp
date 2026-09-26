@@ -48,6 +48,8 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
       config.velocity_i_unstable,
       config.velocity_p_recovery_unstable,
       config.velocity_i_recovery_unstable,
+      config.recovery_rate_damping_v_per_rad_s,
+      config.recovery_rate_damping_limit_v,
       config.velocity_p_stable,
       config.velocity_i_stable,
       config.velocity_target_limit_rad_s,
@@ -72,9 +74,12 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
          config.velocity_i_unstable >= 0.0F &&
          config.velocity_p_recovery_unstable >= 0.0F &&
          config.velocity_i_recovery_unstable >= 0.0F &&
+         config.recovery_rate_damping_v_per_rad_s >= 0.0F &&
+         config.recovery_rate_damping_limit_v >= 0.0F &&
          config.velocity_p_stable >= 0.0F &&
          config.velocity_i_stable >= 0.0F &&
          config.velocity_target_limit_rad_s > 0.0F && config.vq_limit_v > 0.0F &&
+         config.recovery_rate_damping_limit_v <= config.vq_limit_v &&
          config.velocity_output_ramp_v_s > 0.0F &&
          config.stable_angle_rad > 0.0F &&
          config.stable_angle_rad <= config.balance_capture_rad &&
@@ -182,10 +187,8 @@ StandupControllerOutput StandupController::update(
     previous_balance_error_rad_ = error_rad;
   } else if (!capture_crossed_upright_ &&
              crossedZero(previous_balance_error_rad_, error_rad)) {
-    // After the first true upright crossing, stay in the higher-damping settling
-    // mode until this capture attempt is released. A pure e*de/dt scheduler fell
-    // back to low damping on the return approach and allowed the second crossing
-    // to retain almost 1 rad/s in standup-20260925-235050.
+    // A true upright crossing is an unconditional transition into recovery.
+    // Once recovery begins it stays latched until this capture attempt releases.
     capture_crossed_upright_ = true;
   }
   previous_balance_error_rad_ = error_rad;
@@ -218,22 +221,23 @@ StandupControllerOutput StandupController::update(
                          : config_.lqr_k_rate_unstable;
   bool recovery_mode = false;
   if (!stable_) {
-    if (capture_crossed_upright_) {
-      recovery_mode = true;
-      k_rate = config_.lqr_k_rate_recovery_unstable;
-    } else {
-      // Before the first crossing, switch to recovery only after a real reversal
-      // away from zero. At exactly zero angle, any finite rate is also recovery;
-      // at nonzero angle with zero rate we stay in the gentler approach loop.
+    if (!capture_crossed_upright_) {
+      // The 2026-09-26 aggressive-recovery trace showed that a capture can turn
+      // around a fraction of a degree before crossing zero. Treat that first
+      // genuine reversal as the start of settling and latch recovery immediately;
+      // otherwise the hybrid law chatters between approach and recovery while the
+      // body rate changes sign near upright.
       const float phase_product = error_deg * filtered_rate_deg_s;
       const bool at_zero_with_motion =
           std::fabs(error_deg) < 1.0e-4F &&
           std::fabs(filtered_rate_deg_s) > 1.0e-4F;
-      const bool moving_away = phase_product > 0.0F || at_zero_with_motion;
-      if (moving_away) {
-        recovery_mode = true;
-        k_rate = config_.lqr_k_rate_recovery_unstable;
+      if (phase_product > 0.0F || at_zero_with_motion) {
+        capture_crossed_upright_ = true;
       }
+    }
+    if (capture_crossed_upright_) {
+      recovery_mode = true;
+      k_rate = config_.lqr_k_rate_recovery_unstable;
     }
   }
   const float k_wheel = stable_ ? config_.lqr_k_wheel_stable
@@ -262,6 +266,12 @@ StandupControllerOutput StandupController::update(
   const float ki = stable_ ? config_.velocity_i_stable
                            : (recovery_mode ? config_.velocity_i_recovery_unstable
                                             : config_.velocity_i_unstable);
+  const float direct_recovery_vq = recovery_mode
+      ? std::clamp(-config_.recovery_rate_damping_v_per_rad_s *
+                       filtered_rate_rad_s_,
+                   -config_.recovery_rate_damping_limit_v,
+                   config_.recovery_rate_damping_limit_v)
+      : 0.0F;
   if (dt_s > 0.0F && dt_s < 0.1F) {
     const float integral_delta =
         0.5F * ki * dt_s *
@@ -270,7 +280,7 @@ StandupControllerOutput StandupController::update(
         velocity_integral_v_ + integral_delta,
         -config_.vq_limit_v, config_.vq_limit_v);
     const float candidate_unclamped_vq =
-        kp * velocity_error + candidate_integral;
+        kp * velocity_error + candidate_integral + direct_recovery_vq;
     const bool pushes_positive_saturation =
         candidate_unclamped_vq > config_.vq_limit_v && integral_delta > 0.0F;
     const bool pushes_negative_saturation =
@@ -282,7 +292,7 @@ StandupControllerOutput StandupController::update(
   previous_velocity_error_rad_s_ = velocity_error;
 
   const float vq_target =
-      std::clamp(kp * velocity_error + velocity_integral_v_,
+      std::clamp(kp * velocity_error + velocity_integral_v_ + direct_recovery_vq,
                  -config_.vq_limit_v, config_.vq_limit_v);
   float vq = vq_target;
   if (dt_s > 0.0F && dt_s < 0.1F) {
