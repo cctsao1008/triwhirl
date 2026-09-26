@@ -78,14 +78,18 @@ bool configureRuntimeStandup(const float theta_reference_rad) {
   config.theta_reference_rad = theta_reference_rad;
   config.vq_limit_v = state::kMotorVectorLimitV;
 
-  // Commissioning override from standup-20260926-111129: preserve the proven
-  // first-approach law, but make post-crossing / moving-away recovery materially
-  // stronger instead of continuing 0.1-at-a-time tuning.  The trace reached
-  // 0.08 deg from upright and reduced the second-crossing rate with the latch,
-  // while applied Vq remained well below the 4 V runtime rail.  Keep the same
-  // angle, approach-rate, wheel-feedback, PI-integral, capture/release, and pump
-  // settings; only increase recovery authority and its outer target headroom.
-  config.lqr_k_rate_recovery_unstable = 1.20F;
+  // standup-20260926-122823 proved that multiplying the whole recovery cascade
+  // (Krate=1.20 plus velocity P=0.10) can spend the full +/-4 V rail but couples
+  // angle stiffness and rate damping so strongly that the body chatters around the
+  // upright and still escapes. Keep the already-good first approach unchanged.
+  // In recovery, return to the gentler outer/inner gains and add a bounded direct
+  // body-rate damping voltage. This keeps strong dissipative authority without
+  // multiplying the angle term by the aggressive recovery velocity P.
+  config.lqr_k_rate_recovery_unstable = 0.55F;
+  config.velocity_p_recovery_unstable = 0.035F;
+  config.velocity_i_recovery_unstable = 0.0F;
+  config.recovery_rate_damping_v_per_rad_s = 2.0F;
+  config.recovery_rate_damping_limit_v = 2.5F;
   config.velocity_target_limit_rad_s = 80.0F;
 
   if (config.pump_v_high > config.vq_limit_v ||
