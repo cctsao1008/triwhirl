@@ -77,6 +77,17 @@ bool configureRuntimeStandup(const float theta_reference_rad) {
   triwhirl::StandupControllerConfig config{};
   config.theta_reference_rad = theta_reference_rad;
   config.vq_limit_v = state::kMotorVectorLimitV;
+
+  // Commissioning override from standup-20260926-111129: preserve the proven
+  // first-approach law, but make post-crossing / moving-away recovery materially
+  // stronger instead of continuing 0.1-at-a-time tuning.  The trace reached
+  // 0.08 deg from upright and reduced the second-crossing rate with the latch,
+  // while applied Vq remained well below the 4 V runtime rail.  Keep the same
+  // angle, approach-rate, wheel-feedback, PI-integral, capture/release, and pump
+  // settings; only increase recovery authority and its outer target headroom.
+  config.lqr_k_rate_recovery_unstable = 1.20F;
+  config.velocity_target_limit_rad_s = 80.0F;
+
   if (config.pump_v_high > config.vq_limit_v ||
       !standup_controller.configure(config)) {
     return false;
