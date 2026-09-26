@@ -9,12 +9,11 @@ namespace triwhirl {
 namespace {
 
 constexpr float kRadToDeg = 180.0F / kPi;
-
-float signOr(const float value, const int fallback) {
-  if (value > 0.0F) return 1.0F;
-  if (value < 0.0F) return -1.0F;
-  return fallback >= 0 ? 1.0F : -1.0F;
-}
+// Once settling has been acquired, do not give up at the 12-degree capture
+// hysteresis. Keep the bilateral balance law active until the body is genuinely
+// close to the 60-degree periodic-coordinate boundary. The 5-degree guard keeps
+// us away from the vertex-wrap ambiguity before returning to swing-up.
+constexpr float kSettlingFallRad = 55.0F * kPi / 180.0F;
 
 bool crossedZero(const float previous, const float current) {
   return (previous > 0.0F && current <= 0.0F) ||
@@ -65,7 +64,8 @@ bool StandupController::validConfig(const StandupControllerConfig& config) {
   return config.balance_capture_rad > 0.0F &&
          config.balance_capture_rad < config.balance_release_rad &&
          config.balance_release_rad < config.swing_near_rad &&
-         config.swing_near_rad <= kUprightHalfPeriodRad &&
+         config.swing_near_rad < kSettlingFallRad &&
+         kSettlingFallRad < kUprightHalfPeriodRad &&
          config.pump_v_low > 0.0F &&
          config.pump_v_low <= config.pump_v_high &&
          config.rate_switch_rad_s >= 0.0F &&
@@ -145,6 +145,8 @@ StandupControllerOutput StandupController::update(
   const float dt_s = static_cast<float>(elapsed_us) * 1.0e-6F;
   previous_update_us_ = input.now_us;
 
+  // The upright reference is fixed for the whole run.  "stable" is a status
+  // qualification only; it must never recenter the equilibrium.
   const float error_rad =
       periodicUprightErrorRad(input.theta_rad, theta_reference_rad_);
   if (!std::isfinite(error_rad)) {
@@ -153,8 +155,13 @@ StandupControllerOutput StandupController::update(
   }
   const float abs_error = std::fabs(error_rad);
 
-  const bool hold_balance =
-      was_balancing_ && abs_error < config_.balance_release_rad;
+  // Before the first crossing/reversal, preserve the seller-style 9/12-degree
+  // capture hysteresis so a bad approach can immediately return to swing-up.
+  // After settling is latched, keep balancing all the way to a true-fall guard.
+  const float hold_limit_rad = capture_crossed_upright_
+                                   ? kSettlingFallRad
+                                   : config_.balance_release_rad;
+  const bool hold_balance = was_balancing_ && abs_error < hold_limit_rad;
   if (!hold_balance && abs_error >= config_.balance_capture_rad) {
     if (std::fabs(input.theta_rate_rad_s) >= config_.rate_switch_rad_s) {
       swing_rate_sign_ = input.theta_rate_rad_s < 0.0F ? -1 : 1;
@@ -173,23 +180,26 @@ StandupControllerOutput StandupController::update(
     previous_balance_error_rad_ = 0.0F;
     capture_crossed_upright_ = false;
     was_balancing_ = false;
+    stable_ = false;
+    last_unstable_us_ = input.now_us;
     output_ = output;
     return output_;
   }
 
+  bool just_latched_settling = false;
   const bool entering_balance = !was_balancing_;
   if (entering_balance) {
-    // Each capture attempt starts with a clean inner-loop state. The lossless
-    // 2026-09-23 trace showed failed captures leaving the integrator at -4 V,
-    // which made subsequent captures begin fully saturated.
+    // Every capture attempt starts clean.  The 1-second stable timer also starts
+    // here; time spent swinging does not count toward balance qualification.
     resetVelocityLoop();
     capture_crossed_upright_ = false;
     previous_balance_error_rad_ = error_rad;
+    stable_ = false;
+    last_unstable_us_ = input.now_us;
   } else if (!capture_crossed_upright_ &&
              crossedZero(previous_balance_error_rad_, error_rad)) {
-    // A true upright crossing is an unconditional transition into recovery.
-    // Once recovery begins it stays latched until this capture attempt releases.
     capture_crossed_upright_ = true;
+    just_latched_settling = true;
   }
   previous_balance_error_rad_ = error_rad;
 
@@ -200,78 +210,79 @@ StandupControllerOutput StandupController::update(
       0.6F * filtered_rate_rad_s_ + 0.4F * vendor_rate_rad_s;
   was_balancing_ = true;
 
-  if (abs_error > config_.stable_angle_rad) {
-    last_unstable_us_ = input.now_us;
-    if (stable_) {
-      theta_reference_rad_ = config_.theta_reference_rad;
-      stable_ = false;
-    }
-  }
-  if (!stable_ &&
-      (input.now_us - last_unstable_us_) > config_.stable_delay_us) {
-    theta_reference_rad_ += error_rad;
-    stable_ = true;
-  }
-
   const float error_deg = error_rad * kRadToDeg;
   const float filtered_rate_deg_s = filtered_rate_rad_s_ * kRadToDeg;
-  const float k_angle = stable_ ? config_.lqr_k_angle_stable
-                                : config_.lqr_k_angle_unstable;
-  float k_rate = stable_ ? config_.lqr_k_rate_stable
-                         : config_.lqr_k_rate_unstable;
-  bool recovery_mode = false;
-  if (!stable_) {
-    if (!capture_crossed_upright_) {
-      // The 2026-09-26 aggressive-recovery trace showed that a capture can turn
-      // around a fraction of a degree before crossing zero. Treat that first
-      // genuine reversal as the start of settling and latch recovery immediately;
-      // otherwise the hybrid law chatters between approach and recovery while the
-      // body rate changes sign near upright.
-      const float phase_product = error_deg * filtered_rate_deg_s;
-      const bool at_zero_with_motion =
-          std::fabs(error_deg) < 1.0e-4F &&
-          std::fabs(filtered_rate_deg_s) > 1.0e-4F;
-      if (phase_product > 0.0F || at_zero_with_motion) {
-        capture_crossed_upright_ = true;
-      }
-    }
-    if (capture_crossed_upright_) {
-      recovery_mode = true;
-      k_rate = config_.lqr_k_rate_recovery_unstable;
+
+  if (!capture_crossed_upright_) {
+    // A low-energy approach can reverse a fraction of a degree before crossing
+    // zero.  That is still successful arrival at the upright neighbourhood, so
+    // latch settling as soon as the body is genuinely moving away from zero.
+    const float phase_product = error_deg * filtered_rate_deg_s;
+    const bool at_zero_with_motion =
+        std::fabs(error_deg) < 1.0e-4F &&
+        std::fabs(filtered_rate_deg_s) > 1.0e-4F;
+    if (phase_product > 0.0F || at_zero_with_motion) {
+      capture_crossed_upright_ = true;
+      just_latched_settling = true;
     }
   }
-  const float k_wheel = stable_ ? config_.lqr_k_wheel_stable
-                                : config_.lqr_k_wheel_unstable;
 
-  float target_velocity =
-      k_angle * error_deg + k_rate * (-filtered_rate_deg_s) +
-      k_wheel * input.wheel_rate_rad_s;
+  // One second inside +/-5 degrees is only a success/qualification flag.  The
+  // exact same bilateral settling law keeps running afterward, and the fixed
+  // upright reference never moves.  Leaving +/-5 degrees clears the flag but
+  // does not release settling or stop active correction.
+  if (abs_error > config_.stable_angle_rad) {
+    last_unstable_us_ = input.now_us;
+    stable_ = false;
+  } else if (!stable_ &&
+             (input.now_us - last_unstable_us_) >= config_.stable_delay_us) {
+    stable_ = true;
+    if (!capture_crossed_upright_) {
+      capture_crossed_upright_ = true;
+      just_latched_settling = true;
+    }
+  }
+
+  if (just_latched_settling) {
+    // Do not carry the approach PI bias into the bilateral regulator.  Keep the
+    // previous applied Vq for slew continuity, but remove the one-sided integral
+    // memory and derivative history at the mode transition.
+    velocity_integral_v_ = 0.0F;
+    previous_velocity_error_rad_s_ = 0.0F;
+  }
+
+  const bool settling_mode = capture_crossed_upright_;
+  float target_velocity = 0.0F;
+  if (settling_mode) {
+    // Bilateral local regulator: wheel target is position restoring only.  Body
+    // rate damping is applied independently in the Vq path below, so rate/wheel
+    // feedback cannot swamp the sign reversal of the position command.
+    //   error > 0 -> target < 0
+    //   error < 0 -> target > 0
+    target_velocity = config_.lqr_k_angle_unstable * error_deg;
+  } else {
+    // First approach remains the already-proven seller-style state feedback.
+    target_velocity =
+        config_.lqr_k_angle_unstable * error_deg +
+        config_.lqr_k_rate_unstable * (-filtered_rate_deg_s) +
+        config_.lqr_k_wheel_unstable * input.wheel_rate_rad_s;
+  }
   target_velocity = std::clamp(target_velocity,
                                -config_.velocity_target_limit_rad_s,
                                config_.velocity_target_limit_rad_s);
 
-  if (stable_ &&
-      (input.now_us - last_momentum_adjust_us_) >=
-          config_.momentum_adjust_period_us &&
-      std::fabs(target_velocity) > config_.momentum_adjust_threshold_rad_s) {
-    theta_reference_rad_ +=
-        signOr(target_velocity, 1) * config_.momentum_adjust_step_rad;
-    last_momentum_adjust_us_ = input.now_us;
-  }
-
   const float velocity_error = target_velocity - input.wheel_rate_rad_s;
-  const float kp = stable_ ? config_.velocity_p_stable
-                           : (recovery_mode ? config_.velocity_p_recovery_unstable
-                                            : config_.velocity_p_unstable);
-  const float ki = stable_ ? config_.velocity_i_stable
-                           : (recovery_mode ? config_.velocity_i_recovery_unstable
-                                            : config_.velocity_i_unstable);
-  const float direct_recovery_vq = recovery_mode
+  const float kp = settling_mode ? config_.velocity_p_recovery_unstable
+                                 : config_.velocity_p_unstable;
+  const float ki = settling_mode ? config_.velocity_i_recovery_unstable
+                                 : config_.velocity_i_unstable;
+  const float direct_recovery_vq = settling_mode
       ? std::clamp(-config_.recovery_rate_damping_v_per_rad_s *
                        filtered_rate_rad_s_,
                    -config_.recovery_rate_damping_limit_v,
                    config_.recovery_rate_damping_limit_v)
       : 0.0F;
+
   if (dt_s > 0.0F && dt_s < 0.1F) {
     const float integral_delta =
         0.5F * ki * dt_s *
