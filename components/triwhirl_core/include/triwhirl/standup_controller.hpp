@@ -46,11 +46,13 @@ struct StandupControllerConfig {
   // input to that envelope before applying the retained 0.6/0.4 gyro filter.
   float gyro_rate_limit_rad_s = 4.36332313F;  // 250 deg/s
 
-  // Keep the restored vendor proportional velocity gain while testing capture
-  // settling. Reduced integral gain, wheel feedback, anti-windup, and recapture
-  // reset remain in place.
+  // Approach and recovery use separate wheel-velocity loops. Defaults preserve
+  // the original behavior; commissioning may raise recovery P and reduce/disable
+  // recovery I without disturbing the already-good first approach to upright.
   float velocity_p_unstable = 0.035F;
   float velocity_i_unstable = 0.150F;
+  float velocity_p_recovery_unstable = 0.035F;
+  float velocity_i_recovery_unstable = 0.150F;
   float velocity_p_stable = 0.018F;
   float velocity_i_stable = 0.100F;
   float velocity_target_limit_rad_s = 60.0F;
