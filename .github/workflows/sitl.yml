@@ -38,7 +38,28 @@ jobs:
           test -s /tmp/triwhirl-balance-demo.csv
           head -n 3 /tmp/triwhirl-balance-demo.csv
           tail -n 3 /tmp/triwhirl-balance-demo.csv
-      - name: Check WebUI bridge syntax
+      - name: Check WebUI source and bridge
         run: |
           python -m py_compile tools/visualization/triwhirl-sim-viewer/serve_live.py
-          python tools/visualization/triwhirl-sim-viewer/serve_live.py --help >/dev/null
+          node --check tools/visualization/triwhirl-sim-viewer/app.js
+          python tools/visualization/triwhirl-sim-viewer/serve_live.py \
+            --host 127.0.0.1 \
+            --port 8765 \
+            --exe /tmp/triwhirl-sitl-build/triwhirl-standup-sitl \
+            >/tmp/triwhirl-viewer.log 2>&1 &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8765/api/health >/tmp/triwhirl-health.json; then
+              break
+            fi
+            sleep 0.1
+          done
+          grep '"ok": true' /tmp/triwhirl-health.json
+          curl -fsSN --max-time 5 \
+            'http://127.0.0.1:8765/api/live?profile=nominal&speed=10&fps=120' \
+            >/tmp/triwhirl-viewer.sse
+          grep 'event: meta' /tmp/triwhirl-viewer.sse
+          grep 'event: sample' /tmp/triwhirl-viewer.sse
+          grep 'event: end' /tmp/triwhirl-viewer.sse
+          grep '"gate_pass":true' /tmp/triwhirl-viewer.sse
