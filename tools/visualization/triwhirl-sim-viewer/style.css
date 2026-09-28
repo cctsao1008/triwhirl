@@ -10,6 +10,7 @@
   --good: #61d394;
   --warn: #ffcc66;
   --bad: #ff6b75;
+  --wheel-kick: #d58cff;
 }
 
 * { box-sizing: border-box; }
@@ -102,6 +103,61 @@ button:disabled { opacity: 0.45; cursor: default; }
 .controls button { height: 36px; }
 #run { background: #17365a; border-color: #2f6498; }
 
+.disturbance-panel {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid #573841;
+  border-radius: 9px;
+  background: linear-gradient(180deg, rgba(61,31,38,0.65), rgba(31,24,31,0.65));
+}
+.disturbance-copy {
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.disturbance-copy strong { color: #ff9aa2; font-size: 12px; }
+.disturbance-copy span { color: #b9a3ab; font-size: 11px; }
+.disturbance-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.kick-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid rgba(255,107,117,0.22);
+  border-radius: 7px;
+  background: rgba(10,15,23,0.45);
+}
+.kick-label { color: var(--muted); font-size: 11px; margin: 0 3px; }
+.kick-button {
+  min-width: 64px;
+  background: #3b2027;
+  border-color: #81444f;
+}
+.kick-button:hover:not(:disabled) { border-color: var(--bad); }
+.kick-button.secondary {
+  min-width: 46px;
+  background: #30203f;
+  border-color: #654982;
+}
+.kick-button.secondary:hover:not(:disabled) { border-color: var(--wheel-kick); }
+.disturbance-readout {
+  min-width: 210px;
+  color: #d6bbc2;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-align: right;
+}
+
 .scene-wrap {
   position: relative;
   border: 1px solid #27364a;
@@ -116,10 +172,12 @@ button:disabled { opacity: 0.45; cursor: default; }
   top: 10px;
   display: flex;
   gap: 12px;
+  flex-wrap: wrap;
   color: #c8d8ec;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
+#kick-readout { color: #ff9aa2; font-weight: 650; }
 
 .plot-card { margin-top: 12px; border: 1px solid #27364a; border-radius: 9px; padding: 9px; background: #0d1520; }
 .plot-title { color: var(--muted); font-size: 11px; margin-bottom: 5px; }
@@ -152,6 +210,12 @@ button:disabled { opacity: 0.45; cursor: default; }
   border-top: 1px solid var(--border);
   background: #0a0f17;
   font-size: 11px;
+}
+
+@media (max-width: 1180px) {
+  .disturbance-panel { align-items: flex-start; flex-direction: column; }
+  .disturbance-controls { justify-content: flex-start; }
+  .disturbance-readout { text-align: left; }
 }
 
 @media (max-width: 980px) {
