@@ -30,7 +30,7 @@
           <div class="section-head">
             <div>
               <div class="section-title">Reaction-wheel Reuleaux triangle</div>
-              <div class="section-subtitle">Local upright model · production StandupController · browser is display-only</div>
+              <div class="section-subtitle">Local upright model · production StandupController · browser never computes plant/controller dynamics</div>
             </div>
             <div class="controls">
               <label>Plant
@@ -53,16 +53,47 @@
             </div>
           </div>
 
+          <div class="disturbance-panel">
+            <div class="disturbance-copy">
+              <strong>Disturbance injection</strong>
+              <span>Each click becomes a native-SITL impulse at the current simulation time, then the trajectory is deterministically recomputed.</span>
+            </div>
+            <div class="disturbance-controls">
+              <div class="kick-group">
+                <span class="kick-label">Body push Δθ̇</span>
+                <button id="body-left" class="kick-button" disabled>← Push</button>
+                <select id="body-strength" aria-label="Body push strength">
+                  <option value="0.2">0.20 rad/s</option>
+                  <option value="0.5" selected>0.50 rad/s</option>
+                  <option value="1.0">1.00 rad/s</option>
+                </select>
+                <button id="body-right" class="kick-button" disabled>Push →</button>
+              </div>
+              <div class="kick-group">
+                <span class="kick-label">Wheel kick Δω</span>
+                <button id="wheel-minus" class="kick-button secondary" disabled>−ω</button>
+                <select id="wheel-strength" aria-label="Wheel kick strength">
+                  <option value="1.0">1.0 rad/s</option>
+                  <option value="2.0" selected>2.0 rad/s</option>
+                  <option value="5.0">5.0 rad/s</option>
+                </select>
+                <button id="wheel-plus" class="kick-button secondary" disabled>+ω</button>
+              </div>
+              <div class="disturbance-readout" id="disturbance-readout">No disturbances</div>
+            </div>
+          </div>
+
           <div class="scene-wrap">
             <canvas id="scene" width="960" height="600"></canvas>
             <div class="scene-overlay">
               <span id="time-readout">t = 0.000 s</span>
               <span id="phase-readout">phase: —</span>
+              <span id="kick-readout"></span>
             </div>
           </div>
 
           <div class="plot-card">
-            <div class="plot-title">Rolling 10 s evidence: body error (deg) / applied Vq (V)</div>
+            <div class="plot-title">Rolling 10 s evidence: body error (deg) / applied Vq (V) · red markers = injected disturbances</div>
             <canvas id="history" width="960" height="180"></canvas>
           </div>
         </section>
@@ -94,6 +125,8 @@
           <div class="card-title">Gate</div>
           <div class="kv"><span>Scenario</span><strong>3° / −0.5 rad/s</strong></div>
           <div class="kv"><span>Duration</span><strong>10.0 s</strong></div>
+          <div class="kv"><span>Disturbances</span><strong id="disturbance-count">0</strong></div>
+          <div class="kv"><span>Gate type</span><strong id="gate-type">BALANCE</strong></div>
           <div class="kv"><span>Result</span><strong id="gate-result">—</strong></div>
           <div class="scope" id="gate-summary">Run the simulation gate.</div>
         </section>
@@ -102,7 +135,7 @@
           <div class="warning-title">PROVISIONAL PLANT EVIDENCE</div>
           <div class="warning-copy">
             B/C local fits are commissioning evidence, not a validated digital twin.
-            A visual PASS does not authorize hardware by itself.
+            Disturbance recovery is a robustness screen, not physical certification.
           </div>
         </section>
       </aside>
@@ -111,7 +144,7 @@
     <footer class="statusbar">
       <span>native controller: 1 kHz</span>
       <span>RK4 plant: 100 µs</span>
-      <span>display: ≤60 fps via SSE</span>
+      <span>disturbance: native state impulse + deterministic recompute</span>
       <span>NO PHYSICAL AUTHORITY</span>
     </footer>
   </div>
