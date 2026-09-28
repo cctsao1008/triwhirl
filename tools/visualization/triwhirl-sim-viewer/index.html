@@ -20,7 +20,7 @@
         <div class="status-chip" id="model-chip">model: —</div>
         <div class="status-chip" id="stream-chip">SIM: disconnected</div>
         <div class="status-chip status-danger">SIMULATION ONLY</div>
-        <div class="status-chip gate-blocked" id="gate-chip">SIM GATE: BLOCKED</div>
+        <div class="status-chip gate-blocked" id="gate-chip">LIVE SIM: STOPPED</div>
       </div>
     </header>
 
@@ -30,7 +30,7 @@
           <div class="section-head">
             <div>
               <div class="section-title">Reaction-wheel Reuleaux triangle</div>
-              <div class="section-subtitle">Local upright model · production StandupController · browser never computes plant/controller dynamics</div>
+              <div class="section-subtitle">Continuous native SITL · production StandupController · browser never computes plant/controller dynamics</div>
             </div>
             <div class="controls">
               <label>Plant
@@ -48,7 +48,7 @@
                   <option value="5">5×</option>
                 </select>
               </label>
-              <button id="run">▶ Run 10 s gate</button>
+              <button id="run">▶ Run live</button>
               <button id="stop" disabled>■ Stop</button>
             </div>
           </div>
@@ -56,7 +56,7 @@
           <div class="disturbance-panel">
             <div class="disturbance-copy">
               <strong>Disturbance injection</strong>
-              <span>Each click becomes a native-SITL impulse at the current simulation time, then the trajectory is deterministically recomputed.</span>
+              <span>Each click is injected into the currently running native plant state; there is no replay/recompute and no fixed end time.</span>
             </div>
             <div class="disturbance-controls">
               <div class="kick-group">
@@ -93,7 +93,7 @@
           </div>
 
           <div class="plot-card">
-            <div class="plot-title">Rolling 10 s evidence: body error (deg) / applied Vq (V) · red markers = injected disturbances</div>
+            <div class="plot-title">Rolling 10 s history: body error (deg) / applied Vq (V) · red/purple markers = injected disturbances</div>
             <canvas id="history" width="960" height="180"></canvas>
           </div>
         </section>
@@ -122,20 +122,20 @@
         </section>
 
         <section class="info-card">
-          <div class="card-title">Gate</div>
+          <div class="card-title">Live simulation</div>
           <div class="kv"><span>Scenario</span><strong>3° / −0.5 rad/s</strong></div>
-          <div class="kv"><span>Duration</span><strong>10.0 s</strong></div>
+          <div class="kv"><span>Duration</span><strong>Until Stop</strong></div>
           <div class="kv"><span>Disturbances</span><strong id="disturbance-count">0</strong></div>
-          <div class="kv"><span>Gate type</span><strong id="gate-type">BALANCE</strong></div>
-          <div class="kv"><span>Result</span><strong id="gate-result">—</strong></div>
-          <div class="scope" id="gate-summary">Run the simulation gate.</div>
+          <div class="kv"><span>Mode</span><strong id="gate-type">LIVE</strong></div>
+          <div class="kv"><span>Status</span><strong id="gate-result">STOPPED</strong></div>
+          <div class="scope" id="gate-summary">Press Run live; simulation continues until Stop.</div>
         </section>
 
         <section class="warning-card">
           <div class="warning-title">PROVISIONAL PLANT EVIDENCE</div>
           <div class="warning-copy">
             B/C local fits are commissioning evidence, not a validated digital twin.
-            Disturbance recovery is a robustness screen, not physical certification.
+            Interactive disturbance recovery is a robustness screen, not physical certification.
           </div>
         </section>
       </aside>
@@ -144,7 +144,8 @@
     <footer class="statusbar">
       <span>native controller: 1 kHz</span>
       <span>RK4 plant: 100 µs</span>
-      <span>disturbance: native state impulse + deterministic recompute</span>
+      <span>live session: native process persists until Stop</span>
+      <span>CI still keeps a separate deterministic 10 s regression gate</span>
       <span>NO PHYSICAL AUTHORITY</span>
     </footer>
   </div>
