@@ -8,6 +8,8 @@
 #include "standup_sitl.cpp"
 #undef main
 
+#include "global_standup_model.inc"
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -95,10 +97,13 @@ void inputThread() {
 
 void emitSample(const double t_s, const State& state,
                 const triwhirl::StandupControllerOutput& output) {
+  const double wrapped_error = wrapGlobalErrorRad(state.theta_error_rad);
   std::cout << std::setprecision(10)
             << "{\"type\":\"sample\",\"t_s\":" << t_s
-            << ",\"true_error_rad\":" << state.theta_error_rad
-            << ",\"true_error_deg\":" << state.theta_error_rad * kRadToDeg
+            << ",\"true_error_rad\":" << wrapped_error
+            << ",\"true_error_deg\":" << wrapped_error * kRadToDeg
+            << ",\"true_body_angle_rad\":" << state.theta_error_rad
+            << ",\"true_body_angle_deg\":" << state.theta_error_rad * kRadToDeg
             << ",\"true_theta_rate_rad_s\":" << state.theta_rate_rad_s
             << ",\"true_wheel_rate_rad_s\":" << state.wheel_rate_rad_s
             << ",\"true_wheel_angle_rad\":" << state.wheel_angle_rad
@@ -129,7 +134,8 @@ void emitDisturbance(const double t_s, const char* kind, const double delta) {
 void usageLive(const char* argv0) {
   std::cout << "usage:\n"
             << "  " << argv0
-            << " [--profile nominal|B|C] [--speed X] [--fps N]\n"
+            << " [--scenario full-standup|balance]"
+               " [--profile nominal|B|C] [--speed X] [--fps N]\n"
             << "stdin commands:\n"
             << "  body <delta_rad_s>\n"
             << "  wheel <delta_rad_s>\n"
@@ -140,6 +146,7 @@ void usageLive(const char* argv0) {
 
 int main(int argc, char** argv) {
   try {
+    std::string scenario = "full-standup";
     std::string profile = "nominal";
     double speed = 1.0;
     double fps = 60.0;
@@ -151,7 +158,9 @@ int main(int argc, char** argv) {
         }
         return argv[++i];
       };
-      if (arg == "--profile") {
+      if (arg == "--scenario") {
+        scenario = requireValue("--scenario");
+      } else if (arg == "--profile") {
         profile = requireValue("--profile");
       } else if (arg == "--speed") {
         speed = std::stod(requireValue("--speed"));
@@ -164,6 +173,9 @@ int main(int argc, char** argv) {
         throw std::runtime_error("unknown argument: " + arg);
       }
     }
+    if (scenario != "full-standup" && scenario != "balance") {
+      throw std::runtime_error("scenario must be full-standup or balance");
+    }
     if (!std::isfinite(speed) || speed < 0.1 || speed > 10.0) {
       throw std::runtime_error("speed must be in [0.1, 10]");
     }
@@ -171,11 +183,14 @@ int main(int argc, char** argv) {
       throw std::runtime_error("fps must be in [5, 120]");
     }
 
+    const bool full_standup = scenario == "full-standup";
     const PlantModel plant = plantByName(profile);
     const auto config = triwhirl::makeStandupCommissioningConfig(
         static_cast<float>(kThetaReferenceRad), 4.0F);
     triwhirl::StandupController controller(config);
-    State state{3.0 / kRadToDeg, -0.5, 0.0, 0.0};
+    State state = full_standup
+                      ? fullStandupInitialState()
+                      : State{3.0 / kRadToDeg, -0.5, 0.0, 0.0};
     std::uint32_t now_us = kStartTimeUs;
     auto input = controllerInput(now_us, state);
     controller.reset(input);
@@ -212,8 +227,14 @@ int main(int argc, char** argv) {
       if (stop_requested) break;
 
       for (int substep = 0; substep < kPlantSubsteps; ++substep) {
-        state = rk4Step(plant, state, static_cast<double>(output.vq_v),
-                        kPlantStepS);
+        if (full_standup) {
+          state = rk4GlobalStandupStep(plant, state,
+                                       static_cast<double>(output.vq_v),
+                                       kPlantStepS);
+        } else {
+          state = rk4Step(plant, state, static_cast<double>(output.vq_v),
+                          kPlantStepS);
+        }
       }
       ++step;
       now_us += kControlPeriodUs;
