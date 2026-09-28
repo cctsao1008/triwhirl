@@ -4,6 +4,7 @@
   const sceneCtx = scene.getContext("2d");
   const historyCanvas = $("history");
   const historyCtx = historyCanvas.getContext("2d");
+  const scenario = $("scenario");
   const profile = $("profile");
   const speed = $("speed");
   const runButton = $("run");
@@ -22,6 +23,7 @@
   let disturbances = [];
   let kickFlash = null;
   let stopping = false;
+  let currentScenario = scenario.value;
 
   const number = (value, digits = 3) => {
     const n = Number(value);
@@ -56,6 +58,38 @@
     ctx.fill(path);
     ctx.stroke(path);
     ctx.restore();
+  }
+
+  function buildReuleauxBoundary() {
+    const r = 190;
+    const h = 164.5448;
+    const arcs = [
+      { cx: 95, cy: -h, a0: 2 * Math.PI / 3, a1: Math.PI },
+      { cx: 0, cy: 0, a0: -2 * Math.PI / 3, a1: -Math.PI / 3 },
+      { cx: -95, cy: -h, a0: 0, a1: Math.PI / 3 },
+    ];
+    const points = [];
+    arcs.forEach((arc) => {
+      for (let i = 0; i <= 24; ++i) {
+        const u = i / 24;
+        const a = arc.a0 + (arc.a1 - arc.a0) * u;
+        points.push({ x: arc.cx + r * Math.cos(a), y: arc.cy + r * Math.sin(a) });
+      }
+    });
+    return points;
+  }
+
+  const reuleauxBoundary = buildReuleauxBoundary();
+
+  function rotatedLowestY(angle) {
+    const s = Math.sin(angle);
+    const c = Math.cos(angle);
+    let maxY = -Infinity;
+    reuleauxBoundary.forEach((p) => {
+      const y = p.x * s + p.y * c;
+      if (y > maxY) maxY = y;
+    });
+    return Number.isFinite(maxY) ? maxY : 0;
   }
 
   function drawWheel(ctx, wheelAngle) {
@@ -130,21 +164,26 @@
       sceneCtx.stroke();
     }
 
-    const error = latest ? Number(latest.true_error_rad) : 0;
+    const bodyAngle = latest
+      ? Number.isFinite(Number(latest.true_body_angle_rad))
+        ? Number(latest.true_body_angle_rad)
+        : Number(latest.true_error_rad)
+      : 0;
     const wheelAngle = latest ? Number(latest.true_wheel_angle_rad) : 0;
     const scale = Math.min(1.35, Math.max(0.72, width / 850));
+    const supportOffset = rotatedLowestY(bodyAngle);
     sceneCtx.save();
-    sceneCtx.translate(width * 0.50, groundY);
+    sceneCtx.translate(width * 0.50, groundY - supportOffset * scale);
     sceneCtx.scale(scale, scale);
     sceneCtx.strokeStyle = "rgba(101,184,255,0.30)";
     sceneCtx.lineWidth = 1.5;
     sceneCtx.setLineDash([6, 6]);
     sceneCtx.beginPath();
-    sceneCtx.moveTo(0, 8);
+    sceneCtx.moveTo(0, 40);
     sceneCtx.lineTo(0, -230);
     sceneCtx.stroke();
     sceneCtx.setLineDash([]);
-    sceneCtx.rotate(error);
+    sceneCtx.rotate(bodyAngle);
     drawReuleaux(sceneCtx);
     drawWheel(sceneCtx, wheelAngle);
     drawKickArrow(sceneCtx, scale);
@@ -156,12 +195,12 @@
 
     sceneCtx.fillStyle = "#8fa3bc";
     sceneCtx.font = "12px ui-monospace, SFMono-Regular, Consolas, monospace";
-    sceneCtx.fillText("local upright contact frame", 22, groundY - 10);
+    sceneCtx.fillText("display contact support follows body orientation", 22, groundY - 10);
     if (!latest) {
       sceneCtx.fillStyle = "#70839c";
       sceneCtx.font = "15px system-ui, sans-serif";
       sceneCtx.textAlign = "center";
-      sceneCtx.fillText("Run live native SITL — continues until Stop", width / 2, 45);
+      sceneCtx.fillText("Run native SITL — full standup starts from rest and continues until Stop", width / 2, 45);
       sceneCtx.textAlign = "left";
     }
   }
@@ -171,7 +210,7 @@
     historyCtx.clearRect(0, 0, width, height);
     historyCtx.fillStyle = "#0d1520";
     historyCtx.fillRect(0, 0, width, height);
-    const left = 42, right = 12, top = 12, bottom = 24;
+    const left = 46, right = 12, top = 12, bottom = 24;
     const plotW = Math.max(10, width - left - right);
     const plotH = Math.max(10, height - top - bottom);
     historyCtx.strokeStyle = "#2b394d";
@@ -183,11 +222,12 @@
       historyCtx.lineTo(left + plotW, y);
       historyCtx.stroke();
     }
+    const errorRange = currentScenario === "full-standup" ? 60 : 5;
     historyCtx.font = "11px ui-monospace, Consolas, monospace";
     historyCtx.fillStyle = "#8fa3bc";
-    historyCtx.fillText("+5°", 6, top + 4);
-    historyCtx.fillText("0", 20, top + plotH / 2 + 4);
-    historyCtx.fillText("−5°", 6, top + plotH + 4);
+    historyCtx.fillText(`+${errorRange}°`, 4, top + 4);
+    historyCtx.fillText("0", 24, top + plotH / 2 + 4);
+    historyCtx.fillText(`−${errorRange}°`, 4, top + plotH + 4);
     if (samples.length < 2) return;
 
     const endT = Number(samples[samples.length - 1].t_s);
@@ -195,7 +235,7 @@
     const visible = samples.filter((s) => Number(s.t_s) >= startT);
     const span = Math.max(1e-9, endT - startT || 10);
     const xOf = (t) => left + ((t - startT) / span) * plotW;
-    const yErr = (v) => top + plotH / 2 - (v / 5) * (plotH / 2);
+    const yErr = (v) => top + plotH / 2 - (v / errorRange) * (plotH / 2);
     const yVq = (v) => top + plotH / 2 - (v / 4) * (plotH / 2);
 
     disturbances.forEach((event) => {
@@ -238,16 +278,20 @@
     if (status === "STABLE") {
       chip.textContent = "LIVE SIM: STABLE";
       chip.classList.add("gate-pass");
-      $("gate-result").textContent = "STABLE";
     } else if (status === "FAIL") {
       chip.textContent = "LIVE SIM: OUT OF BALANCE";
       chip.classList.add("gate-fail");
-      $("gate-result").textContent = "OUT OF BALANCE";
+    } else if (status === "SWINGING") {
+      chip.textContent = "LIVE SIM: SWING-UP";
+      chip.classList.add("gate-blocked");
+    } else if (status === "CAPTURE") {
+      chip.textContent = "LIVE SIM: CAPTURE / SETTLING";
+      chip.classList.add("gate-blocked");
     } else {
       chip.textContent = status === "STOPPED" ? "LIVE SIM: STOPPED" : "LIVE SIM: RUNNING";
       chip.classList.add("gate-blocked");
-      $("gate-result").textContent = status;
     }
+    $("gate-result").textContent = status;
     $("gate-summary").textContent = summary || "Continuous native simulation.";
   }
 
@@ -256,6 +300,7 @@
     $("time-readout").textContent = `t = ${number(sample.t_s, 3)} s`;
     $("phase-readout").textContent = `phase: ${sample.phase}`;
     $("theta").textContent = `${number(sample.true_error_deg, 3)}°`;
+    $("body-angle").textContent = `${number(sample.true_body_angle_deg, 3)}°`;
     $("theta-dot").textContent = `${number(sample.true_theta_rate_rad_s, 3)} rad/s`;
     $("wheel-rate").textContent = `${number(sample.true_wheel_rate_rad_s, 3)} rad/s`;
     $("wheel-angle").textContent = `${number(sample.true_wheel_angle_rad, 3)} rad`;
@@ -268,12 +313,21 @@
     $("integral").textContent = `${number(sample.velocity_integral_v, 3)} V`;
     $("vq-unclamped").textContent = `${number(sample.vq_unclamped_v, 3)} V`;
     $("vq").textContent = `${number(sample.vq_applied_v, 3)} V`;
-    if (sample.phase !== "balance") {
+
+    if (currentScenario === "full-standup") {
+      if (sample.phase === "swing_high" || sample.phase === "swing_low") {
+        setLiveStatus("SWINGING", `Energy pumping from resting face · t=${number(sample.t_s, 1)} s`);
+      } else if (sample.stable) {
+        setLiveStatus("STABLE", `Full standup complete; balancing continuously · t=${number(sample.t_s, 1)} s`);
+      } else if (sample.phase === "balance") {
+        setLiveStatus("CAPTURE", `${sample.settling ? "Settling after capture" : "First balance approach"} · t=${number(sample.t_s, 1)} s`);
+      }
+    } else if (sample.phase !== "balance") {
       setLiveStatus("FAIL", `Left Balance at t=${number(sample.t_s, 3)} s; simulation continues until Stop.`);
     } else if (sample.stable) {
       setLiveStatus("STABLE", `Balancing continuously · t=${number(sample.t_s, 1)} s`);
     } else if (sample.settling) {
-      setLiveStatus("RUNNING", `Settling/recovering · t=${number(sample.t_s, 1)} s`);
+      setLiveStatus("CAPTURE", `Settling/recovering · t=${number(sample.t_s, 1)} s`);
     }
     drawScene();
     drawHistory();
@@ -308,6 +362,7 @@
   function resetControls() {
     runButton.disabled = false;
     stopButton.disabled = true;
+    scenario.disabled = false;
     profile.disabled = false;
     speed.disabled = false;
     setKickControls(false);
@@ -334,18 +389,22 @@
     disturbances = [];
     kickFlash = null;
     stopping = false;
+    currentScenario = scenario.value;
     updateDisturbanceStatus();
     drawScene();
     drawHistory();
     runButton.disabled = true;
     stopButton.disabled = false;
+    scenario.disabled = true;
     profile.disabled = true;
     speed.disabled = true;
     setKickControls(false);
     $("stream-chip").textContent = "SIM: starting continuous native run";
+    $("scenario-readout").textContent = currentScenario === "full-standup" ? "Full standup from rest" : "Upright balance only";
     setLiveStatus("RUNNING", "Native fixed-step simulation continues until Stop.");
 
     const params = new URLSearchParams({
+      scenario: currentScenario,
       profile: profile.value,
       speed: speed.value,
       fps: "60",
@@ -356,7 +415,8 @@
     source.addEventListener("meta", (event) => {
       const meta = JSON.parse(event.data);
       sessionId = meta.session_id;
-      $("model-chip").textContent = `model: ${meta.profile}`;
+      currentScenario = meta.scenario || currentScenario;
+      $("model-chip").textContent = `model: ${currentScenario} / ${meta.profile}`;
       $("stream-chip").textContent = "SIM: continuous native stream";
       setKickControls(true);
     });
@@ -455,6 +515,11 @@
   bodyRight.addEventListener("click", () => injectDisturbance("body", Number(bodyStrength.value)));
   wheelMinus.addEventListener("click", () => injectDisturbance("wheel", -Number(wheelStrength.value)));
   wheelPlus.addEventListener("click", () => injectDisturbance("wheel", Number(wheelStrength.value)));
+  scenario.addEventListener("change", () => {
+    currentScenario = scenario.value;
+    $("scenario-readout").textContent = currentScenario === "full-standup" ? "Full standup from rest" : "Upright balance only";
+    drawHistory();
+  });
   window.addEventListener("resize", () => {
     drawScene();
     drawHistory();
@@ -468,5 +533,5 @@
   drawScene();
   drawHistory();
   updateDisturbanceStatus();
-  setLiveStatus("STOPPED", "Press Run live; simulation continues until Stop.");
+  setLiveStatus("STOPPED", "Press Run live; full standup starts from the resting orientation.");
 })();
