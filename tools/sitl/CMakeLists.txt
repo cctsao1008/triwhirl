@@ -6,6 +6,11 @@ add_executable(triwhirl-standup-sitl
   ../../components/triwhirl_core/standup_controller.cpp
 )
 
+add_executable(triwhirl-standup-sitl-full
+  standup_sitl_full.cpp
+  ../../components/triwhirl_core/standup_controller.cpp
+)
+
 add_executable(triwhirl-standup-sitl-disturbance
   standup_sitl_disturbance.cpp
   ../../components/triwhirl_core/standup_controller.cpp
@@ -18,6 +23,7 @@ add_executable(triwhirl-standup-sitl-live
 
 foreach(target
     triwhirl-standup-sitl
+    triwhirl-standup-sitl-full
     triwhirl-standup-sitl-disturbance
     triwhirl-standup-sitl-live)
   target_compile_features(${target} PRIVATE cxx_std_17)
