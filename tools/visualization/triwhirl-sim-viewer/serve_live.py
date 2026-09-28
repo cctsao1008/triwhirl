@@ -4,7 +4,7 @@
 The interactive WebUI has no simulation-duration limit. A native C++ process
 owns the fixed-step plant and production StandupController for the whole session;
 the browser only displays evidence and sends disturbance/stop commands. The
-separate deterministic 10-second batch gate remains in CI as a regression test.
+separate deterministic batch gates remain in CI as regression tests.
 """
 
 from __future__ import annotations
@@ -242,6 +242,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def stream_live(self, query: str) -> None:
         params = parse_qs(query)
+        scenario = params.get("scenario", ["full-standup"])[0]
+        if scenario not in {"full-standup", "balance"}:
+            self.send_error(400, "scenario must be full-standup or balance")
+            return
         profile = params.get("profile", ["nominal"])[0]
         if profile not in {"nominal", "B", "C"}:
             self.send_error(400, "profile must be nominal, B, or C")
@@ -261,6 +265,8 @@ class Handler(SimpleHTTPRequestHandler):
 
         command = [
             str(self.live_executable),
+            "--scenario",
+            scenario,
             "--profile",
             profile,
             "--speed",
@@ -293,21 +299,25 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
 
         try:
+            scope = (
+                "Production StandupController + 120-degree periodic global swing-up "
+                "surrogate smoothly stitched to the selected provisional local plant."
+                if scenario == "full-standup"
+                else "Production StandupController + selected provisional local plant."
+            )
             if not self.write_sse(
                 "meta",
                 {
-                    "schema": 3,
+                    "schema": 4,
                     "source": "continuous native C++ SITL",
                     "session_id": session.session_id,
+                    "scenario": scenario,
                     "profile": profile,
                     "mode": "LIVE",
                     "duration_s": None,
                     "display_fps_limit": fps,
                     "speed": speed,
-                    "scope": (
-                        "Production StandupController + provisional local plant; "
-                        "native fixed-step simulation continues until explicit Stop."
-                    ),
+                    "scope": scope + " Native fixed-step simulation continues until explicit Stop.",
                 },
             ):
                 return
