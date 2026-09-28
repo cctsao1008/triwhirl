@@ -30,12 +30,12 @@
           <div class="section-head">
             <div>
               <div class="section-title">Reaction-wheel Reuleaux triangle</div>
-              <div class="section-subtitle">Continuous native SITL · production StandupController · full standup starts from a resting face · browser never computes plant/controller dynamics</div>
+              <div class="section-subtitle">Native no-slip Reuleaux rolling pose · production StandupController · browser renders native state only</div>
             </div>
             <div class="controls">
               <label>Scenario
                 <select id="scenario">
-                  <option value="full-standup" selected>Full standup from rest</option>
+                  <option value="full-standup" selected>Full swing from rest (exploratory)</option>
                   <option value="balance">Upright balance only</option>
                 </select>
               </label>
@@ -62,7 +62,7 @@
           <div class="disturbance-panel">
             <div class="disturbance-copy">
               <strong>Disturbance injection</strong>
-              <span>Each click is injected into the currently running native plant state; there is no replay/recompute and no fixed end time.</span>
+              <span>Each click modifies the current native plant state. There is no browser-side physics, replay, or fixed end time.</span>
             </div>
             <div class="disturbance-controls">
               <div class="kick-group">
@@ -110,6 +110,9 @@
           <div class="card-title">True virtual state</div>
           <div class="kv"><span>Periodic θ error</span><strong id="theta">—</strong></div>
           <div class="kv"><span>Body angle</span><strong id="body-angle">—</strong></div>
+          <div class="kv"><span>Body x</span><strong id="body-x">—</strong></div>
+          <div class="kv"><span>COM height</span><strong id="body-y">—</strong></div>
+          <div class="kv"><span>Contact x</span><strong id="contact-x">—</strong></div>
           <div class="kv"><span>θ̇</span><strong id="theta-dot">—</strong></div>
           <div class="kv"><span>Wheel rate</span><strong id="wheel-rate">—</strong></div>
           <div class="kv"><span>Wheel angle</span><strong id="wheel-angle">—</strong></div>
@@ -130,18 +133,18 @@
 
         <section class="info-card">
           <div class="card-title">Live simulation</div>
-          <div class="kv"><span>Scenario</span><strong id="scenario-readout">Full standup from rest</strong></div>
+          <div class="kv"><span>Scenario</span><strong id="scenario-readout">Geometry-derived full swing observation</strong></div>
           <div class="kv"><span>Duration</span><strong>Until Stop</strong></div>
           <div class="kv"><span>Disturbances</span><strong id="disturbance-count">0</strong></div>
           <div class="kv"><span>Mode</span><strong id="gate-type">LIVE</strong></div>
           <div class="kv"><span>Status</span><strong id="gate-result">STOPPED</strong></div>
-          <div class="scope" id="gate-summary">Press Run live; full standup starts from the resting orientation.</div>
+          <div class="scope" id="gate-summary">Full mode is exploratory geometry-derived rolling dynamics; local balance remains the regression path.</div>
         </section>
 
         <section class="warning-card">
-          <div class="warning-title">PROVISIONAL PLANT EVIDENCE</div>
+          <div class="warning-title">GLOBAL MODEL IS EXPLORATORY</div>
           <div class="warning-copy">
-            Full standup uses a 120° periodic far-field swing surrogate smoothly stitched into the selected B/C local fit near upright. The global contact mechanics are not identified; this is a sequence/robustness commissioning model, not a validated digital twin.
+            Far-field motion now uses exact ideal-Reuleaux support/contact geometry, no-slip rolling kinematics, COM-height gravity, and geometry-dependent inertia. Unknown COM offset and rolling losses are still not measured. A full swing-up or Stable indication is therefore an observation, not a validation PASS. Near upright, the selected provisional B/C local fit remains the evidence-backed regression model.
           </div>
         </section>
       </aside>
@@ -150,8 +153,8 @@
     <footer class="statusbar">
       <span>native controller: 1 kHz</span>
       <span>RK4 plant: 100 µs</span>
-      <span>live session: native process persists until Stop</span>
-      <span>CI: local-balance gate + full standup gate</span>
+      <span>rolling pose/contact: native C++ geometry</span>
+      <span>CI: local balance + geometry invariants; no full-standup PASS gate</span>
       <span>NO PHYSICAL AUTHORITY</span>
     </footer>
   </div>
