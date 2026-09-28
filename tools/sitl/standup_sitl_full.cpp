@@ -1,9 +1,14 @@
-// Deterministic full standup runner.
+// Deterministic geometry-derived global standup observation runner.
 //
-// This executable keeps the existing identified local balance SITL untouched and
-// adds the missing global commissioning sequence: rest -> swing -> capture ->
-// settling -> stable.  The production StandupController is compiled directly;
-// only the far-field plant is a provisional periodic surrogate.
+// The identified local balance SITL remains the regression authority near
+// upright.  This executable starts from the physical Reuleaux resting
+// orientation and exercises the production StandupController through a global
+// rolling model whose contact/gravity/inertia come from Reuleaux geometry.
+//
+// Unlike the retired hand-tuned periodic surrogate, a successful full sequence
+// is NOT a validation gate.  The far-field model still lacks measured COM offset
+// and rolling-loss parameters.  CI gates geometry invariants and local anchors;
+// the rest->swing->capture outcome is reported as an observation only.
 #define main triwhirl_standup_sitl_embedded_main
 #include "standup_sitl.cpp"
 #undef main
@@ -61,13 +66,16 @@ void writeFullStandupCsv(const std::string& path,
   if (!stream) throw std::runtime_error("cannot open output: " + path);
   stream << "t_s,true_error_rad,true_error_deg,true_body_angle_rad,"
             "true_body_angle_deg,true_theta_rate_rad_s,true_wheel_rate_rad_s,"
-            "true_wheel_angle_rad,phase,settling,stable,filtered_rate_rad_s,"
+            "true_wheel_angle_rad,center_height_m,contact_body_x_m,"
+            "contact_body_y_m,phase,settling,stable,filtered_rate_rad_s,"
             "target_velocity_rad_s,velocity_error_rad_s,velocity_integral_v,"
             "vq_unclamped_v,vq_target_v,vq_applied_v,target_saturated,"
             "vq_saturated\n";
   stream << std::setprecision(10);
   for (const auto& sample : evidence) {
     const double error_rad = wrapGlobalErrorRad(sample.state.theta_error_rad);
+    const auto geometry = triwhirl_sitl::reuleauxGroundContact(
+        sample.state.theta_error_rad, kReuleauxWidthM);
     const auto& output = sample.output;
     stream << sample.t_s << ',' << error_rad << ',' << error_rad * kRadToDeg
            << ',' << sample.state.theta_error_rad << ','
@@ -75,6 +83,8 @@ void writeFullStandupCsv(const std::string& path,
            << sample.state.theta_rate_rad_s << ','
            << sample.state.wheel_rate_rad_s << ','
            << sample.state.wheel_angle_rad << ','
+           << geometry.center_height_m << ',' << geometry.body_point_m.x << ','
+           << geometry.body_point_m.y << ','
            << triwhirl::standupPhaseName(output.phase) << ','
            << boolText(output.settling) << ',' << boolText(output.stable) << ','
            << output.filtered_rate_rad_s << ',' << output.target_velocity_rad_s
@@ -86,21 +96,45 @@ void writeFullStandupCsv(const std::string& path,
   }
 }
 
+int runGeometrySelfTest() {
+  const bool nominal = geometryDerivedPlantChecksPass(provisionalNominal());
+  const bool b = geometryDerivedPlantChecksPass(provisionalB());
+  const bool c = geometryDerivedPlantChecksPass(provisionalC());
+  std::cout << (nominal ? "PASS" : "FAIL")
+            << " Reuleaux geometry + nominal local anchors\n";
+  std::cout << (b ? "PASS" : "FAIL")
+            << " Reuleaux geometry + B local anchors\n";
+  std::cout << (c ? "PASS" : "FAIL")
+            << " Reuleaux geometry + C local anchors\n";
+  if (nominal && b && c) {
+    std::cout << "PASS geometry-derived global plant invariants\n";
+    return 0;
+  }
+  std::cerr << "FAIL geometry-derived global plant invariants\n";
+  return 1;
+}
+
 void usageFull(const char* argv0) {
   std::cout << "usage:\n"
+            << "  " << argv0 << " --self-test\n"
             << "  " << argv0
-            << " [--profile nominal|B|C] [--duration-ms N] [--output path]"
-               " [--require-standup-gate]\n";
+            << " [--profile nominal|B|C] [--duration-ms N] [--output path]\n"
+            << "note: full swing-up outcome is observational; the retired "
+               "--require-standup-gate flag is intentionally unsupported.\n";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::string(argv[1]) == "--self-test") {
+      return runGeometrySelfTest();
+    }
+
     std::string profile = "nominal";
     std::string output_path;
-    int duration_ms = 12000;
-    bool require_gate = false;
+    int duration_ms =
+        static_cast<int>(std::llround(kFullStandupObservationDurationS * 1000.0));
     for (int i = 1; i < argc; ++i) {
       const std::string arg = argv[i];
       auto requireValue = [&](const char* option) -> std::string {
@@ -116,7 +150,9 @@ int main(int argc, char** argv) {
       } else if (arg == "--output") {
         output_path = requireValue("--output");
       } else if (arg == "--require-standup-gate") {
-        require_gate = true;
+        throw std::runtime_error(
+            "--require-standup-gate was retired: global swing-up is exploratory, "
+            "not validation authority");
       } else if (arg == "--help" || arg == "-h") {
         usageFull(argv[0]);
         return 0;
@@ -129,10 +165,15 @@ int main(int argc, char** argv) {
     }
 
     const PlantModel plant = plantByName(profile);
+    const bool geometry_ok = geometryDerivedPlantChecksPass(plant);
+    if (!geometry_ok) {
+      throw std::runtime_error("geometry-derived plant invariant check failed");
+    }
+
     const auto evidence = runFullStandupClosedLoop(
         plant, static_cast<double>(duration_ms) * 1.0e-3);
     const FullStandupMetrics metrics = summarizeFullStandup(evidence);
-    const bool gate_pass = fullStandupGatePass(evidence, metrics);
+    const bool sequence_observed = fullStandupSequenceObserved(metrics);
     if (!output_path.empty()) writeFullStandupCsv(output_path, evidence);
 
     std::cout << std::fixed << std::setprecision(6)
@@ -152,8 +193,9 @@ int main(int argc, char** argv) {
               << " stable_seen=" << boolText(metrics.stable_seen)
               << " ended_balance=" << boolText(metrics.ended_balance)
               << " ended_stable=" << boolText(metrics.ended_stable)
-              << " standup_gate=" << (gate_pass ? "PASS" : "FAIL") << '\n';
-    if (require_gate && !gate_pass) return 1;
+              << " geometry_gate=" << (geometry_ok ? "PASS" : "FAIL")
+              << " sequence_observed=" << (sequence_observed ? "YES" : "NO")
+              << " validation_authority=NONE\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "full standup SITL error: " << error.what() << '\n';
