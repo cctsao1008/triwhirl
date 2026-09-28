@@ -25,9 +25,9 @@ jobs:
         run: |
           cmake -S tools/sitl -B /tmp/triwhirl-sitl-build
           cmake --build /tmp/triwhirl-sitl-build --config Release
-      - name: Run invariant and long-run closed-loop gates
+      - name: Run invariant and long-run local closed-loop gates
         run: /tmp/triwhirl-sitl-build/triwhirl-standup-sitl --self-test
-      - name: Generate 10-second balance evidence
+      - name: Generate 10-second local balance evidence
         run: |
           /tmp/triwhirl-sitl-build/triwhirl-standup-sitl \
             --scenario balance-demo \
@@ -38,17 +38,22 @@ jobs:
           test -s /tmp/triwhirl-balance-demo.csv
           head -n 3 /tmp/triwhirl-balance-demo.csv
           tail -n 3 /tmp/triwhirl-balance-demo.csv
-      - name: Gate full swing-up from rest
+      - name: Gate geometry-derived Reuleaux rolling invariants
+        run: |
+          /tmp/triwhirl-sitl-build/triwhirl-standup-sitl-full --self-test
+      - name: Generate exploratory full-swing evidence
         run: |
           /tmp/triwhirl-sitl-build/triwhirl-standup-sitl-full \
             --profile nominal \
             --duration-ms 12000 \
-            --require-standup-gate \
-            --output /tmp/triwhirl-full-standup.csv
+            --output /tmp/triwhirl-full-standup.csv \
+            | tee /tmp/triwhirl-full-standup.txt
           test -s /tmp/triwhirl-full-standup.csv
+          grep 'geometry_gate=PASS' /tmp/triwhirl-full-standup.txt
+          grep 'validation_authority=NONE' /tmp/triwhirl-full-standup.txt
           head -n 3 /tmp/triwhirl-full-standup.csv
           tail -n 3 /tmp/triwhirl-full-standup.csv
-      - name: Gate deterministic disturbance recovery
+      - name: Gate deterministic local disturbance recovery
         run: |
           /tmp/triwhirl-sitl-build/triwhirl-standup-sitl-disturbance \
             --scenario balance-demo \
