@@ -4,10 +4,15 @@ Deterministic native software-in-the-loop harness for standup/balance
 commissioning. It compiles the production `triwhirl::StandupController`
 directly; there is no duplicate Python/JavaScript controller.
 
-## Semantic path
+## Two simulation layers
+
+TriWhirl deliberately keeps two plant scopes instead of pretending one model is
+valid everywhere.
+
+### Local balance SITL
 
 ```text
-provisional local plant
+provisional identified local plant
     -> [theta_error, theta_rate, wheel_rate]
     -> production StandupController
     -> target / PI / damping / saturation / slew
@@ -15,7 +20,49 @@ provisional local plant
     -> RK4 plant
 ```
 
-The ESP32 runtime and SITL both obtain commissioning overrides from
+The B/C matrices come from the existing `swing-native-04` local fits. Their input
+column is sign-normalized to the current Vq coordinate. `nominal` is the
+component-wise B/C midpoint. These remain commissioning models, not a validated
+digital twin.
+
+### Full standup SITL
+
+The full-standup runner starts from a resting orientation near `-59 deg` periodic
+upright error and exercises the actual production sequence:
+
+```text
+resting face
+    -> SwingHigh / SwingLow energy pump
+    -> +/-9 deg capture
+    -> Balance
+    -> settling latch
+    -> Stable
+```
+
+The missing far-field physics is represented by an explicit 120-degree periodic
+surrogate:
+
+```text
+body gravity-like term = (k/3) * sin(3 * theta_error)
+```
+
+with finite body/wheel damping and Vq authority. This gives stable resting
+orientations at +/-60 deg and unstable upright vertices every 120 deg.
+
+The global surrogate is **not identified contact mechanics**. Near upright it is
+smoothly stitched back to the existing local plant:
+
+- within +/-2 deg: 100% identified local B/C plant;
+- from 2 to 5 deg: smooth blend;
+- beyond +/-5 deg: periodic far-field surrogate.
+
+Its purpose is to validate the controller/state-machine sequence and provide a
+visible pre-hardware swing-up test, not to claim a globally validated Reuleaux
+triangle digital twin.
+
+## Shared production configuration
+
+The ESP32 runtime and all SITL runners obtain commissioning overrides from
 `triwhirl::makeStandupCommissioningConfig()` so simulation and firmware cannot
 silently use different gains.
 
@@ -23,35 +70,17 @@ silently use different gains.
 
 - production controller opportunity: 1 kHz;
 - virtual plant RK4 step: 100 us;
-- no wall-clock scheduling or randomness;
+- no randomness in deterministic batch gates;
 - virtual timestamp starts at 1 s to avoid conflating timestamp zero with the
   controller's uninitialized-time sentinel.
 
-## Provisional plant profiles
-
-State and input:
-
-```text
-x = [theta_error_rad, theta_rate_rad_s, wheel_rate_rad_s]^T
-u = Vq_v
-x_dot = A x + B u
-```
-
-The built-in B/C matrices come from existing `swing-native-04` local fits. The
-fit input column is sign-normalized to the current Vq coordinate. These are
-commissioning models, not a validated digital twin.
-
-`nominal` is the element-wise B/C midpoint. B and C remain selectable so model
-sensitivity is visible instead of hidden.
-
-## Build and test
+## Build
 
 Windows Visual Studio generator:
 
 ```powershell
 cmake -S tools/sitl -B build/sitl
 cmake --build build/sitl --config Release
-.\build\sitl\Release\triwhirl-standup-sitl.exe --self-test
 ```
 
 Linux/macOS:
@@ -59,64 +88,70 @@ Linux/macOS:
 ```bash
 cmake -S tools/sitl -B build/sitl
 cmake --build build/sitl
-build/sitl/triwhirl-standup-sitl --self-test
 ```
 
-`--self-test` includes both controller invariants and the 10-second nominal
-closed-loop balance gate.
-
-## Long-run gate
-
-The hardware precondition is no longer the old 200 ms smoke check. A nominal
-`balance-demo` run must complete at least 10 s and satisfy the native gate:
-
-- remain in Balance;
-- acquire settling and observe `stable=true`;
-- cross upright and reverse applied Vq;
-- max body error < 5 deg;
-- final 2 s max body error < 0.5 deg;
-- max wheel speed < 20 rad/s;
-- applied Vq within 4 V with no Vq saturation.
-
-Run it directly:
-
-```powershell
-.\build\sitl\Release\triwhirl-standup-sitl.exe `
-  --scenario balance-demo `
-  --profile nominal `
-  --duration-ms 10000 `
-  --require-balance-gate `
-  --output build\sitl\balance-demo.csv
-```
-
-Available scenarios:
+The build provides:
 
 ```text
-near-upright-positive   +1 deg, -0.2 rad/s
-near-upright-negative   -1 deg, +0.2 rad/s
-balance-demo            +3 deg, -0.5 rad/s
+triwhirl-standup-sitl               local balance/invariant gates
+triwhirl-standup-sitl-full          deterministic rest-to-upright gate
+triwhirl-standup-sitl-disturbance   scheduled local disturbance gate
+triwhirl-standup-sitl-live          continuous WebUI native session
 ```
 
-Profiles: `nominal`, `B`, `C`.
+## Local balance gate
 
-The CSV includes true virtual body/wheel state, integrated wheel angle,
-controller phase, settling/stable flags, target, velocity error, PI integral,
-unclamped/target/applied Vq, and saturation flags.
+Run the native invariant and 10-second balance suite:
+
+```powershell
+.\build\sitl\Release\triwhirl-standup-sitl.exe --self-test
+```
+
+The 10-second local gate checks continuous Balance operation, settling/stable
+acquisition, upright crossing, bilateral Vq reversal, body/wheel bounds and Vq
+saturation.
+
+## Full standup gate
+
+Run the complete production standup sequence from rest:
+
+```powershell
+.\build\sitl\Release\triwhirl-standup-sitl-full.exe `
+  --profile nominal `
+  --duration-ms 12000 `
+  --require-standup-gate `
+  --output build\sitl\full-standup.csv
+```
+
+The full gate requires evidence of:
+
+- both `swing_high` and `swing_low`;
+- at least one body-rate reversal during energy pumping;
+- delayed entry into Balance rather than starting upright;
+- settling and `stable=true` acquisition;
+- ending in Balance/Stable;
+- final two-second periodic error below 0.5 deg;
+- bounded wheel speed and Vq with no Vq saturation.
+
+CI keeps both the local-balance gate and this full rest-to-upright gate.
 
 ## WebUI
 
-For the browser-visible gate, see:
+For the continuous browser console, see:
 
 ```text
 tools/visualization/triwhirl-sim-viewer/README.md
 ```
 
-The browser is display-only; native C++ remains authoritative for both dynamics
-and pass/fail.
+The default WebUI scenario is **Full standup from rest**. The browser remains a
+display/control surface only; native C++ owns controller execution and plant
+integration.
 
 ## Evidence boundary
 
-Passing the nominal 10-second gate means the production controller is
-closed-loop stable on the stated provisional nominal model for that scenario.
-It does **not** prove hardware stability or resolve disagreement between the
-provisional B/C models. Hardware remains a separate explicit decision.
+Passing the full-standup gate proves the production controller can execute the
+expected swing/capture/settling sequence on the explicitly stated hybrid
+commissioning model. It does **not** validate the real global rolling/contact
+physics or authorize hardware by itself. The identified evidence is strongest
+near upright; the far-field model remains a transparent surrogate until better
+physical or measured evidence exists.
