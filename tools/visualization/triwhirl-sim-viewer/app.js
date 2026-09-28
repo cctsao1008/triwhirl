@@ -44,94 +44,92 @@
     return { width: rect.width, height: rect.height };
   }
 
-  function drawReuleaux(ctx) {
-    const path = new Path2D(
-      "M 0 0 " +
-      "A 190 190 0 0 1 -95 -164.5448 " +
-      "A 190 190 0 0 1 95 -164.5448 " +
-      "A 190 190 0 0 1 0 0 Z"
-    );
+  // Draw an ideal Reuleaux triangle centered on its geometric center.  The
+  // browser does not choose the ground contact or center translation; those
+  // come from the native rolling geometry in every sample.
+  function drawReuleauxMeters(ctx, widthM, pxPerM) {
+    const rv = widthM / Math.sqrt(3);
+    const v0 = { x: 0, y: -rv };
+    const v1 = { x: widthM / 2, y: rv / 2 };
+    const v2 = { x: -widthM / 2, y: rv / 2 };
+
     ctx.save();
     ctx.fillStyle = "rgba(66,159,230,0.24)";
     ctx.strokeStyle = "#73c4ff";
-    ctx.lineWidth = 3;
-    ctx.fill(path);
-    ctx.stroke(path);
+    ctx.lineWidth = 3 / pxPerM;
+    ctx.beginPath();
+    ctx.moveTo(v1.x, v1.y);
+    ctx.arc(v0.x, v0.y, widthM, Math.PI / 3, 2 * Math.PI / 3, false);
+    ctx.arc(v1.x, v1.y, widthM, Math.PI, 4 * Math.PI / 3, false);
+    ctx.arc(v2.x, v2.y, widthM, 5 * Math.PI / 3, 2 * Math.PI, false);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
     ctx.restore();
   }
 
-  function buildReuleauxBoundary() {
-    const r = 190;
-    const h = 164.5448;
-    const arcs = [
-      { cx: 95, cy: -h, a0: 2 * Math.PI / 3, a1: Math.PI },
-      { cx: 0, cy: 0, a0: -2 * Math.PI / 3, a1: -Math.PI / 3 },
-      { cx: -95, cy: -h, a0: 0, a1: Math.PI / 3 },
-    ];
-    const points = [];
-    arcs.forEach((arc) => {
-      for (let i = 0; i <= 24; ++i) {
-        const u = i / 24;
-        const a = arc.a0 + (arc.a1 - arc.a0) * u;
-        points.push({ x: arc.cx + r * Math.cos(a), y: arc.cy + r * Math.sin(a) });
-      }
-    });
-    return points;
-  }
-
-  const reuleauxBoundary = buildReuleauxBoundary();
-
-  function rotatedLowestY(angle) {
-    const s = Math.sin(angle);
-    const c = Math.cos(angle);
-    let maxY = -Infinity;
-    reuleauxBoundary.forEach((p) => {
-      const y = p.x * s + p.y * c;
-      if (y > maxY) maxY = y;
-    });
-    return Number.isFinite(maxY) ? maxY : 0;
-  }
-
-  function drawWheel(ctx, wheelAngle) {
-    const radius = 46;
+  function drawWheelMeters(ctx, wheelAngle, widthM, pxPerM) {
+    const radius = widthM * 0.24; // display only; not used by the plant.
     ctx.save();
-    ctx.translate(0, -103);
     ctx.strokeStyle = "#dce8f6";
     ctx.fillStyle = "rgba(220,232,246,0.08)";
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 3 / pxPerM;
     ctx.beginPath();
     ctx.arc(0, 0, radius, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
     ctx.rotate(wheelAngle);
     ctx.strokeStyle = "#ffcc66";
-    ctx.lineWidth = 2.5;
+    ctx.lineWidth = 2.5 / pxPerM;
     for (let i = 0; i < 6; ++i) {
       const angle = i * Math.PI / 3;
       ctx.beginPath();
       ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(angle) * (radius - 5), Math.sin(angle) * (radius - 5));
+      ctx.lineTo(Math.cos(angle) * radius * 0.90,
+                 Math.sin(angle) * radius * 0.90);
       ctx.stroke();
     }
     ctx.fillStyle = "#ffcc66";
     ctx.beginPath();
-    ctx.arc(0, 0, 5, 0, Math.PI * 2);
+    ctx.arc(0, 0, 4 / pxPerM, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
 
-  function drawKickArrow(ctx, scale) {
+  function drawGround(ctx, width, height, pxPerM, worldOriginX, groundY) {
+    ctx.strokeStyle = "#52657c";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(24, groundY);
+    ctx.lineTo(width - 24, groundY);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(82,101,124,0.35)";
+    ctx.lineWidth = 1;
+    const spacingM = 0.02;
+    const minWorldX = (24 - worldOriginX) / pxPerM;
+    const maxWorldX = (width - 24 - worldOriginX) / pxPerM;
+    let tick = Math.floor(minWorldX / spacingM) * spacingM;
+    for (; tick <= maxWorldX; tick += spacingM) {
+      const x = worldOriginX + tick * pxPerM;
+      ctx.beginPath();
+      ctx.moveTo(x, groundY + 4);
+      ctx.lineTo(x - 10, groundY + 14);
+      ctx.stroke();
+    }
+  }
+
+  function drawKickArrow(ctx, centerScreenX, centerScreenY) {
     if (!kickFlash || performance.now() > kickFlash.until) return;
     const positive = kickFlash.delta > 0;
     const bodyKick = kickFlash.kind === "body";
     ctx.save();
-    ctx.scale(1 / scale, 1 / scale);
     ctx.strokeStyle = bodyKick ? "#ff6b75" : "#d58cff";
     ctx.fillStyle = ctx.strokeStyle;
     ctx.lineWidth = 4;
-    const y = bodyKick ? -118 * scale : -42 * scale;
-    const x0 = positive ? -170 * scale : 170 * scale;
-    const x1 = positive ? -85 * scale : 85 * scale;
+    const y = centerScreenY - 90;
+    const x0 = centerScreenX + (positive ? -125 : 125);
+    const x1 = centerScreenX + (positive ? -55 : 55);
     ctx.beginPath();
     ctx.moveTo(x0, y);
     ctx.lineTo(x1, y);
@@ -148,61 +146,75 @@
   function drawScene() {
     const { width, height } = fitCanvas(scene, sceneCtx);
     sceneCtx.clearRect(0, 0, width, height);
-    const groundY = height - 58;
-    sceneCtx.strokeStyle = "#52657c";
-    sceneCtx.lineWidth = 2;
-    sceneCtx.beginPath();
-    sceneCtx.moveTo(24, groundY);
-    sceneCtx.lineTo(width - 24, groundY);
-    sceneCtx.stroke();
-    sceneCtx.strokeStyle = "rgba(82,101,124,0.35)";
-    sceneCtx.lineWidth = 1;
-    for (let x = 30; x < width - 20; x += 32) {
-      sceneCtx.beginPath();
-      sceneCtx.moveTo(x, groundY + 4);
-      sceneCtx.lineTo(x - 12, groundY + 16);
-      sceneCtx.stroke();
-    }
+    const groundY = height - 62;
+    const geometryWidthM = latest && Number.isFinite(Number(latest.geometry_width_m))
+      ? Number(latest.geometry_width_m)
+      : 0.075;
+    const pxPerM = Math.min(3200, Math.max(1900, (width * 0.27) / geometryWidthM));
+    const worldOriginX = width * 0.50;
 
-    const bodyAngle = latest
-      ? Number.isFinite(Number(latest.true_body_angle_rad))
-        ? Number(latest.true_body_angle_rad)
-        : Number(latest.true_error_rad)
-      : 0;
-    const wheelAngle = latest ? Number(latest.true_wheel_angle_rad) : 0;
-    const scale = Math.min(1.35, Math.max(0.72, width / 850));
-    const supportOffset = rotatedLowestY(bodyAngle);
-    sceneCtx.save();
-    sceneCtx.translate(width * 0.50, groundY - supportOffset * scale);
-    sceneCtx.scale(scale, scale);
-    sceneCtx.strokeStyle = "rgba(101,184,255,0.30)";
-    sceneCtx.lineWidth = 1.5;
-    sceneCtx.setLineDash([6, 6]);
-    sceneCtx.beginPath();
-    sceneCtx.moveTo(0, 40);
-    sceneCtx.lineTo(0, -230);
-    sceneCtx.stroke();
-    sceneCtx.setLineDash([]);
-    sceneCtx.rotate(bodyAngle);
-    drawReuleaux(sceneCtx);
-    drawWheel(sceneCtx, wheelAngle);
-    drawKickArrow(sceneCtx, scale);
-    sceneCtx.fillStyle = "#65b8ff";
-    sceneCtx.beginPath();
-    sceneCtx.arc(0, 0, 5, 0, Math.PI * 2);
-    sceneCtx.fill();
-    sceneCtx.restore();
+    drawGround(sceneCtx, width, height, pxPerM, worldOriginX, groundY);
 
-    sceneCtx.fillStyle = "#8fa3bc";
-    sceneCtx.font = "12px ui-monospace, SFMono-Regular, Consolas, monospace";
-    sceneCtx.fillText("display contact support follows body orientation", 22, groundY - 10);
     if (!latest) {
       sceneCtx.fillStyle = "#70839c";
       sceneCtx.font = "15px system-ui, sans-serif";
       sceneCtx.textAlign = "center";
-      sceneCtx.fillText("Run native SITL — full standup starts from rest and continues until Stop", width / 2, 45);
+      sceneCtx.fillText(
+        "Run native SITL — full mode starts at the Reuleaux resting orientation",
+        width / 2, 45);
       sceneCtx.textAlign = "left";
+      return;
     }
+
+    const bodyAngle = Number(latest.true_body_angle_rad);
+    const wheelAngle = Number(latest.true_wheel_angle_rad);
+    const centerX = Number(latest.true_body_center_x_m);
+    const centerY = Number(latest.true_body_center_y_m);
+    const contactX = Number(latest.true_contact_x_m);
+    const contactY = Number(latest.true_contact_y_m);
+
+    const centerScreenX = worldOriginX + centerX * pxPerM;
+    const centerScreenY = groundY - centerY * pxPerM;
+    const contactScreenX = worldOriginX + contactX * pxPerM;
+    const contactScreenY = groundY - contactY * pxPerM;
+
+    // Native no-slip pose: translate by native center x/y, then rotate body.
+    sceneCtx.save();
+    sceneCtx.translate(centerScreenX, centerScreenY);
+    sceneCtx.scale(pxPerM, -pxPerM);
+    sceneCtx.rotate(bodyAngle);
+    drawReuleauxMeters(sceneCtx, geometryWidthM, pxPerM);
+    drawWheelMeters(sceneCtx, wheelAngle, geometryWidthM, pxPerM);
+    sceneCtx.restore();
+
+    // Draw native COM/contact evidence in world coordinates.
+    sceneCtx.strokeStyle = "rgba(101,184,255,0.42)";
+    sceneCtx.lineWidth = 1.5;
+    sceneCtx.setLineDash([5, 4]);
+    sceneCtx.beginPath();
+    sceneCtx.moveTo(centerScreenX, centerScreenY);
+    sceneCtx.lineTo(contactScreenX, contactScreenY);
+    sceneCtx.stroke();
+    sceneCtx.setLineDash([]);
+
+    sceneCtx.fillStyle = "#65b8ff";
+    sceneCtx.beginPath();
+    sceneCtx.arc(centerScreenX, centerScreenY, 5, 0, Math.PI * 2);
+    sceneCtx.fill();
+
+    sceneCtx.fillStyle = "#ff6b75";
+    sceneCtx.beginPath();
+    sceneCtx.arc(contactScreenX, contactScreenY, 5, 0, Math.PI * 2);
+    sceneCtx.fill();
+
+    drawKickArrow(sceneCtx, centerScreenX, centerScreenY);
+
+    sceneCtx.fillStyle = "#8fa3bc";
+    sceneCtx.font = "12px ui-monospace, SFMono-Regular, Consolas, monospace";
+    sceneCtx.fillText(
+      `native rolling pose  COM x=${number(centerX * 1000, 1)} mm  ` +
+      `h=${number(centerY * 1000, 1)} mm  contact x=${number(contactX * 1000, 1)} mm`,
+      22, groundY - 12);
   }
 
   function drawHistory() {
@@ -279,7 +291,7 @@
       chip.textContent = "LIVE SIM: STABLE";
       chip.classList.add("gate-pass");
     } else if (status === "FAIL") {
-      chip.textContent = "LIVE SIM: OUT OF BALANCE";
+      chip.textContent = "LIVE SIM: OUT OF LOCAL ENVELOPE";
       chip.classList.add("gate-fail");
     } else if (status === "SWINGING") {
       chip.textContent = "LIVE SIM: SWING-UP";
@@ -304,6 +316,9 @@
     $("theta-dot").textContent = `${number(sample.true_theta_rate_rad_s, 3)} rad/s`;
     $("wheel-rate").textContent = `${number(sample.true_wheel_rate_rad_s, 3)} rad/s`;
     $("wheel-angle").textContent = `${number(sample.true_wheel_angle_rad, 3)} rad`;
+    if ($("body-x")) $("body-x").textContent = `${number(Number(sample.true_body_center_x_m) * 1000, 2)} mm`;
+    if ($("body-y")) $("body-y").textContent = `${number(Number(sample.true_body_center_y_m) * 1000, 2)} mm`;
+    if ($("contact-x")) $("contact-x").textContent = `${number(Number(sample.true_contact_x_m) * 1000, 2)} mm`;
     $("phase").textContent = sample.phase;
     $("settling").textContent = yesNo(sample.settling);
     $("stable").textContent = yesNo(sample.stable);
@@ -316,16 +331,22 @@
 
     if (currentScenario === "full-standup") {
       if (sample.phase === "swing_high" || sample.phase === "swing_low") {
-        setLiveStatus("SWINGING", `Energy pumping from resting face · t=${number(sample.t_s, 1)} s`);
+        setLiveStatus(
+          "SWINGING",
+          `Geometry-derived exploratory swing-up · no full-standup PASS authority · t=${number(sample.t_s, 1)} s`);
       } else if (sample.stable) {
-        setLiveStatus("STABLE", `Full standup complete; balancing continuously · t=${number(sample.t_s, 1)} s`);
+        setLiveStatus(
+          "STABLE",
+          `Controller reached Stable in the exploratory geometry model · t=${number(sample.t_s, 1)} s`);
       } else if (sample.phase === "balance") {
-        setLiveStatus("CAPTURE", `${sample.settling ? "Settling after capture" : "First balance approach"} · t=${number(sample.t_s, 1)} s`);
+        setLiveStatus(
+          "CAPTURE",
+          `${sample.settling ? "Settling after capture" : "First balance approach"} · t=${number(sample.t_s, 1)} s`);
       }
     } else if (sample.phase !== "balance") {
       setLiveStatus("FAIL", `Left Balance at t=${number(sample.t_s, 3)} s; simulation continues until Stop.`);
     } else if (sample.stable) {
-      setLiveStatus("STABLE", `Balancing continuously · t=${number(sample.t_s, 1)} s`);
+      setLiveStatus("STABLE", `Local identified-model balance · t=${number(sample.t_s, 1)} s`);
     } else if (sample.settling) {
       setLiveStatus("CAPTURE", `Settling/recovering · t=${number(sample.t_s, 1)} s`);
     }
@@ -400,7 +421,9 @@
     speed.disabled = true;
     setKickControls(false);
     $("stream-chip").textContent = "SIM: starting continuous native run";
-    $("scenario-readout").textContent = currentScenario === "full-standup" ? "Full standup from rest" : "Upright balance only";
+    $("scenario-readout").textContent = currentScenario === "full-standup"
+      ? "Geometry-derived full swing observation"
+      : "Upright balance only";
     setLiveStatus("RUNNING", "Native fixed-step simulation continues until Stop.");
 
     const params = new URLSearchParams({
@@ -517,7 +540,9 @@
   wheelPlus.addEventListener("click", () => injectDisturbance("wheel", Number(wheelStrength.value)));
   scenario.addEventListener("change", () => {
     currentScenario = scenario.value;
-    $("scenario-readout").textContent = currentScenario === "full-standup" ? "Full standup from rest" : "Upright balance only";
+    $("scenario-readout").textContent = currentScenario === "full-standup"
+      ? "Geometry-derived full swing observation"
+      : "Upright balance only";
     drawHistory();
   });
   window.addEventListener("resize", () => {
@@ -533,5 +558,7 @@
   drawScene();
   drawHistory();
   updateDisturbanceStatus();
-  setLiveStatus("STOPPED", "Press Run live; full standup starts from the resting orientation.");
+  setLiveStatus(
+    "STOPPED",
+    "Full mode is exploratory geometry-derived rolling dynamics; local balance remains the validation regression path.");
 })();
