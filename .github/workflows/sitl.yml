@@ -50,15 +50,17 @@ jobs:
             --output /tmp/triwhirl-disturbance-demo.csv
           test -s /tmp/triwhirl-disturbance-demo.csv
           tail -n 3 /tmp/triwhirl-disturbance-demo.csv
-      - name: Check WebUI source and disturbance bridge
+      - name: Check continuous WebUI live bridge
         run: |
           python -m py_compile tools/visualization/triwhirl-sim-viewer/serve_live.py
+          python -m py_compile tools/visualization/triwhirl-sim-viewer/test_live_bridge.py
           node --check tools/visualization/triwhirl-sim-viewer/app.js
           python tools/visualization/triwhirl-sim-viewer/serve_live.py \
             --host 127.0.0.1 \
             --port 8765 \
             --exe /tmp/triwhirl-sitl-build/triwhirl-standup-sitl \
             --disturbance-exe /tmp/triwhirl-sitl-build/triwhirl-standup-sitl-disturbance \
+            --live-exe /tmp/triwhirl-sitl-build/triwhirl-standup-sitl-live \
             >/tmp/triwhirl-viewer.log 2>&1 &
           server_pid=$!
           trap 'kill $server_pid 2>/dev/null || true' EXIT
@@ -69,12 +71,6 @@ jobs:
             sleep 0.1
           done
           grep '"ok": true' /tmp/triwhirl-health.json
-          grep 'disturbance_sitl' /tmp/triwhirl-health.json
-          curl -fsSN --max-time 5 \
-            'http://127.0.0.1:8765/api/live?profile=nominal&speed=10&fps=120&body_kick=3.0%3A0.20&body_kick=6.0%3A-0.20' \
-            >/tmp/triwhirl-viewer.sse
-          grep 'event: meta' /tmp/triwhirl-viewer.sse
-          grep 'event: sample' /tmp/triwhirl-viewer.sse
-          grep 'event: end' /tmp/triwhirl-viewer.sse
-          grep '"gate":"DISTURBANCE"' /tmp/triwhirl-viewer.sse
-          grep '"gate_pass":true' /tmp/triwhirl-viewer.sse
+          grep 'live_sitl' /tmp/triwhirl-health.json
+          python tools/visualization/triwhirl-sim-viewer/test_live_bridge.py \
+            http://127.0.0.1:8765
