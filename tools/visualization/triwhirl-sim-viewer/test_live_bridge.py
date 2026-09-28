@@ -40,21 +40,41 @@ def read_event(response) -> tuple[str, dict[str, object]]:
 
 def main() -> int:
     base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8765"
-    query = urllib.parse.urlencode({"profile": "nominal", "speed": "10", "fps": "120"})
+    query = urllib.parse.urlencode(
+        {
+            "scenario": "full-standup",
+            "profile": "nominal",
+            "speed": "10",
+            "fps": "120",
+        }
+    )
     with urllib.request.urlopen(f"{base}/api/live?{query}", timeout=10.0) as response:
         event, meta = read_event(response)
         assert event == "meta", (event, meta)
         assert meta["mode"] == "LIVE"
         assert meta["duration_s"] is None
+        assert meta["scenario"] == "full-standup"
         session_id = str(meta["session_id"])
         assert session_id
 
-        sample_count = 0
-        while sample_count < 3:
+        saw_swing = False
+        saw_balance = False
+        saw_stable = False
+        while not saw_stable:
             event, payload = read_event(response)
-            if event == "sample":
-                sample_count += 1
-                assert float(payload["t_s"]) >= 0.0
+            if event == "stream-error":
+                raise RuntimeError(str(payload))
+            if event != "sample":
+                continue
+            phase = str(payload["phase"])
+            saw_swing = saw_swing or phase in {"swing_high", "swing_low"}
+            saw_balance = saw_balance or phase == "balance"
+            saw_stable = saw_stable or bool(payload["stable"])
+            assert "true_body_angle_rad" in payload
+            if float(payload["t_s"]) > 11.0 and not saw_stable:
+                raise RuntimeError("full standup did not reach stable state by 11 s")
+        assert saw_swing
+        assert saw_balance
 
         accepted = post_json(
             base,
@@ -70,6 +90,8 @@ def main() -> int:
                 disturbance_seen = True
                 assert payload["kind"] == "body"
                 assert abs(float(payload["delta_rad_s"]) - 0.2) < 1.0e-9
+            elif event == "stream-error":
+                raise RuntimeError(str(payload))
 
         stopped = post_json(base, "/api/stop", {"session_id": session_id})
         assert stopped["ok"] is True
@@ -83,7 +105,7 @@ def main() -> int:
             if event == "stream-error":
                 raise RuntimeError(str(payload))
 
-    print("PASS continuous live WebUI bridge: run -> disturbance -> stop")
+    print("PASS continuous full-standup WebUI bridge: swing -> balance -> stable -> disturbance -> stop")
     return 0
 
 
