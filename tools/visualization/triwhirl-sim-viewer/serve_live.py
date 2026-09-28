@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Serve the TriWhirl live native-SITL simulation console.
+"""Serve the TriWhirl continuous native-SITL simulation console.
 
-The interactive WebUI has no simulation-duration limit. A native C++ process
-owns the fixed-step plant and production StandupController for the whole session;
-the browser only displays evidence and sends disturbance/stop commands. The
-separate deterministic batch gates remain in CI as regression tests.
+The browser never integrates the plant or controller. A persistent native C++
+process owns the fixed-step simulation until explicit Stop; this bridge only
+transports samples and disturbance/stop commands.
 """
 
 from __future__ import annotations
@@ -93,7 +92,7 @@ class LiveSession:
             self.send("stop")
             self.process.wait(timeout=0.75)
             return
-        except Exception:  # noqa: BLE001 - best-effort cleanup.
+        except Exception:  # noqa: BLE001 - best-effort cleanup
             pass
         if self.process.poll() is None:
             self.process.terminate()
@@ -162,8 +161,7 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("invalid Content-Length") from error
         if length <= 0 or length > 4096:
             raise ValueError("JSON request body must be 1..4096 bytes")
-        raw = self.rfile.read(length)
-        value = json.loads(raw.decode("utf-8"))
+        value = json.loads(self.rfile.read(length).decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError("JSON request body must be an object")
         return value
@@ -298,17 +296,19 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
+        scope = (
+            "Production StandupController + geometry-derived ideal-Reuleaux "
+            "support/contact, no-slip rolling, COM-height gravity and local-fit "
+            "upright anchors. Global full-swing outcome is exploratory only."
+            if scenario == "full-standup"
+            else "Production StandupController + selected provisional local plant."
+        )
+
         try:
-            scope = (
-                "Production StandupController + 120-degree periodic global swing-up "
-                "surrogate smoothly stitched to the selected provisional local plant."
-                if scenario == "full-standup"
-                else "Production StandupController + selected provisional local plant."
-            )
             if not self.write_sse(
                 "meta",
                 {
-                    "schema": 4,
+                    "schema": 5,
                     "source": "continuous native C++ SITL",
                     "session_id": session.session_id,
                     "scenario": scenario,
@@ -317,7 +317,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "duration_s": None,
                     "display_fps_limit": fps,
                     "speed": speed,
-                    "scope": scope + " Native fixed-step simulation continues until explicit Stop.",
+                    "scope": scope + " Native simulation continues until explicit Stop.",
+                    "full_standup_validation_authority": "NONE",
                 },
             ):
                 return
@@ -337,11 +338,8 @@ class Handler(SimpleHTTPRequestHandler):
                         return
                     continue
                 message_type = str(message.get("type", ""))
-                if message_type == "sample":
-                    if not self.write_sse("sample", message):
-                        return
-                elif message_type == "disturbance":
-                    if not self.write_sse("disturbance", message):
+                if message_type in {"sample", "disturbance"}:
+                    if not self.write_sse(message_type, message):
                         return
                 elif message_type == "end":
                     self.write_sse("end", message)
@@ -367,7 +365,7 @@ class Handler(SimpleHTTPRequestHandler):
         except OSError as error:
             if not is_client_disconnect(error):
                 raise
-        except Exception as error:  # noqa: BLE001 - report backend failure.
+        except Exception as error:  # noqa: BLE001 - report backend failure
             try:
                 self.write_sse("stream-error", {"message": str(error)})
             except OSError as nested:
@@ -399,6 +397,7 @@ def main() -> None:
     Handler.live_executable = resolve_executable(
         args.live_exe, "triwhirl-standup-sitl-live"
     )
+
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     viewer = f"http://{args.host}:{args.port}/tools/visualization/triwhirl-sim-viewer/"
     print("TriWhirl Simulation Console")
