@@ -30,10 +30,16 @@
           <div class="section-head">
             <div>
               <div class="section-title">Reaction-wheel Reuleaux triangle</div>
-              <div class="section-subtitle">Continuous native SITL · production StandupController · browser never computes plant/controller dynamics</div>
+              <div class="section-subtitle">Continuous native SITL · production StandupController · full standup starts from a resting face · browser never computes plant/controller dynamics</div>
             </div>
             <div class="controls">
-              <label>Plant
+              <label>Scenario
+                <select id="scenario">
+                  <option value="full-standup" selected>Full standup from rest</option>
+                  <option value="balance">Upright balance only</option>
+                </select>
+              </label>
+              <label>Local plant
                 <select id="profile">
                   <option value="nominal" selected>Nominal B/C midpoint</option>
                   <option value="B">Provisional B</option>
@@ -93,7 +99,7 @@
           </div>
 
           <div class="plot-card">
-            <div class="plot-title">Rolling 10 s history: body error (deg) / applied Vq (V) · red/purple markers = injected disturbances</div>
+            <div class="plot-title">Rolling 10 s history: periodic upright error / applied Vq · red/purple markers = injected disturbances</div>
             <canvas id="history" width="960" height="180"></canvas>
           </div>
         </section>
@@ -102,7 +108,8 @@
       <aside class="right-panel">
         <section class="info-card">
           <div class="card-title">True virtual state</div>
-          <div class="kv"><span>θ error</span><strong id="theta">—</strong></div>
+          <div class="kv"><span>Periodic θ error</span><strong id="theta">—</strong></div>
+          <div class="kv"><span>Body angle</span><strong id="body-angle">—</strong></div>
           <div class="kv"><span>θ̇</span><strong id="theta-dot">—</strong></div>
           <div class="kv"><span>Wheel rate</span><strong id="wheel-rate">—</strong></div>
           <div class="kv"><span>Wheel angle</span><strong id="wheel-angle">—</strong></div>
@@ -123,19 +130,18 @@
 
         <section class="info-card">
           <div class="card-title">Live simulation</div>
-          <div class="kv"><span>Scenario</span><strong>3° / −0.5 rad/s</strong></div>
+          <div class="kv"><span>Scenario</span><strong id="scenario-readout">Full standup from rest</strong></div>
           <div class="kv"><span>Duration</span><strong>Until Stop</strong></div>
           <div class="kv"><span>Disturbances</span><strong id="disturbance-count">0</strong></div>
           <div class="kv"><span>Mode</span><strong id="gate-type">LIVE</strong></div>
           <div class="kv"><span>Status</span><strong id="gate-result">STOPPED</strong></div>
-          <div class="scope" id="gate-summary">Press Run live; simulation continues until Stop.</div>
+          <div class="scope" id="gate-summary">Press Run live; full standup starts from the resting orientation.</div>
         </section>
 
         <section class="warning-card">
           <div class="warning-title">PROVISIONAL PLANT EVIDENCE</div>
           <div class="warning-copy">
-            B/C local fits are commissioning evidence, not a validated digital twin.
-            Interactive disturbance recovery is a robustness screen, not physical certification.
+            Full standup uses a 120° periodic far-field swing surrogate smoothly stitched into the selected B/C local fit near upright. The global contact mechanics are not identified; this is a sequence/robustness commissioning model, not a validated digital twin.
           </div>
         </section>
       </aside>
@@ -145,7 +151,7 @@
       <span>native controller: 1 kHz</span>
       <span>RK4 plant: 100 µs</span>
       <span>live session: native process persists until Stop</span>
-      <span>CI still keeps a separate deterministic 10 s regression gate</span>
+      <span>CI: local-balance gate + full standup gate</span>
       <span>NO PHYSICAL AUTHORITY</span>
     </footer>
   </div>
