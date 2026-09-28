@@ -1,78 +1,62 @@
 # TriWhirl standup SITL
 
-Deterministic native software-in-the-loop harness for standup/balance
-commissioning. It compiles the production `triwhirl::StandupController`
-directly; there is no duplicate Python/JavaScript controller.
+Native software-in-the-loop harnesses for TriWhirl standup/balance commissioning.
+The production `triwhirl::StandupController` is compiled directly; there is no
+duplicate Python/JavaScript controller.
 
-## Two simulation layers
+## Two deliberately separate model layers
 
-TriWhirl deliberately keeps two plant scopes instead of pretending one model is
-valid everywhere.
-
-### Local balance SITL
+### 1. Local balance regression authority
 
 ```text
-provisional identified local plant
+provisional B/C local plant
     -> [theta_error, theta_rate, wheel_rate]
     -> production StandupController
     -> target / PI / damping / saturation / slew
     -> applied Vq
-    -> RK4 plant
+    -> RK4 local plant
 ```
 
-The B/C matrices come from the existing `swing-native-04` local fits. Their input
-column is sign-normalized to the current Vq coordinate. `nominal` is the
-component-wise B/C midpoint. These remain commissioning models, not a validated
-digital twin.
+This is the existing evidence-backed regression path near upright. The built-in
+B/C matrices come from existing `swing-native-04` local fits; `nominal` is their
+element-wise midpoint. They remain provisional commissioning models, not a
+validated digital twin.
 
-### Full standup SITL
+The deterministic 10-second local balance gate and deterministic disturbance
+recovery gate remain CI pass/fail tests.
 
-The full-standup runner starts from a resting orientation near `-59 deg` periodic
-upright error and exercises the actual production sequence:
+### 2. Global rolling observation model
+
+The old hand-written far-field surrogate
 
 ```text
-resting face
-    -> SwingHigh / SwingLow energy pump
-    -> +/-9 deg capture
-    -> Balance
-    -> settling latch
-    -> Stable
+theta_ddot = (5/3) sin(3 theta) - 1.5 theta_dot + 4 Vq
 ```
 
-The missing far-field physics is represented by an explicit 120-degree periodic
-surrogate:
+has been retired.
 
-```text
-body gravity-like term = (k/3) * sin(3 * theta_error)
-```
+`triwhirl-standup-sitl-full` now uses geometry-derived rolling mechanics:
 
-with finite body/wheel damping and Vq authority. This gives stable resting
-orientations at +/-60 deg and unstable upright vertices every 120 deg.
+- ideal Reuleaux triangle support/contact from the exact intersection-of-disks geometry;
+- constant-width / 120-degree periodicity emerges from geometry rather than a forced sine term;
+- no-slip horizontal translation follows the instantaneous native contact point;
+- COM height `h(theta)` supplies gravitational potential;
+- geometry-dependent rolling inertia enters the Lagrange equation;
+- the otherwise unknown effective body inertia and body Vq authority are anchored to the selected B/C local linearization at upright;
+- far-field wheel self-rate/Vq terms reuse the selected local evidence;
+- inside +/-2 deg the complete selected local derivative is used; a smooth residual transition ends by +/-5 deg.
 
-The global surrogate is **not identified contact mechanics**. Near upright it is
-smoothly stitched back to the existing local plant:
-
-- within +/-2 deg: 100% identified local B/C plant;
-- from 2 to 5 deg: smooth blend;
-- beyond +/-5 deg: periodic far-field surrogate.
-
-Its purpose is to validate the controller/state-machine sequence and provide a
-visible pre-hardware swing-up test, not to claim a globally validated Reuleaux
-triangle digital twin.
-
-## Shared production configuration
-
-The ESP32 runtime and all SITL runners obtain commissioning overrides from
-`triwhirl::makeStandupCommissioningConfig()` so simulation and firmware cannot
-silently use different gains.
+Nominal outer width is currently `75 mm` from seller-level product information.
+COM offset and rolling-loss parameters are not measured, so the global model is
+**exploratory**. A simulated swing-up or Stable indication is an observation,
+not validation authority.
 
 ## Timing
 
 - production controller opportunity: 1 kHz;
 - virtual plant RK4 step: 100 us;
-- no randomness in deterministic batch gates;
-- virtual timestamp starts at 1 s to avoid conflating timestamp zero with the
-  controller's uninitialized-time sentinel.
+- deterministic batch runs have no wall-clock scheduling or randomness;
+- live WebUI runs until explicit Stop.
 
 ## Build
 
@@ -90,68 +74,75 @@ cmake -S tools/sitl -B build/sitl
 cmake --build build/sitl
 ```
 
-The build provides:
+Built executables:
 
 ```text
-triwhirl-standup-sitl               local balance/invariant gates
-triwhirl-standup-sitl-full          deterministic rest-to-upright gate
-triwhirl-standup-sitl-disturbance   scheduled local disturbance gate
-triwhirl-standup-sitl-live          continuous WebUI native session
+triwhirl-standup-sitl                 local deterministic balance regression
+triwhirl-standup-sitl-disturbance     local deterministic disturbance regression
+triwhirl-standup-sitl-full            geometry-derived global observation
+triwhirl-standup-sitl-live            continuous WebUI native process
 ```
 
-## Local balance gate
-
-Run the native invariant and 10-second balance suite:
+## Local regression gates
 
 ```powershell
 .\build\sitl\Release\triwhirl-standup-sitl.exe --self-test
 ```
 
-The 10-second local gate checks continuous Balance operation, settling/stable
-acquisition, upright crossing, bilateral Vq reversal, body/wheel bounds and Vq
+The 10-second local balance gate requires continuous Balance, settling/stable
+acquisition, bounded body error/wheel speed, bilateral correction, and no Vq
 saturation.
 
-## Full standup gate
+## Geometry-derived global checks
 
-Run the complete production standup sequence from rest:
+```powershell
+.\build\sitl\Release\triwhirl-standup-sitl-full.exe --self-test
+```
+
+CI checks:
+
+- Reuleaux constant-width support geometry;
+- contact remains on the ground;
+- upright COM height is above the resting orientation;
+- analytic support derivative matches finite difference;
+- global model linearizes to the selected local gravity/body-Vq/wheel-reaction anchors at upright.
+
+A full swing observation can be generated with:
 
 ```powershell
 .\build\sitl\Release\triwhirl-standup-sitl-full.exe `
   --profile nominal `
   --duration-ms 12000 `
-  --require-standup-gate `
-  --output build\sitl\full-standup.csv
+  --output build\sitl\full-swing.csv
 ```
 
-The full gate requires evidence of:
+The output intentionally reports:
 
-- both `swing_high` and `swing_low`;
-- at least one body-rate reversal during energy pumping;
-- delayed entry into Balance rather than starting upright;
-- settling and `stable=true` acquisition;
-- ending in Balance/Stable;
-- final two-second periodic error below 0.5 deg;
-- bounded wheel speed and Vq with no Vq saturation.
+```text
+geometry_gate=PASS|FAIL
+sequence_observed=YES|NO
+validation_authority=NONE
+```
 
-CI keeps both the local-balance gate and this full rest-to-upright gate.
+There is no `--require-standup-gate`; that former gate was removed because the
+far-field model does not yet have measured COM offset or rolling loss.
 
 ## WebUI
 
-For the continuous browser console, see:
+See:
 
 ```text
 tools/visualization/triwhirl-sim-viewer/README.md
 ```
 
-The default WebUI scenario is **Full standup from rest**. The browser remains a
-display/control surface only; native C++ owns controller execution and plant
-integration.
+The browser does not integrate the plant. Native C++ streams body center x/y,
+contact x/y, body angle, reaction-wheel state, and controller output so the
+rendered rolling/contact motion is the same geometry used by the global model.
 
 ## Evidence boundary
 
-Passing the full-standup gate proves the production controller can execute the
-expected swing/capture/settling sequence on the explicitly stated hybrid
-commissioning model. It does **not** validate the real global rolling/contact
-physics or authorize hardware by itself. The identified evidence is strongest
-near upright; the far-field model remains a transparent surrogate until better
-physical or measured evidence exists.
+Passing local regression gates means the production controller is stable on the
+stated provisional local models for those scenarios. Passing geometry invariant
+checks means the global rolling implementation is internally consistent with the
+ideal Reuleaux geometry and the chosen local anchors. Neither statement proves
+hardware stability.
