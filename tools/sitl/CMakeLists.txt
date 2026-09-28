@@ -11,7 +11,15 @@ add_executable(triwhirl-standup-sitl-disturbance
   ../../components/triwhirl_core/standup_controller.cpp
 )
 
-foreach(target triwhirl-standup-sitl triwhirl-standup-sitl-disturbance)
+add_executable(triwhirl-standup-sitl-live
+  standup_sitl_live.cpp
+  ../../components/triwhirl_core/standup_controller.cpp
+)
+
+foreach(target
+    triwhirl-standup-sitl
+    triwhirl-standup-sitl-disturbance
+    triwhirl-standup-sitl-live)
   target_compile_features(${target} PRIVATE cxx_std_17)
   target_include_directories(${target} PRIVATE
     ../../components/triwhirl_core/include
