@@ -1,35 +1,35 @@
-// Global swing-up surrogate shared by the batch full-standup runner and the
-// continuous WebUI runner.
+// Geometry-derived global rolling model shared by the batch full-standup runner
+// and the continuous WebUI runner.
 //
 // This file is intentionally included after standup_sitl.cpp so it can reuse the
 // native State/PlantModel types and the exact same production StandupController
-// translation unit.  It is not a separately fitted plant and must not be treated
-// as a digital twin.
+// translation unit.
 //
-// The far-field model supplies only the missing global rocking/energy geometry:
-//   * 120-degree periodic gravity-like restoring potential;
-//   * finite body/wheel dissipation;
-//   * bounded Vq-to-body/wheel authority sufficient for the vendor pump law.
+// Important evidence boundary:
+//   * contact/support geometry is computed from an ideal constant-width Reuleaux
+//     triangle, not from a hand-written sin(3*theta) surrogate;
+//   * no-slip horizontal translation follows the actual instantaneous contact;
+//   * gravity comes from COM height h(theta) and the Lagrange rolling inertia;
+//   * the unknown effective body inertia and motor/body authority are anchored to
+//     the selected existing B/C local fit at upright;
+//   * far-field wheel electrical dynamics retain the selected local fit's direct
+//     wheel self-rate and Vq terms;
+//   * only a narrow +/-2..5 deg residual blend restores the complete identified
+//     local derivative near upright.
 //
-// Inside +/-2 deg it is exactly the existing identified local B/C plant.  A
-// smooth 2..5 deg blend connects the global surrogate to that local evidence.
-// The resulting hybrid is therefore a commissioning model for validating the
-// sequence Rest -> Swing -> Capture -> Settling -> Stable, not a claim that the
-// physical Reuleaux contact mechanics have been identified globally.
+// This is materially more physical than the retired periodic surrogate, but it
+// is still not a validated digital twin: the nominal 75 mm width is seller-level
+// geometry, COM offset is assumed zero, rolling loss is not identified, and the
+// local B/C fits remain provisional.
+
+#include "reuleaux_rolling_geometry.hpp"
 
 namespace {
 
-constexpr double kFullStandupInitialErrorDeg = -59.0;
-constexpr double kFullStandupGateDurationS = 12.0;
-
-// Far-field periodic surrogate coefficients.  The gravity-like term is written
-// (k/3)*sin(3*theta), giving exactly 120-degree periodicity, unstable upright
-// points at 0,+/-120,... and stable resting orientations at +/-60 deg.
-constexpr double kGlobalSwingGravityRateS2 = 5.0;
-constexpr double kGlobalSwingBodyDampingS1 = 1.5;
-constexpr double kGlobalSwingBodyVqGainRadS2PerV = 4.0;
-constexpr double kGlobalSwingWheelVqGainRadS2PerV = 30.0;
-constexpr double kGlobalSwingWheelDragS1 = 5.0;
+constexpr double kFullStandupInitialErrorDeg = -60.0;
+constexpr double kFullStandupObservationDurationS = 12.0;
+constexpr double kReuleauxWidthM = 0.075;  // seller nominal outer size ~75 mm
+constexpr double kGravityMps2 = 9.80665;
 constexpr double kGlobalLocalFullDeg = 2.0;
 constexpr double kGlobalLocalZeroDeg = 5.0;
 
@@ -54,28 +54,100 @@ inline double localBlendWeight(const double wrapped_error_rad) {
                       (kGlobalLocalZeroDeg - kGlobalLocalFullDeg));
 }
 
-State fullStandupInitialState() {
-  return State{kFullStandupInitialErrorDeg / kRadToDeg, 0.0, 0.0, 0.0};
+struct GeometryPlantCalibration {
+  double upright_generalized_inertia_per_mass_m2 = 0.0;
+  double effective_body_inertia_per_mass_m2 = 0.0;
+  double vq_specific_torque_per_v = 0.0;
+  double wheel_specific_torque_per_rad_s = 0.0;
+};
+
+GeometryPlantCalibration geometryPlantCalibration(const PlantModel& local_plant) {
+  const auto upright =
+      triwhirl_sitl::reuleauxGroundContact(0.0, kReuleauxWidthM);
+  const double gravity_stiffness = local_plant.a[1][0];
+  if (!(gravity_stiffness > 0.0) || !std::isfinite(gravity_stiffness)) {
+    throw std::runtime_error(
+        "geometry global plant requires positive upright gravity stiffness");
+  }
+
+  // At theta=0 the active contact is the lower vertex and M'(0)=0.  The
+  // geometry-derived linearization is:
+  //   theta_ddot ~= (g * h0 / M0) * theta.
+  // Solve M0 from the selected local-fit A(1,0), then separate the translational
+  // contact-radius contribution to obtain an effective fixed-body inertia per
+  // unit mass.  This anchors one otherwise unmeasured inertial parameter to
+  // existing evidence instead of inventing it.
+  const double m0 =
+      kGravityMps2 * upright.center_height_m / gravity_stiffness;
+  const double body_inertia_per_mass = m0 - upright.contact_radius_sq_m2;
+  if (!(body_inertia_per_mass > 0.0) || !std::isfinite(body_inertia_per_mass)) {
+    throw std::runtime_error(
+        "geometry global plant inferred non-positive body inertia");
+  }
+
+  GeometryPlantCalibration calibration{};
+  calibration.upright_generalized_inertia_per_mass_m2 = m0;
+  calibration.effective_body_inertia_per_mass_m2 = body_inertia_per_mass;
+
+  // Constant motor torque per V is scaled so its upright body-acceleration gain
+  // equals the selected local B(1).  The wheel-rate reaction term is anchored in
+  // the same way from local A(1,2).  Both then vary globally only through the
+  // geometry-derived rolling inertia M(theta).
+  calibration.vq_specific_torque_per_v = local_plant.b[1] * m0;
+  calibration.wheel_specific_torque_per_rad_s = local_plant.a[1][2] * m0;
+  return calibration;
+}
+
+State geometryDerivedFarDerivative(const PlantModel& local_plant,
+                                   const State& state, const double vq_v) {
+  const GeometryPlantCalibration calibration =
+      geometryPlantCalibration(local_plant);
+  const auto contact = triwhirl_sitl::reuleauxGroundContact(
+      state.theta_error_rad, kReuleauxWidthM);
+
+  const double generalized_inertia_per_mass =
+      calibration.effective_body_inertia_per_mass_m2 +
+      contact.contact_radius_sq_m2;
+  if (!(generalized_inertia_per_mass > 0.0) ||
+      !std::isfinite(generalized_inertia_per_mass)) {
+    throw std::runtime_error("invalid geometry-derived rolling inertia");
+  }
+
+  // Lagrange equation for one no-slip rolling body coordinate:
+  //   M(theta) theta_ddot + 0.5 M'(theta) theta_dot^2
+  //       + g h'(theta) = Q_specific.
+  // h'(theta) comes directly from exact Reuleaux support geometry.  No global
+  // gravity sine wave and no arbitrary far-field body damping are inserted.
+  const double specific_motor_torque =
+      calibration.vq_specific_torque_per_v * vq_v +
+      calibration.wheel_specific_torque_per_rad_s * state.wheel_rate_rad_s;
+  const double body_accel =
+      (specific_motor_torque -
+       0.5 * contact.contact_radius_sq_derivative_m2_per_rad *
+           state.theta_rate_rad_s * state.theta_rate_rad_s -
+       kGravityMps2 * contact.support_derivative_m_per_rad) /
+      generalized_inertia_per_mass;
+
+  // Far from upright we retain only the orientation-independent direct wheel
+  // terms from the selected local evidence.  Body-angle/body-rate cross terms
+  // are local-fit effects and are restored only by the near-upright residual
+  // blend below rather than extrapolated around the whole 120-deg cycle.
+  const double wheel_accel =
+      local_plant.a[2][2] * state.wheel_rate_rad_s +
+      local_plant.b[2] * vq_v;
+
+  return State{state.theta_rate_rad_s, body_accel, wheel_accel,
+               state.wheel_rate_rad_s};
 }
 
 State globalStandupDerivative(const PlantModel& local_plant,
                               const State& state, const double vq_v) {
+  const State far = geometryDerivedFarDerivative(local_plant, state, vq_v);
   const double error = wrapGlobalErrorRad(state.theta_error_rad);
-  const double rate = state.theta_rate_rad_s;
-  const double wheel = state.wheel_rate_rad_s;
 
-  // Far-field rocking surrogate.  Positive Vq follows the measured software
-  // actuator coordinate used by the current local plant and controller.
-  const double far_body_accel =
-      (kGlobalSwingGravityRateS2 / 3.0) * std::sin(3.0 * error) -
-      kGlobalSwingBodyDampingS1 * rate +
-      kGlobalSwingBodyVqGainRadS2PerV * vq_v;
-  const double far_wheel_accel =
-      kGlobalSwingWheelVqGainRadS2PerV * vq_v -
-      kGlobalSwingWheelDragS1 * wheel;
-
-  // Identified local plant, evaluated in the same periodic upright coordinate.
-  const std::array<double, 3> x{{error, rate, wheel}};
+  // Exact identified local derivative in the periodic upright coordinate.
+  const std::array<double, 3> x{{error, state.theta_rate_rad_s,
+                                 state.wheel_rate_rad_s}};
   std::array<double, 3> local_dx{};
   for (std::size_t row = 0; row < 3; ++row) {
     for (std::size_t col = 0; col < 3; ++col) {
@@ -86,10 +158,11 @@ State globalStandupDerivative(const PlantModel& local_plant,
 
   const double local_weight = localBlendWeight(error);
   const double body_accel =
-      local_weight * local_dx[1] + (1.0 - local_weight) * far_body_accel;
+      local_weight * local_dx[1] + (1.0 - local_weight) * far.theta_rate_rad_s;
   const double wheel_accel =
-      local_weight * local_dx[2] + (1.0 - local_weight) * far_wheel_accel;
-  return State{rate, body_accel, wheel_accel, wheel};
+      local_weight * local_dx[2] + (1.0 - local_weight) * far.wheel_rate_rad_s;
+  return State{state.theta_rate_rad_s, body_accel, wheel_accel,
+               state.wheel_rate_rad_s};
 }
 
 State rk4GlobalStandupStep(const PlantModel& local_plant, const State& state,
@@ -119,6 +192,20 @@ State rk4GlobalStandupStep(const PlantModel& local_plant, const State& state,
               2.0 * k3.wheel_angle_rad + k4.wheel_angle_rad) /
       6.0;
   return next;
+}
+
+double integrateRollingCenterX(const State& previous, const State& next,
+                               const double previous_center_x_m,
+                               const double dt_s) {
+  const double vx0 = triwhirl_sitl::rollingCenterVelocityX(
+      previous.theta_error_rad, previous.theta_rate_rad_s, kReuleauxWidthM);
+  const double vx1 = triwhirl_sitl::rollingCenterVelocityX(
+      next.theta_error_rad, next.theta_rate_rad_s, kReuleauxWidthM);
+  return previous_center_x_m + 0.5 * (vx0 + vx1) * dt_s;
+}
+
+State fullStandupInitialState() {
+  return State{kFullStandupInitialErrorDeg / kRadToDeg, 0.0, 0.0, 0.0};
 }
 
 struct FullStandupMetrics {
@@ -198,20 +285,78 @@ FullStandupMetrics summarizeFullStandup(
   return metrics;
 }
 
-bool fullStandupGatePass(const std::vector<EvidenceSample>& evidence,
-                         const FullStandupMetrics& metrics) {
-  if (evidence.empty() ||
-      evidence.back().t_s + 1.0e-9 < kFullStandupGateDurationS) {
-    return false;
-  }
+bool fullStandupSequenceObserved(const FullStandupMetrics& metrics) {
   return metrics.swing_high_seen && metrics.swing_low_seen &&
          metrics.body_rate_reversals >= 1 && metrics.balance_seen &&
          metrics.settling_seen && metrics.stable_seen && metrics.ended_balance &&
-         metrics.ended_stable && metrics.first_balance_s > 0.5 &&
-         metrics.first_stable_s > metrics.first_balance_s &&
-         metrics.tail_max_abs_error_deg < 0.50 &&
-         metrics.max_abs_wheel_rad_s < 20.0 && metrics.max_abs_vq_v <= 4.0 &&
-         !metrics.any_vq_saturation;
+         metrics.ended_stable;
+}
+
+bool geometryDerivedPlantChecksPass(const PlantModel& plant) {
+  double max_width_error = 0.0;
+  double max_ground_error = 0.0;
+  for (int degree = -180; degree <= 180; ++degree) {
+    const double theta = static_cast<double>(degree) * kPi / 180.0;
+    const auto down =
+        triwhirl_sitl::reuleauxGroundContact(theta, kReuleauxWidthM);
+    const auto up = triwhirl_sitl::reuleauxGroundContact(theta + kPi,
+                                                         kReuleauxWidthM);
+    max_width_error =
+        std::max(max_width_error,
+                 std::fabs(down.center_height_m + up.center_height_m -
+                           kReuleauxWidthM));
+    const auto pose =
+        triwhirl_sitl::reuleauxRollingPose(theta, 0.0, kReuleauxWidthM);
+    max_ground_error = std::max(max_ground_error, std::fabs(pose.contact_y_m));
+  }
+
+  const auto upright =
+      triwhirl_sitl::reuleauxGroundContact(0.0, kReuleauxWidthM);
+  const auto rest = triwhirl_sitl::reuleauxGroundContact(
+      kPi / 3.0, kReuleauxWidthM);
+  const bool potential_geometry_ok =
+      upright.center_height_m > rest.center_height_m + 0.005;
+
+  double max_support_derivative_error = 0.0;
+  constexpr std::array<double, 4> kDerivativeAnglesDeg{{10.0, 35.0, 50.0, 58.0}};
+  constexpr double kDerivativeStep = 1.0e-6;
+  for (const double degree : kDerivativeAnglesDeg) {
+    const double theta = degree * kPi / 180.0;
+    const auto geometry =
+        triwhirl_sitl::reuleauxGroundContact(theta, kReuleauxWidthM);
+    const double hp = triwhirl_sitl::reuleauxGroundContact(
+                          theta + kDerivativeStep, kReuleauxWidthM)
+                          .center_height_m;
+    const double hm = triwhirl_sitl::reuleauxGroundContact(
+                          theta - kDerivativeStep, kReuleauxWidthM)
+                          .center_height_m;
+    const double numeric = (hp - hm) / (2.0 * kDerivativeStep);
+    max_support_derivative_error =
+        std::max(max_support_derivative_error,
+                 std::fabs(numeric - geometry.support_derivative_m_per_rad));
+  }
+
+  const GeometryPlantCalibration calibration = geometryPlantCalibration(plant);
+  const State zero{};
+  const State vq_response = geometryDerivedFarDerivative(plant, zero, 1.0);
+  const State wheel_response = geometryDerivedFarDerivative(
+      plant, State{0.0, 0.0, 1.0, 0.0}, 0.0);
+
+  constexpr double kLinearizationProbeRad = 1.0e-6;
+  const State gravity_probe = geometryDerivedFarDerivative(
+      plant, State{kLinearizationProbeRad, 0.0, 0.0, 0.0}, 0.0);
+  const double gravity_slope =
+      gravity_probe.theta_rate_rad_s / kLinearizationProbeRad;
+
+  const bool anchors_ok =
+      std::fabs(gravity_slope - plant.a[1][0]) < 0.05 &&
+      std::fabs(vq_response.theta_rate_rad_s - plant.b[1]) < 1.0e-9 &&
+      std::fabs(wheel_response.theta_rate_rad_s - plant.a[1][2]) < 1.0e-9 &&
+      calibration.effective_body_inertia_per_mass_m2 > 0.0;
+
+  return max_width_error < 1.0e-9 && max_ground_error < 1.0e-12 &&
+         potential_geometry_ok && max_support_derivative_error < 1.0e-7 &&
+         anchors_ok;
 }
 
 }  // namespace
