@@ -2,16 +2,17 @@
 
 Local WebUI for the native standup SITL.
 
-The console has two deliberately separate roles:
+The default interactive scenario now starts from a resting face and shows the
+whole controller sequence instead of spawning already upright:
 
-1. **Interactive live simulation** — starts a persistent native C++ SITL process and runs until the user presses **Stop**. Disturbance buttons modify the currently running native plant state.
-2. **Deterministic CI gates** — keep the existing finite 10-second balance and disturbance-recovery runs as repeatable regression tests.
+```text
+rest -> swing-up -> capture -> settling -> stable balance
+```
 
-The browser does not contain controller equations or a plant integrator.
+The console also keeps the previous upright-only local-balance scenario for
+focused disturbance testing.
 
 ## Architecture
-
-Interactive mode:
 
 ```text
 browser controls
@@ -23,17 +24,33 @@ Python HTTP/SSE bridge
 persistent native C++ live SITL
    |
    +-> production StandupController @ 1 kHz
-   +-> provisional local plant RK4 @ 100 us
+   +-> selected plant @ RK4 100 us
    +-> body/wheel disturbance impulses
 ```
 
-The browser is a display/control surface only. Plant integration and controller execution stay in native C++.
+The browser contains no controller equations or plant integrator. It is a
+display/control surface only.
 
-The deterministic batch executables remain separate so CI can retain fixed-duration, reproducible pass/fail gates.
+### Full standup plant
+
+`Full standup from rest` uses a hybrid commissioning model:
+
+- far from upright: explicit 120-degree periodic swing-up surrogate;
+- within +/-2 deg: selected provisional identified local B/C plant;
+- 2..5 deg: smooth transition between them.
+
+The far-field surrogate provides gravity-like rocking, damping and actuator
+coupling needed to exercise `SwingHigh -> SwingLow -> Balance`. It is **not** a
+validated model of the actual Reuleaux rolling/contact geometry.
+
+### Upright balance plant
+
+`Upright balance only` retains the original identified local B/C model and starts
+near upright for focused balance/disturbance work.
 
 ## Build
 
-From the repository root on Windows with the Visual Studio CMake generator:
+From the repository root on Windows:
 
 ```powershell
 cmake -S tools/sitl -B build/sitl
@@ -43,12 +60,11 @@ cmake --build build/sitl --config Release
 This builds:
 
 ```text
-triwhirl-standup-sitl                 deterministic balance gate
-triwhirl-standup-sitl-disturbance     deterministic scheduled-disturbance gate
+triwhirl-standup-sitl                 deterministic local balance gate
+triwhirl-standup-sitl-full            deterministic full standup gate
+triwhirl-standup-sitl-disturbance     deterministic disturbance gate
 triwhirl-standup-sitl-live            continuous interactive native session
 ```
-
-On Windows they are normally under `build/sitl/Release/` or `Debug/`.
 
 ## Launch
 
@@ -56,55 +72,70 @@ On Windows they are normally under `build/sitl/Release/` or `Debug/`.
 python tools/visualization/triwhirl-sim-viewer/serve_live.py
 ```
 
-Then open:
+Open:
 
 ```text
 http://127.0.0.1:8000/tools/visualization/triwhirl-sim-viewer/
 ```
 
-Press **Run live**. There is no simulation-duration limit in the WebUI. The native process continues until **Stop** is pressed or the browser/server disconnects.
+Select a scenario and press **Run live**. The default is **Full standup from
+rest**. There is no interactive duration limit; the native process runs until
+**Stop**.
 
-The rolling plot still shows the most recent 10 seconds; that is only the display window, not a simulation limit.
+The rolling plot displays only the most recent 10 seconds. That is a display
+window, not a simulation lifetime.
+
+## What full standup should show
+
+A nominal successful run visibly proceeds through:
+
+```text
+resting face near -59 deg periodic error
+    -> SwingHigh pumping
+    -> reversal and SwingLow/SwingHigh pumping
+    -> capture near upright
+    -> Balance
+    -> settling
+    -> Stable
+```
+
+The right panel shows both the wrapped 120-degree periodic upright error and the
+unwrapped body angle. Keeping both prevents the renderer from visually snapping
+at a periodic boundary.
+
+The drawing also shifts vertically with body orientation so the rendered
+Reuleaux boundary stays on the ground line while it rocks. This display contact
+support is geometric visualization only; it is not a contact solver.
 
 ## Interactive disturbances
 
-While a live session is running:
+While a session is running:
 
-- **Body push Δθ̇** adds a signed body angular-rate impulse to the current native state.
-- **Wheel kick Δω** adds a signed reaction-wheel-rate impulse to the current native state.
+- **Body push Delta theta-dot** adds a signed body angular-rate impulse to the
+  current native state.
+- **Wheel kick Delta omega** adds a signed reaction-wheel-rate impulse to the
+  current native state.
 
-The disturbance is applied by the already-running native process at its current simulation time. The browser does not redraw a fake disturbance and the backend does not rewind/recompute the trajectory.
+The already-running C++ process applies the disturbance immediately. There is no
+browser-only fake motion and no trajectory rewind/recompute.
 
-## What is rendered
+## Deterministic CI gates
 
-- actual local body error from the virtual plant;
-- reaction-wheel angle and speed;
-- production controller phase, settling and stable flags;
-- filtered body rate;
-- wheel target / velocity error / PI integral;
-- unclamped and applied Vq;
-- rolling 10-second body-error and Vq history;
-- disturbance markers;
-- selected provisional plant profile;
-- current live status (`RUNNING`, `STABLE`, `OUT OF BALANCE`, or `STOPPED`).
+Interactive runs are unlimited, but CI retains finite deterministic regression
+gates:
 
-The body drawing uses the same sign as the SITL local angle. The browser does not flip a sign or exaggerate body motion to make the animation look stable.
+- local 10-second balance gate;
+- deterministic disturbance-recovery gate;
+- full 12-second rest-to-upright gate;
+- live bridge smoke test that observes swing, Balance and Stable, injects a
+  disturbance, then stops the native process.
 
-## Deterministic 10-second CI gates
-
-Removing the WebUI time limit does **not** remove the automated regression gates. CI still executes finite 10-second native runs because fixed-duration evidence is reproducible and suitable for pass/fail automation.
-
-The balance gate currently checks items such as continuous Balance phase, settling/stable acquisition, bounded body error and wheel speed, Vq limits, and bilateral correction. A separate deterministic disturbance run injects scheduled impulses and verifies recovery.
-
-These are regression tests, not the interactive UI lifetime.
+These gates are repeatable regression evidence, not a WebUI runtime limit.
 
 ## Evidence boundary
 
-The B/C local models remain **provisional commissioning evidence**. The nominal profile is their element-wise midpoint. B and C can be selected to expose model sensitivity, but behavior in these models is not hardware authorization by itself.
-
-Therefore the console permanently displays:
-
-```text
-SIMULATION ONLY
-NO PHYSICAL AUTHORITY
-```
+The B/C local models remain provisional commissioning evidence, and the full
+standup far-field dynamics are an explicit periodic surrogate. Therefore the
+console permanently remains simulation-only and provides **no physical
+authority** by itself. Its purpose is to catch controller/state-machine and
+robustness failures before spending another hardware trial.
