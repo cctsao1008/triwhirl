@@ -57,24 +57,48 @@ def main() -> int:
         session_id = str(meta["session_id"])
         assert session_id
 
-        saw_swing = False
-        saw_balance = False
-        saw_stable = False
-        while not saw_stable:
+        first_sample: dict[str, object] | None = None
+        saw_swing_high = False
+        saw_swing_low = False
+        saw_positive_rate = False
+        saw_negative_rate = False
+        min_center_x = float("inf")
+        max_center_x = float("-inf")
+
+        while True:
             event, payload = read_event(response)
             if event == "stream-error":
                 raise RuntimeError(str(payload))
             if event != "sample":
                 continue
+            if first_sample is None:
+                first_sample = payload
+                assert abs(float(payload["true_error_deg"]) + 60.0) < 0.05
+                assert abs(float(payload["true_contact_y_m"])) < 1.0e-9
+                assert 0.02 < float(payload["true_body_center_y_m"]) < 0.06
+                assert abs(float(payload["geometry_width_m"]) - 0.075) < 1.0e-12
+
             phase = str(payload["phase"])
-            saw_swing = saw_swing or phase in {"swing_high", "swing_low"}
-            saw_balance = saw_balance or phase == "balance"
-            saw_stable = saw_stable or bool(payload["stable"])
-            assert "true_body_angle_rad" in payload
-            if float(payload["t_s"]) > 11.0 and not saw_stable:
-                raise RuntimeError("full standup did not reach stable state by 11 s")
-        assert saw_swing
-        assert saw_balance
+            saw_swing_high = saw_swing_high or phase == "swing_high"
+            saw_swing_low = saw_swing_low or phase == "swing_low"
+            rate = float(payload["true_theta_rate_rad_s"])
+            saw_positive_rate = saw_positive_rate or rate > 0.05
+            saw_negative_rate = saw_negative_rate or rate < -0.05
+            center_x = float(payload["true_body_center_x_m"])
+            min_center_x = min(min_center_x, center_x)
+            max_center_x = max(max_center_x, center_x)
+            assert abs(float(payload["true_contact_y_m"])) < 1.0e-8
+            assert "true_contact_body_x_m" in payload
+            assert "true_contact_body_y_m" in payload
+
+            if float(payload["t_s"]) >= 3.5:
+                break
+
+        assert first_sample is not None
+        assert saw_swing_high
+        assert saw_swing_low
+        assert saw_positive_rate and saw_negative_rate
+        assert max_center_x - min_center_x > 0.001
 
         accepted = post_json(
             base,
@@ -105,7 +129,10 @@ def main() -> int:
             if event == "stream-error":
                 raise RuntimeError(str(payload))
 
-    print("PASS continuous full-standup WebUI bridge: swing -> balance -> stable -> disturbance -> stop")
+    print(
+        "PASS continuous geometry-derived WebUI bridge: "
+        "rest -> rolling swing/reversal -> disturbance -> stop"
+    )
     return 0
 
 
