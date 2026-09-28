@@ -96,14 +96,24 @@ void inputThread() {
 }
 
 void emitSample(const double t_s, const State& state,
+                const double body_center_x_m,
                 const triwhirl::StandupControllerOutput& output) {
   const double wrapped_error = wrapGlobalErrorRad(state.theta_error_rad);
+  const auto pose = triwhirl_sitl::reuleauxRollingPose(
+      state.theta_error_rad, body_center_x_m, kReuleauxWidthM);
   std::cout << std::setprecision(10)
             << "{\"type\":\"sample\",\"t_s\":" << t_s
             << ",\"true_error_rad\":" << wrapped_error
             << ",\"true_error_deg\":" << wrapped_error * kRadToDeg
             << ",\"true_body_angle_rad\":" << state.theta_error_rad
             << ",\"true_body_angle_deg\":" << state.theta_error_rad * kRadToDeg
+            << ",\"true_body_center_x_m\":" << pose.center_x_m
+            << ",\"true_body_center_y_m\":" << pose.center_y_m
+            << ",\"true_contact_x_m\":" << pose.contact_x_m
+            << ",\"true_contact_y_m\":" << pose.contact_y_m
+            << ",\"true_contact_body_x_m\":" << pose.contact_body_m.x
+            << ",\"true_contact_body_y_m\":" << pose.contact_body_m.y
+            << ",\"geometry_width_m\":" << kReuleauxWidthM
             << ",\"true_theta_rate_rad_s\":" << state.theta_rate_rad_s
             << ",\"true_wheel_rate_rad_s\":" << state.wheel_rate_rad_s
             << ",\"true_wheel_angle_rad\":" << state.wheel_angle_rad
@@ -185,12 +195,17 @@ int main(int argc, char** argv) {
 
     const bool full_standup = scenario == "full-standup";
     const PlantModel plant = plantByName(profile);
+    if (full_standup && !geometryDerivedPlantChecksPass(plant)) {
+      throw std::runtime_error("geometry-derived global plant invariant check failed");
+    }
+
     const auto config = triwhirl::makeStandupCommissioningConfig(
         static_cast<float>(kThetaReferenceRad), 4.0F);
     triwhirl::StandupController controller(config);
     State state = full_standup
                       ? fullStandupInitialState()
                       : State{3.0 / kRadToDeg, -0.5, 0.0, 0.0};
+    double body_center_x_m = 0.0;
     std::uint32_t now_us = kStartTimeUs;
     auto input = controllerInput(now_us, state);
     controller.reset(input);
@@ -204,7 +219,7 @@ int main(int argc, char** argv) {
     const double emit_period_s = 1.0 / fps;
     const auto wall_start = std::chrono::steady_clock::now();
 
-    emitSample(0.0, state, output);
+    emitSample(0.0, state, body_center_x_m, output);
 
     bool stop_requested = false;
     while (!stop_requested) {
@@ -227,6 +242,7 @@ int main(int argc, char** argv) {
       if (stop_requested) break;
 
       for (int substep = 0; substep < kPlantSubsteps; ++substep) {
+        const State previous = state;
         if (full_standup) {
           state = rk4GlobalStandupStep(plant, state,
                                        static_cast<double>(output.vq_v),
@@ -235,6 +251,8 @@ int main(int argc, char** argv) {
           state = rk4Step(plant, state, static_cast<double>(output.vq_v),
                           kPlantStepS);
         }
+        body_center_x_m = integrateRollingCenterX(
+            previous, state, body_center_x_m, kPlantStepS);
       }
       ++step;
       now_us += kControlPeriodUs;
@@ -245,14 +263,15 @@ int main(int argc, char** argv) {
           !std::isfinite(state.theta_error_rad) ||
           !std::isfinite(state.theta_rate_rad_s) ||
           !std::isfinite(state.wheel_rate_rad_s) ||
-          !std::isfinite(state.wheel_angle_rad)) {
+          !std::isfinite(state.wheel_angle_rad) ||
+          !std::isfinite(body_center_x_m)) {
         std::cout << "{\"type\":\"error\",\"message\":\"non-finite live SITL state/output\"}"
                   << std::endl;
         return 2;
       }
 
       if (new_t_s + 1.0e-12 >= next_emit_s) {
-        emitSample(new_t_s, state, output);
+        emitSample(new_t_s, state, body_center_x_m, output);
         do {
           next_emit_s += emit_period_s;
         } while (next_emit_s <= new_t_s + 1.0e-12);
