@@ -8,18 +8,27 @@
   const speed = $("speed");
   const runButton = $("run");
   const stopButton = $("stop");
+  const bodyLeft = $("body-left");
+  const bodyRight = $("body-right");
+  const bodyStrength = $("body-strength");
+  const wheelMinus = $("wheel-minus");
+  const wheelPlus = $("wheel-plus");
+  const wheelStrength = $("wheel-strength");
 
   let eventSource = null;
   let latest = null;
   let samples = [];
   let meta = null;
   let runComplete = false;
+  let disturbances = [];
+  let kickFlash = null;
 
   const number = (value, digits = 3) => {
     const n = Number(value);
     return Number.isFinite(n) ? n.toFixed(digits) : "—";
   };
   const yesNo = (value) => value ? "YES" : "NO";
+  const gateName = () => disturbances.length ? "DISTURBANCE" : "BALANCE";
 
   function fitCanvas(canvas, ctx) {
     const ratio = Math.max(1, window.devicePixelRatio || 1);
@@ -35,8 +44,6 @@
   }
 
   function drawReuleaux(ctx) {
-    // Exact three-arc construction from an equilateral triangle with side 190.
-    // Local body coordinates put the nominal contact vertex at (0, 0).
     const path = new Path2D(
       "M 0 0 " +
       "A 190 190 0 0 1 -95 -164.5448 " +
@@ -81,6 +88,31 @@
     ctx.restore();
   }
 
+  function drawKickArrow(ctx, scale) {
+    if (!kickFlash || performance.now() > kickFlash.until) return;
+    const positive = kickFlash.delta > 0;
+    const bodyKick = kickFlash.kind === "body";
+    ctx.save();
+    ctx.scale(1 / scale, 1 / scale);
+    ctx.strokeStyle = bodyKick ? "#ff6b75" : "#d58cff";
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = 4;
+    const y = bodyKick ? -118 * scale : -42 * scale;
+    const x0 = positive ? -170 * scale : 170 * scale;
+    const x1 = positive ? -85 * scale : 85 * scale;
+    ctx.beginPath();
+    ctx.moveTo(x0, y);
+    ctx.lineTo(x1, y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x1, y);
+    ctx.lineTo(x1 + (positive ? -14 : 14), y - 9);
+    ctx.lineTo(x1 + (positive ? -14 : 14), y + 9);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
   function drawScene() {
     const { width, height } = fitCanvas(scene, sceneCtx);
     sceneCtx.clearRect(0, 0, width, height);
@@ -109,9 +141,6 @@
     sceneCtx.save();
     sceneCtx.translate(width * 0.50, groundY);
     sceneCtx.scale(scale, scale);
-
-    // Contact frame / upright reference. Positive simulation angle is rendered
-    // positive in canvas coordinates without any visual-only sign reinterpretation.
     sceneCtx.strokeStyle = "rgba(101,184,255,0.30)";
     sceneCtx.lineWidth = 1.5;
     sceneCtx.setLineDash([6, 6]);
@@ -124,6 +153,7 @@
     sceneCtx.rotate(error);
     drawReuleaux(sceneCtx);
     drawWheel(sceneCtx, wheelAngle);
+    drawKickArrow(sceneCtx, scale);
 
     sceneCtx.fillStyle = "#65b8ff";
     sceneCtx.beginPath();
@@ -172,9 +202,25 @@
     const endT = Number(samples[samples.length - 1].t_s);
     const startT = Math.max(0, endT - 10);
     const visible = samples.filter((s) => Number(s.t_s) >= startT);
-    const xOf = (t) => left + ((t - startT) / Math.max(1e-9, endT - startT || 10)) * plotW;
+    const span = Math.max(1e-9, endT - startT || 10);
+    const xOf = (t) => left + ((t - startT) / span) * plotW;
     const yErr = (v) => top + plotH / 2 - (v / 5) * (plotH / 2);
     const yVq = (v) => top + plotH / 2 - (v / 4) * (plotH / 2);
+
+    disturbances.forEach((event) => {
+      if (event.t_s < startT || event.t_s > endT) return;
+      const x = xOf(event.t_s);
+      historyCtx.strokeStyle = event.kind === "body" ? "#ff6b75" : "#d58cff";
+      historyCtx.lineWidth = 1.5;
+      historyCtx.setLineDash([4, 3]);
+      historyCtx.beginPath();
+      historyCtx.moveTo(x, top);
+      historyCtx.lineTo(x, top + plotH);
+      historyCtx.stroke();
+      historyCtx.setLineDash([]);
+      historyCtx.fillStyle = historyCtx.strokeStyle;
+      historyCtx.fillText(event.kind === "body" ? "B" : "W", x + 3, top + 11);
+    });
 
     const trace = (getter, yMap, color) => {
       historyCtx.strokeStyle = color;
@@ -217,92 +263,179 @@
     drawHistory();
   }
 
+  function updateDisturbanceStatus() {
+    $("disturbance-count").textContent = String(disturbances.length);
+    $("gate-type").textContent = gateName();
+    if (!disturbances.length) {
+      $("disturbance-readout").textContent = "No disturbances";
+      return;
+    }
+    const last = disturbances[disturbances.length - 1];
+    const label = last.kind === "body" ? "body Δθ̇" : "wheel Δω";
+    $("disturbance-readout").textContent =
+      `${disturbances.length} injected · last ${label} ${last.delta_rad_s >= 0 ? "+" : ""}${number(last.delta_rad_s, 2)} rad/s @ ${number(last.t_s, 3)} s`;
+  }
+
   function setGate(status, summary = "") {
     const chip = $("gate-chip");
     chip.classList.remove("gate-pass", "gate-blocked", "gate-fail");
+    const prefix = disturbances.length ? "SIM DISTURBANCE" : "SIM GATE";
     if (status === "PASS") {
-      chip.textContent = "SIM GATE: PASS";
+      chip.textContent = `${prefix}: PASS`;
       chip.classList.add("gate-pass");
       $("gate-result").textContent = "PASS";
     } else if (status === "FAIL") {
-      chip.textContent = "SIM GATE: FAIL";
+      chip.textContent = `${prefix}: FAIL`;
       chip.classList.add("gate-fail");
       $("gate-result").textContent = "FAIL";
     } else {
-      chip.textContent = "SIM GATE: BLOCKED";
+      chip.textContent = `${prefix}: BLOCKED`;
       chip.classList.add("gate-blocked");
       $("gate-result").textContent = status === "RUNNING" ? "RUNNING" : "—";
     }
     $("gate-summary").textContent = summary || "Run the simulation gate.";
+    updateDisturbanceStatus();
   }
 
-  function stopRun() {
+  function setKickControls(enabled) {
+    bodyLeft.disabled = !enabled;
+    bodyRight.disabled = !enabled;
+    wheelMinus.disabled = !enabled;
+    wheelPlus.disabled = !enabled;
+  }
+
+  function closeStream() {
     if (eventSource) {
       eventSource.close();
       eventSource = null;
     }
+  }
+
+  function stopRun() {
+    closeStream();
     runButton.disabled = false;
     stopButton.disabled = true;
+    profile.disabled = false;
+    setKickControls(false);
     $("stream-chip").textContent = "SIM: disconnected";
   }
 
-  function startRun() {
-    stopRun();
-    samples = [];
-    latest = null;
-    meta = null;
+  function disturbanceParams(params) {
+    disturbances.forEach((event) => {
+      const key = event.kind === "body" ? "body_kick" : "wheel_kick";
+      params.append(key, `${event.t_s.toFixed(6)}:${event.delta_rad_s.toFixed(6)}`);
+    });
+  }
+
+  function launchStream(resumeFrom = 0) {
+    closeStream();
     runComplete = false;
-    drawScene();
-    drawHistory();
     runButton.disabled = true;
     stopButton.disabled = false;
-    $("stream-chip").textContent = "SIM: preparing native run";
-    setGate("RUNNING", "Native C++ SITL is generating fresh 10 s evidence.");
+    profile.disabled = true;
+    setKickControls(false);
+    $("stream-chip").textContent = disturbances.length
+      ? "SIM: recomputing disturbed native trajectory"
+      : "SIM: preparing native run";
 
     const params = new URLSearchParams({
       profile: profile.value,
       speed: speed.value,
       fps: "60",
+      resume_from: String(resumeFrom),
     });
-    eventSource = new EventSource(`/api/live?${params.toString()}`);
+    disturbanceParams(params);
 
-    eventSource.addEventListener("meta", (event) => {
+    const source = new EventSource(`/api/live?${params.toString()}`);
+    eventSource = source;
+
+    source.addEventListener("meta", (event) => {
+      if (eventSource !== source) return;
       meta = JSON.parse(event.data);
       $("model-chip").textContent = `model: ${meta.profile}`;
-      $("stream-chip").textContent = "SIM: replaying fresh native evidence";
+      $("stream-chip").textContent = disturbances.length
+        ? "SIM: disturbed native evidence"
+        : "SIM: fresh native evidence";
+      $("gate-type").textContent = meta.gate || gateName();
+      setKickControls(true);
       setGate("RUNNING", meta.scope || "Fresh native simulation evidence.");
     });
 
-    eventSource.addEventListener("sample", (event) => {
+    source.addEventListener("sample", (event) => {
+      if (eventSource !== source) return;
       const sample = JSON.parse(event.data);
       samples.push(sample);
       if (samples.length > 4000) samples.splice(0, samples.length - 4000);
       updateTelemetry(sample);
     });
 
-    eventSource.addEventListener("end", (event) => {
+    source.addEventListener("end", (event) => {
+      if (eventSource !== source) return;
       const result = JSON.parse(event.data);
       runComplete = true;
       setGate(result.gate_pass ? "PASS" : "FAIL", result.summary || "Simulation finished.");
       $("stream-chip").textContent = "SIM: complete";
-      if (eventSource) eventSource.close();
-      eventSource = null;
+      closeStream();
       runButton.disabled = false;
       stopButton.disabled = true;
+      profile.disabled = false;
+      setKickControls(false);
     });
 
-    eventSource.addEventListener("stream-error", (event) => {
+    source.addEventListener("stream-error", (event) => {
+      if (eventSource !== source) return;
       const error = JSON.parse(event.data);
       setGate("FAIL", error.message || "Simulation backend failed.");
       stopRun();
     });
 
-    eventSource.onerror = () => {
-      if (!runComplete && eventSource) {
+    source.onerror = () => {
+      if (eventSource !== source) return;
+      if (!runComplete) {
         setGate("FAIL", "SSE connection closed before the native run completed.");
       }
       stopRun();
     };
+  }
+
+  function startRun() {
+    closeStream();
+    samples = [];
+    latest = null;
+    meta = null;
+    disturbances = [];
+    kickFlash = null;
+    $("kick-readout").textContent = "";
+    updateDisturbanceStatus();
+    drawScene();
+    drawHistory();
+    setGate("RUNNING", "Native C++ SITL is generating fresh 10 s evidence.");
+    launchStream(0);
+  }
+
+  function injectDisturbance(kind, delta) {
+    if (!eventSource || !latest) return;
+    const currentT = Number(latest.t_s);
+    if (!Number.isFinite(currentT)) return;
+    const t = Math.max(0, Math.min(10, Math.round(currentT * 1000) / 1000));
+    const event = { kind, t_s: t, delta_rad_s: Number(delta) };
+    disturbances.push(event);
+    disturbances.sort((a, b) => a.t_s - b.t_s);
+
+    // Remove the stale branch from the click time onward. The new SSE stream is
+    // a native recomputation from t=0 using every accumulated disturbance, but
+    // only resumes display at this point.
+    samples = samples.filter((sample) => Number(sample.t_s) < t - 1e-9);
+    latest = samples.length ? samples[samples.length - 1] : latest;
+    kickFlash = { ...event, until: performance.now() + 650 };
+    const label = kind === "body" ? "BODY PUSH" : "WHEEL KICK";
+    $("kick-readout").textContent =
+      `${label} ${delta >= 0 ? "+" : ""}${number(delta, 2)} rad/s @ ${number(t, 3)} s`;
+    updateDisturbanceStatus();
+    setGate("RUNNING", "Disturbance accepted; recomputing the native closed-loop trajectory from the same history.");
+    drawScene();
+    drawHistory();
+    launchStream(t);
   }
 
   runButton.addEventListener("click", startRun);
@@ -310,11 +443,16 @@
     setGate("BLOCKED", "Stopped before completing the 10 s simulation gate.");
     stopRun();
   });
+  bodyLeft.addEventListener("click", () => injectDisturbance("body", -Number(bodyStrength.value)));
+  bodyRight.addEventListener("click", () => injectDisturbance("body", Number(bodyStrength.value)));
+  wheelMinus.addEventListener("click", () => injectDisturbance("wheel", -Number(wheelStrength.value)));
+  wheelPlus.addEventListener("click", () => injectDisturbance("wheel", Number(wheelStrength.value)));
   window.addEventListener("resize", () => {
     drawScene();
     drawHistory();
   });
 
+  updateDisturbanceStatus();
   drawScene();
   drawHistory();
 })();
