@@ -38,6 +38,16 @@ jobs:
           test -s /tmp/triwhirl-balance-demo.csv
           head -n 3 /tmp/triwhirl-balance-demo.csv
           tail -n 3 /tmp/triwhirl-balance-demo.csv
+      - name: Gate full swing-up from rest
+        run: |
+          /tmp/triwhirl-sitl-build/triwhirl-standup-sitl-full \
+            --profile nominal \
+            --duration-ms 12000 \
+            --require-standup-gate \
+            --output /tmp/triwhirl-full-standup.csv
+          test -s /tmp/triwhirl-full-standup.csv
+          head -n 3 /tmp/triwhirl-full-standup.csv
+          tail -n 3 /tmp/triwhirl-full-standup.csv
       - name: Gate deterministic disturbance recovery
         run: |
           /tmp/triwhirl-sitl-build/triwhirl-standup-sitl-disturbance \
