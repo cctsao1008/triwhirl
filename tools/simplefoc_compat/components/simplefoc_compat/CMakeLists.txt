@@ -5,7 +5,10 @@ if(NOT EXISTS "${SIMPLEFOC_ROOT}/src/SimpleFOC.h")
         "SimpleFOC submodule is missing. Run: git submodule update --init --recursive")
 endif()
 
-file(GLOB_RECURSE SIMPLEFOC_SOURCES CONFIGURE_DEPENDS
+# IDF evaluates component requirements in CMake script mode before normal
+# configure. CONFIGURE_DEPENDS is not valid in that pass, so use a plain glob
+# for this isolated compatibility target.
+file(GLOB_RECURSE SIMPLEFOC_SOURCES
     "${SIMPLEFOC_ROOT}/src/*.cpp"
 )
 
