@@ -36,6 +36,14 @@ jobs:
             components/triwhirl_core/balance_controller.cpp \
             -o /tmp/balance-controller-test
           /tmp/balance-controller-test
+      - name: "test: pure-fuzzy motor velocity contract"
+        run: |
+          g++ -std=c++17 \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/fuzzy_velocity_controller_test.cpp \
+            components/triwhirl_core/fuzzy_velocity_controller.cpp \
+            -o /tmp/fuzzy-velocity-controller-test
+          /tmp/fuzzy-velocity-controller-test
       - name: "test: vendor-aligned standup controller"
         run: |
           g++ -std=c++17 \
