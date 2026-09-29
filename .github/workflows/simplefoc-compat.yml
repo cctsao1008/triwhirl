@@ -1,0 +1,38 @@
+name: SimpleFOC compatibility
+
+on:
+  push:
+    branches:
+      - simplefoc-restoration
+    paths:
+      - '.github/workflows/simplefoc-compat.yml'
+      - '.gitmodules'
+      - 'tools/simplefoc_compat/**'
+      - 'third_party/Arduino-FOC'
+  pull_request:
+    paths:
+      - '.github/workflows/simplefoc-compat.yml'
+      - '.gitmodules'
+      - 'tools/simplefoc_compat/**'
+      - 'third_party/Arduino-FOC'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify pinned SimpleFOC revision
+        shell: bash
+        run: |
+          test -f third_party/Arduino-FOC/src/SimpleFOC.h
+          test "$(git -C third_party/Arduino-FOC rev-parse HEAD)" = "4f072b365f6e0185adca544071e595834405babc"
+
+      - name: Build IDF 6.1 + Arduino-ESP32 4.0.0-rc1 + SimpleFOC 2.4.0 probe
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.1
+          target: esp32
+          path: tools/simplefoc_compat
