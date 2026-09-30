@@ -1,0 +1,37 @@
+name: SimpleFOC compatibility
+
+on:
+  push:
+    branches:
+      - simplefoc-restoration
+    paths:
+      - '.github/workflows/simplefoc-compat.yml'
+      - 'tools/simplefoc_compat/**'
+  pull_request:
+    paths:
+      - '.github/workflows/simplefoc-compat.yml'
+      - 'tools/simplefoc_compat/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned pioarduino core
+        shell: bash
+        run: |
+          python3 -m venv "$HOME/.platformio/penv"
+          "$HOME/.platformio/penv/bin/python" -m pip install --upgrade pip
+          "$HOME/.platformio/penv/bin/python" -m pip install \
+            "pioarduino==6.2.0" \
+            "uv"
+          "$HOME/.platformio/penv/bin/pio" --version
+
+      - name: Build Arduino-ESP32 4.0.0-RC1 / IDF 6.1 / SimpleFOC 2.4.0 probe
+        shell: bash
+        run: |
+          export PATH="$HOME/.platformio/penv/bin:$PATH"
+          export UV_CACHE_DIR="${RUNNER_TEMP}/pioarduino-uv-cache"
+          mkdir -p "$UV_CACHE_DIR"
+          pio run -d tools/simplefoc_compat
