@@ -4,50 +4,49 @@
 
 namespace {
 
-// Source-aligned TRC-V1.1 motor/sensor topology. This target is compile-only:
-// CI never flashes or executes it on hardware.
+// Compile-only placeholders. This target is never flashed and these values are
+// not hardware authority for TriWhirl. Real board/motor parameters must come
+// from schematic/datasheet evidence or independent measurement.
+constexpr int kProbePolePairs = 1;
+constexpr int kProbePwmA = 2;
+constexpr int kProbePwmB = 4;
+constexpr int kProbePwmC = 16;
+constexpr int kProbeSda = 21;
+constexpr int kProbeScl = 22;
+constexpr float kProbeSupplyV = 5.0F;
+
 TwoWire encoder_bus(1);
 MagneticSensorI2C sensor(AS5600_I2C);
-BLDCMotor motor(7);
-BLDCDriver3PWM driver(33, 25, 32);
+BLDCMotor motor(kProbePolePairs);
+BLDCDriver3PWM driver(kProbePwmA, kProbePwmB, kProbePwmC);
 
-void exerciseSourceAlignedApi() {
-  // AS5600 stays inside the SimpleFOC sensor path.
-  encoder_bus.begin(23, 5, 400000);
+void exerciseLatestStableSimpleFocApi() {
+  // AS5600 and shaft-velocity estimation belong to SimpleFOC.
+  encoder_bus.begin(kProbeSda, kProbeScl, 400000);
   sensor.init(&encoder_bus);
   motor.linkSensor(&sensor);
 
-  // Preserve the proven vendor phase order and basic electrical limits.
-  driver.voltage_power_supply = 8.3F;
+  driver.voltage_power_supply = kProbeSupplyV;
   driver.init();
   motor.linkDriver(&driver);
-  motor.voltage_sensor_align = 3.0F;
-  motor.voltage_limit = 4.0F;
-  motor.velocity_limit = 140.0F;
-  motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
 
-  // Vendor-aligned SimpleFOC velocity-loop commissioning profile.
-  motor.PID_velocity.P = 0.035F;
-  motor.PID_velocity.I = 0.8F;
-  motor.LPF_velocity.Tf = 0.01F;
-
-  // Prove both command interfaces needed by the corrected full-fuzzy design.
+  // The system-level controller always commands wheel target velocity.
+  // Torque/current/voltage realization remains internal to SimpleFOC.
   motor.torque_controller = TorqueControlType::voltage;
-  motor.controller = MotionControlType::torque;
+  motor.controller = MotionControlType::velocity;
 
   motor.init();
   motor.initFOC();
   motor.loopFOC();
-  motor.move(0.0F);  // swing path: voltage command in torque/voltage mode
 
   const float wheel_rate_rad_s = motor.shaftVelocity();
-  motor.controller = MotionControlType::velocity;
-  motor.move(wheel_rate_rad_s);  // balance path: rad/s target velocity
+  const float target_velocity_rad_s = wheel_rate_rad_s;
+  motor.move(target_velocity_rad_s);
 }
 
 }  // namespace
 
 extern "C" void app_main(void) {
   initArduino();
-  exerciseSourceAlignedApi();
+  exerciseLatestStableSimpleFocApi();
 }
