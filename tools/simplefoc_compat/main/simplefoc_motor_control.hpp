@@ -59,6 +59,7 @@ class SimpleFocMotorControlBackend {
 
   bool initialized_ = false;
   bool command_enabled_ = false;
+  bool motor_enabled_ = false;
   float target_velocity_rad_s_ = 0.0F;
   MotorControlObservation observation_{};
 };
