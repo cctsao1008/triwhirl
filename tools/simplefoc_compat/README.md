@@ -19,7 +19,21 @@ As of 2026-10-01, **SimpleFOC v2.4.0 is the latest stable release** and Arduino-
 
 A green build proves API/toolchain compatibility only. It does not prove motor behavior, tuning, or hardware readiness.
 
-SimpleFOC v2.4.0 explicitly documents Arduino-ESP32 3.x compatibility. Therefore Arduino-ESP32 4.x / ESP-IDF 6.1 remains an intentional compatibility experiment. We will not downgrade SimpleFOC to recover compatibility; any necessary adaptation belongs in the Arduino/pioarduino integration layer or a narrow TriWhirl compatibility shim.
+SimpleFOC v2.4.0 explicitly documents Arduino-ESP32 3.x compatibility. Therefore Arduino-ESP32 4.x / ESP-IDF 6.1 remains an intentional compatibility experiment. We will not downgrade SimpleFOC to recover compatibility.
+
+## ESP32 PWM backend on IDF 6.1
+
+The first Route-B compile reached SimpleFOC itself and exposed a real v2.4.0 / IDF-6 incompatibility in the default ESP32 MCPWM current-sense backend. SimpleFOC v2.4.0 carries a copy of ESP-IDF 5.1.4 private MCPWM structures; ESP-IDF 6.1 changed that private ABI and replaced the old `SOC_MCPWM_*_PER_GROUP` resource-count macros with the new MCPWM LL interface.
+
+TriWhirl will not copy or locally redefine Espressif private MCPWM structures just to make the build pass. The Route-B integration therefore selects SimpleFOC's own supported ESP32 LEDC backend with:
+
+```text
+SIMPLEFOC_ESP32_USELEDC
+```
+
+This keeps the library unmodified and keeps motor velocity control, FOC and PWM under SimpleFOC ownership. The MCPWM backend may be revisited when SimpleFOC gains upstream ESP-IDF-6 support or when a separately reviewed compatibility layer is justified.
+
+This decision does **not** establish that LEDC is already commissioned for the hardware. PWM frequency, duty behavior and motor-loop performance remain measurement gates before balancing trials.
 
 ## Dependency policy
 
@@ -52,7 +66,7 @@ No vendor PI/LPF gains, swing behavior, capture logic, sign convention, or motor
 
 ## Local build
 
-Install the pioarduino-compatible PlatformIO core using the pioarduino installer, then run:
+Install a pioarduino-compatible PlatformIO core, then run:
 
 ```bash
 pio run -d tools/simplefoc_compat
@@ -73,6 +87,7 @@ Before any balancing hardware trial, independently characterize:
 - safe supply/motor voltage and current limits;
 - safe wheel-speed envelope;
 - SimpleFOC velocity-loop step response, bandwidth, overshoot, and saturation;
-- velocity-estimator noise and latency.
+- velocity-estimator noise and latency;
+- selected PWM-backend frequency/resolution and duty-update behavior.
 
 The full-fuzzy attitude controller will consume `shaftVelocity()` and emit only bounded `target_velocity` in rad/s. The motor velocity servo, FOC, and PWM remain SimpleFOC responsibilities.
