@@ -1,4 +1,0 @@
-# Arduino-ESP32 as an ESP-IDF component requires a 1 kHz FreeRTOS tick.
-CONFIG_FREERTOS_HZ=1000
-
-# Compatibility spike only; no runtime authority is granted by this build.
