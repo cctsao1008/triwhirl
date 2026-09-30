@@ -18,22 +18,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pioarduino-compatible PlatformIO core
+      - name: Install pinned pioarduino core
         shell: bash
         run: |
-          curl -fsSL -o /tmp/get-platformio.py \
-            https://raw.githubusercontent.com/pioarduino/pioarduino-core-installer/pioarduino/get-platformio.py
-          python3 /tmp/get-platformio.py
+          python3 -m venv "$HOME/.platformio/penv"
+          "$HOME/.platformio/penv/bin/python" -m pip install --upgrade pip
+          "$HOME/.platformio/penv/bin/python" -m pip install \
+            "pioarduino==6.2.0" \
+            "uv"
           "$HOME/.platformio/penv/bin/pio" --version
 
       - name: Build Arduino-ESP32 4.0.0-RC1 / IDF 6.1 / SimpleFOC 2.4.0 probe
         shell: bash
         run: |
-          # pioarduino's installer currently places the uv executable at
-          # ~/.platformio/.cache/uv.  uv also tries to use $XDG_CACHE_HOME/uv
-          # as its cache directory during subsequent package installation,
-          # which collides with that file on a fresh GitHub runner.  Keep the
-          # executable where the installer expects it and redirect uv's cache.
+          export PATH="$HOME/.platformio/penv/bin:$PATH"
           export UV_CACHE_DIR="${RUNNER_TEMP}/pioarduino-uv-cache"
           mkdir -p "$UV_CACHE_DIR"
-          "$HOME/.platformio/penv/bin/pio" run -d tools/simplefoc_compat
+          pio run -d tools/simplefoc_compat
