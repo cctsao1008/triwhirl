@@ -29,4 +29,11 @@ jobs:
       - name: Build Arduino-ESP32 4.0.0-RC1 / IDF 6.1 / SimpleFOC 2.4.0 probe
         shell: bash
         run: |
+          # pioarduino's installer currently places the uv executable at
+          # ~/.platformio/.cache/uv.  uv also tries to use $XDG_CACHE_HOME/uv
+          # as its cache directory during subsequent package installation,
+          # which collides with that file on a fresh GitHub runner.  Keep the
+          # executable where the installer expects it and redirect uv's cache.
+          export UV_CACHE_DIR="${RUNNER_TEMP}/pioarduino-uv-cache"
+          mkdir -p "$UV_CACHE_DIR"
           "$HOME/.platformio/penv/bin/pio" run -d tools/simplefoc_compat
