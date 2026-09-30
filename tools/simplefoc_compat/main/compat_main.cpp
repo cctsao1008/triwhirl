@@ -30,7 +30,7 @@ void exerciseLatestStableSimpleFocApi() {
   driver.init();
   motor.linkDriver(&driver);
 
-  // The system-level controller always commands wheel target velocity.
+  // The system-level full-fuzzy controller will command wheel target velocity.
   // Torque/current/voltage realization remains internal to SimpleFOC.
   motor.torque_controller = TorqueControlType::voltage;
   motor.controller = MotionControlType::velocity;
@@ -46,7 +46,10 @@ void exerciseLatestStableSimpleFocApi() {
 
 }  // namespace
 
-extern "C" void app_main(void) {
-  initArduino();
+void setup() {
   exerciseLatestStableSimpleFocApi();
+}
+
+void loop() {
+  // Compile/link probe only. Runtime behavior is deliberately out of scope.
 }
