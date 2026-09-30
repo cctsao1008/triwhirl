@@ -53,7 +53,11 @@ read cached shaft_velocity      <-----  publish latest snapshot
 
 The probe backend separates command/snapshot operations from `serviceBackend()`. The former only touch cached scalar state. The latter is where SimpleFOC calls and AS5600 access occur. This separation is intentional: the production attitude loop must not acquire a synchronous I2C dependency simply because SimpleFOC owns the encoder.
 
-The exact production motor-task core, service frequency, synchronization primitive and scheduling policy are not established by this compile probe.
+`stop()` is a non-blocking **disable request**, not a zero-speed hold. The probe motor domain applies that request with `motor.disable()` on its next service cycle; a later velocity command re-enables the motor in that same backend domain. This gives the interface the correct de-energized stop semantics without making the attitude task call SimpleFOC directly.
+
+That asynchronous stop path is **not yet a hard-safety guarantee**. Production work must bound motor-service latency and decide whether safety faults also require a lower-level driver-enable or hardware interlock that is independent of the normal command mailbox.
+
+The probe backend itself is not presented as a cross-core synchronization implementation. The exact production motor-task core, service frequency, coherent command/snapshot primitive, scheduling policy, stop latency, and hard-safety path are not established by this compile probe.
 
 ## Dependency policy
 
@@ -77,7 +81,7 @@ Inside the SimpleFOC backend, the probe still compiles and links the architectur
 - `BLDCMotor(...)`;
 - `BLDCDriver3PWM(...)`;
 - `MotionControlType::velocity`;
-- `motor.init()` / `motor.initFOC()` / `motor.loopFOC()`;
+- `motor.init()` / `motor.initFOC()` / `motor.enable()` / `motor.disable()` / `motor.loopFOC()`;
 - `motor.move(target_velocity)`.
 
 The probe application itself interacts through `MotorControl::commandTargetVelocityRadS()`, `MotorControl::observation()`, `MotorControl::stop()`, and the motor-domain `MotorControl::serviceBackend()` hook.
@@ -111,6 +115,7 @@ Before any balancing hardware trial, independently characterize:
 - SimpleFOC velocity-loop step response, bandwidth, overshoot, and saturation;
 - velocity-estimator noise and latency;
 - selected PWM-backend frequency/resolution and duty-update behavior;
-- motor-domain execution time, jitter, and interaction with the 1 kHz attitude loop.
+- motor-domain execution time, jitter, and interaction with the 1 kHz attitude loop;
+- commanded-stop to de-energized latency and the independent hard-safety shutdown path.
 
 The full-fuzzy attitude controller will consume the published shaft-velocity snapshot and emit only bounded `target_velocity` in rad/s. The motor velocity servo, FOC, PWM, and AS5600 path remain SimpleFOC responsibilities.
