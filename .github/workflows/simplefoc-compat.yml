@@ -2,14 +2,14 @@ name: SimpleFOC compatibility
 
 on:
   push:
-    branches:
-      - simplefoc-restoration
     paths:
       - '.github/workflows/simplefoc-compat.yml'
+      - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
       - 'tools/simplefoc_compat/**'
   pull_request:
     paths:
       - '.github/workflows/simplefoc-compat.yml'
+      - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
       - 'tools/simplefoc_compat/**'
 
 jobs:

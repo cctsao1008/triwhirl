@@ -1,0 +1,27 @@
+name: MotorControl contract
+
+on:
+  push:
+    paths:
+      - '.github/workflows/motor-control-contract.yml'
+      - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
+      - 'tools/tests/motor_control_adapter_test.cpp'
+  pull_request:
+    paths:
+      - '.github/workflows/motor-control-contract.yml'
+      - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
+      - 'tools/tests/motor_control_adapter_test.cpp'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run MotorControl boundary test
+        shell: bash
+        run: |
+          g++ -std=c++17 \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/motor_control_adapter_test.cpp \
+            -o /tmp/motor-control-adapter-test
+          /tmp/motor-control-adapter-test

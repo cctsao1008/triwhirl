@@ -2,6 +2,9 @@
 #include <SimpleFOC.h>
 #include <Wire.h>
 
+#include "simplefoc_motor_control.hpp"
+#include "triwhirl/motor_control.hpp"
+
 namespace {
 
 // Compile-only placeholders. This target is never flashed and these values are
@@ -13,43 +16,48 @@ constexpr int kProbePwmB = 4;
 constexpr int kProbePwmC = 16;
 constexpr int kProbeSda = 21;
 constexpr int kProbeScl = 22;
+constexpr unsigned long kProbeI2cHz = 400000UL;
 constexpr float kProbeSupplyV = 5.0F;
+constexpr float kProbeTargetVelocityLimitRadS = 80.0F;
 
 TwoWire encoder_bus(1);
 MagneticSensorI2C sensor(AS5600_I2C);
 BLDCMotor motor(kProbePolePairs);
 BLDCDriver3PWM driver(kProbePwmA, kProbePwmB, kProbePwmC);
 
-void exerciseLatestStableSimpleFocApi() {
-  // AS5600 and shaft-velocity estimation belong to SimpleFOC.
-  encoder_bus.begin(kProbeSda, kProbeScl, 400000);
-  sensor.init(&encoder_bus);
-  motor.linkSensor(&sensor);
+triwhirl::simplefoc_compat::SimpleFocMotorControlBackend motor_backend(
+    encoder_bus, sensor, motor, driver, kProbeSda, kProbeScl, kProbeI2cHz,
+    kProbeSupplyV);
+triwhirl::MotorControl motor_control =
+    motor_backend.makeControl(kProbeTargetVelocityLimitRadS);
 
-  driver.voltage_power_supply = kProbeSupplyV;
-  driver.init();
-  motor.linkDriver(&driver);
+void exerciseMotorControlBoundary() {
+  if (!motor_control.begin()) {
+    return;
+  }
 
-  // The system-level full-fuzzy controller will command wheel target velocity.
-  // Torque/current/voltage realization remains internal to SimpleFOC.
-  motor.torque_controller = TorqueControlType::voltage;
-  motor.controller = MotionControlType::velocity;
+  // The future attitude task is allowed to issue only a bounded mechanical
+  // target and read a cached mechanical snapshot.  It does not touch SimpleFOC
+  // objects, AS5600, electrical angle, phase voltage, or PWM state.
+  (void)motor_control.commandTargetVelocityRadS(0.0F);
 
-  motor.init();
-  motor.initFOC();
-  motor.loopFOC();
+  // Compile-only representation of the separate motor execution domain.
+  motor_control.serviceBackend();
+  const triwhirl::MotorControlObservation observation =
+      motor_control.observation();
+  (void)observation;
 
-  const float wheel_rate_rad_s = motor.shaftVelocity();
-  const float target_velocity_rad_s = wheel_rate_rad_s;
-  motor.move(target_velocity_rad_s);
+  motor_control.stop();
+  motor_control.serviceBackend();
 }
 
 }  // namespace
 
 void setup() {
-  exerciseLatestStableSimpleFocApi();
+  exerciseMotorControlBoundary();
 }
 
 void loop() {
-  // Compile/link probe only. Runtime behavior is deliberately out of scope.
+  // Compile/link probe only. Runtime scheduling and hardware behavior are
+  // deliberately out of scope.
 }
