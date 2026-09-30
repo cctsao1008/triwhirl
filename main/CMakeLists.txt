@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "runtime_main.cpp" "runtime_state.cpp" "runtime_balance.cpp" "runtime_standup.cpp" "runtime_trace.cpp" "runtime_command_parser.cpp" "runtime_encoder_acquisition.cpp" "runtime_imu_acquisition.cpp" "runtime_sensor_pipeline.cpp" "runtime_sensor_state.cpp" "runtime_supervisor_io.cpp" "runtime_snapshot.cpp" "runtime_diagnostics.cpp" "runtime_release.cpp" "runtime_platform.cpp" "runtime_route_b_simplefoc_link_probe.cpp"
+    SRCS "runtime_main.cpp" "runtime_state.cpp" "runtime_balance.cpp" "runtime_standup.cpp" "runtime_trace.cpp" "runtime_command_parser.cpp" "runtime_encoder_acquisition.cpp" "runtime_imu_acquisition.cpp" "runtime_sensor_pipeline.cpp" "runtime_sensor_state.cpp" "runtime_supervisor_io.cpp" "runtime_snapshot.cpp" "runtime_diagnostics.cpp" "runtime_release.cpp" "runtime_platform.cpp" "runtime_route_b_simplefoc_link_probe.cpp" "runtime_motor_mailbox_compile_probe.cpp"
     INCLUDE_DIRS "."
     REQUIRES triwhirl_core triwhirl_hw triwhirl_ble triwhirl_log esp_driver_uart esp_driver_gptimer esp_driver_gpio esp_timer freertos
 )
@@ -75,6 +75,9 @@ string(SUBSTRING "${TRIWHIRL_GIT_SHA40}" 32 8 TRIWHIRL_GIT_SHA4)
 # translation units. No .cpp source inclusion or symbol-renaming composition
 # shim remains. The Route-B link-probe TU is empty in native builds unless the
 # PlatformIO spike explicitly defines TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE.
+# The mailbox compile-probe has no runtime behavior; it makes the native target
+# compiler prove the lock-free 32-bit atomic contract used by the host-tested
+# cross-domain transport.
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2)
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     TRIWHIRL_GIT_SHA0=0x${TRIWHIRL_GIT_SHA0}U
