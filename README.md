@@ -13,50 +13,149 @@
 </p>
 
 <p align="center">
-  <em>Measure first. Capture carefully. Synthesize deliberately.</em>
+  <em>Measure first. Model carefully. Control deliberately.</em>
 </p>
 
 <p align="center">
-  🔺 Geometry &nbsp;·&nbsp; 🌀 Momentum &nbsp;·&nbsp; 🧠 Control &nbsp;·&nbsp; 🔬 Validate
+  🔺 Geometry &nbsp;·&nbsp; 🌀 Momentum &nbsp;·&nbsp; 🧠 Fuzzy Control &nbsp;·&nbsp; 🔬 Validate
 </p>
 
-TriWhirl is a native ESP-IDF control and system-identification platform for a reaction-wheel-stabilized Reuleaux triangle. It keeps sensing evidence, estimated state, stand-up logic, controller intent, actuator limits, runtime authority, transport, and post-run analysis deliberately separate so that the control stack cannot claim more certainty—or more authority—than the measured hardware supports.
+TriWhirl is an ESP32 research platform for a reaction-wheel-stabilized Reuleaux triangle. The project separates physical evidence, state estimation, full-fuzzy attitude control, motor control, safety authority, transport, simulation, and post-run analysis so each layer can be validated independently.
 
 > **Curved triangle. Hard evidence. No host-assisted balance.**
 
 ---
 
-## 🧠 Architecture
+## 🧠 Target architecture
 
-The realtime path is firmware-owned from sensing through actuation:
+The research direction is now explicit:
 
-```text
-AS5600 + MPU6050
-       ↓
-SensorFrame
-       ↓
-state estimation
-       ↓
-safety / supervisor authority
-       ↓
-stand-up / balance controller
-       ↓
-bounded Vq command
-       ↓
-native MCPWM
-       ↓
-EG2133 -> BLDC -> reaction wheel
-```
-
-Engineering transports remain outside realtime control authority:
+- **all system-level attitude control is fuzzy**;
+- **SimpleFOC owns the reaction-wheel motor-control layer**;
+- **AS5600 belongs to SimpleFOC**;
+- the fuzzy controller consumes body state plus reaction-wheel velocity and emits only a wheel `target_velocity`;
+- motor velocity regulation, FOC, and PWM remain SimpleFOC responsibilities;
+- deterministic safety always overrides fuzzy intent.
 
 ```text
-                 ┌─ CH340 / UART
-runtime protocol ┤
-                 └─ NimBLE GATT -> host toolbox
+MPU6050 / attitude estimator
+        |  theta, theta_dot
+        |
+        |                  AS5600
+        |                     |
+        |                     v
+        |                 SimpleFOC
+        |              shaftVelocity()
+        |                     |
+        +----------+----------+
+                   v
+          Full-Fuzzy Attitude Control
+                   |
+                   | target_velocity [rad/s]
+                   v
+          SimpleFOC velocity control
+                   |
+             FOC / PWM / driver
+                   |
+                   v
+                  BLDC
 ```
 
-The Reuleaux-triangle upright coordinate is 120-degree periodic. The three physical vertices therefore share one local balance coordinate and one local control formulation rather than being treated as three unrelated equilibria.
+The fuzzy attitude layer owns swing-up, capture, near-upright balance, disturbance recovery, and reaction-wheel momentum management. It does **not** emit direct `Vq`, phase voltage, duty cycle, or PWM.
+
+## 🧩 Control boundary
+
+The high-level control problem is:
+
+```text
+(theta, theta_dot, wheel_velocity, derived physical state)
+                         |
+                         v
+                full-fuzzy inference
+                         |
+                         v
+              target_velocity [rad/s]
+                         |
+                         v
+                 SimpleFOC velocity
+                         |
+                         v
+                    motor torque
+```
+
+Swing-up, capture, and balance are treated as regions of one nonlinear attitude-control problem rather than preserving a legacy voltage-mode/velocity-mode split.
+
+The first implementation may use separate rule groups for engineering clarity, but the composed actuator request remains a continuous wheel-velocity target.
+
+## 🌀 Reaction-wheel momentum
+
+Wheel velocity is a control state, not merely telemetry.
+
+A controller that keeps the body visually upright while allowing wheel momentum to drift toward saturation is not considered stable enough for TriWhirl. Fuzzy rules and validation therefore include explicit momentum unloading / authority management.
+
+## ⚙️ Motor layer
+
+TriWhirl targets the **latest stable SimpleFOC release**, pinned to an explicit release/tag rather than tracking upstream `master`.
+
+As of 2026-09-30, the latest stable release is **SimpleFOC v2.4.0**.
+
+SimpleFOC owns:
+
+```text
+AS5600 sensor integration
+shaft angle / shaftVelocity()
+velocity closed loop
+motor torque/current/voltage implementation
+FOC electrical-angle handling
+PWM generation
+```
+
+`triwhirl_core` should remain independent of SimpleFOC APIs. A narrow hardware/motor adapter exposes only the wheel state and bounded target-velocity interface required by the attitude controller.
+
+## 🚫 Vendor-source independence
+
+The supplied vendor control program is archival material only. It is not a design, tuning, parity, or validation authority.
+
+TriWhirl does not use vendor source code as the source of truth for:
+
+- control-law structure or gains;
+- swing-up behavior;
+- capture thresholds;
+- SimpleFOC PI/LPF tuning;
+- sensor sign convention;
+- motor limits;
+- expected dynamic behavior;
+- golden traces or pass/fail criteria.
+
+Hardware facts must be supported by schematic evidence, component datasheets, mechanical characterization, or our own bench measurements. Unknown values remain explicit unknowns until measured.
+
+## 🛡️ Safety authority
+
+Safety remains deterministic and outside fuzzy inference.
+
+```text
+fuzzy controller intent
+        |
+        v
+hard limits / validity / fault policy
+        |
+        v
+authorized target_velocity
+        |
+        v
+SimpleFOC motor layer
+```
+
+Examples include:
+
+- stale or invalid sensor data;
+- hard wheel-speed limits;
+- numerical sanity checks;
+- motor / FOC faults;
+- emergency disable;
+- unrecoverable-fall handling.
+
+UART, BLE, Python, plotting, and browser/host state never own realtime motor authority.
 
 ## 🧰 Firmware shape
 
@@ -64,221 +163,113 @@ The Reuleaux-triangle upright coordinate is 120-degree periodic. The three physi
 triwhirl/
 ├── main/                       application wiring / runtime orchestration
 ├── components/
-│   ├── triwhirl_core/          estimation, geometry, control, safety math
-│   ├── triwhirl_hw/            ESP32 board / peripheral integration
-│   └── triwhirl_ble/           native ESP-IDF NimBLE transport
-├── tools/                      commissioning, logging, ID, fitting, synthesis
+│   ├── triwhirl_core/          geometry, state, fuzzy control, safety math
+│   ├── triwhirl_hw/            ESP32 board / sensor / motor integration
+│   └── triwhirl_ble/           ESP-IDF NimBLE transport
+├── tools/                      commissioning, logging, ID, fitting, SITL
 ├── docs/                       durable technical documentation
 ├── CMakeLists.txt
 ├── sdkconfig.defaults
 └── README.md
 ```
 
-`triwhirl_core` is platform-independent project logic and does not depend on Arduino, PlatformIO, SimpleFOC, or ESP32 peripheral APIs. Hardware ownership stays in `triwhirl_hw`; application composition stays in `main/`.
+Platform-independent fuzzy-control logic belongs in `triwhirl_core`. SimpleFOC integration belongs behind the hardware/motor boundary rather than leaking through control-law code.
 
-## 🎯 Control lanes
+## 🧪 SITL
 
-TriWhirl deliberately keeps the commissioning controller and the research controller conceptually separate.
-
-```text
-                    autonomous stand-up
-                           │
-                   reaction-wheel swing-up
-                           │
-                     upright capture
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-     commissioning lane          research lane
-              │                         │
-  state feedback / velocity PI     identified plant
-              │                         │
-   bounded Vq + anti-windup         H∞ synthesis
-              │                         │
-     hardware reference         guarded deployment
-```
-
-The current autonomous stand-up path uses a vendor-aligned state-feedback / velocity-PI controller as a **commissioning baseline**. It exists to validate sensor coordinates, motor sign, capture behavior, actuator authority, timing, and traceability on the real hardware. It is not a claim that LQR has replaced the research objective.
-
-The research path remains:
+Simulation uses the same command semantics as firmware:
 
 ```text
-measurement
-    ↓
-local plant identification
-    ↓
-model + uncertainty
-    ↓
-H∞ synthesis
-    ↓
-guarded near-upright deployment
-    ↓
-hardware comparison against the commissioning baseline
+body / wheel state
+       |
+       v
+full-fuzzy attitude controller
+       |
+       v
+target_velocity
+       |
+       v
+identified motor velocity-servo model
+       |
+       v
+reaction-wheel / Reuleaux plant
 ```
 
-## 🌀 Stand-up architecture
+A velocity target must never be injected into the plant as if it were `Vq`.
 
-The autonomous hardware sequence is:
+The near-upright local model remains provisional evidence. Full-swing simulation remains observational until geometry, COM, inertia, contact, and rolling-loss parameters are supported well enough to justify stronger validation authority.
+
+## 🔬 Validation
+
+TriWhirl treats captured data as evidence, not decoration.
+
+Validation is against explicit physical/control requirements rather than matching vendor behavior. Important metrics include:
 
 ```text
-SwingHigh / SwingLow
-        ↓
-   capture window
-        ↓
-      Balance
-        ↓
-state-feedback wheel-velocity target
-        ↓
-velocity PI
-        ↓
-       Vq
+peak / RMS body-angle error
+capture and settling time
+peak / RMS body rate
+peak / RMS wheel velocity
+wheel-speed saturation dwell
+target-velocity continuity
+body-disturbance recovery
+wheel-disturbance recovery
+momentum unloading effectiveness
+robustness across plant uncertainty
+long-duration upright stability
 ```
 
-The commissioning controller includes capture/release hysteresis, bounded wheel-velocity targets, bounded `Vq`, actuator slew limiting, velocity-PI reset on recapture, and conditional anti-windup. These mechanisms prevent a failed capture from silently carrying saturated integral state into the next attempt.
-
-Controller tuning remains trace-driven. Temporary gain values and experiment-specific tuning history belong in code, captures, and Issues rather than being promoted into permanent physical truth in this README.
-
-## 🛡️ Actuation authority
-
-```text
-controller intent
-      ↓
-limit / safety policy
-      ↓
-authorized Vq
-      ↓
-3-PWM electrical realization
-      ↓
-EG2133 gate driver
-      ↓
-reaction-wheel motor
-```
-
-UART, BLE, Python, plotting, and browser/host state do not grant motor authority. Transport disconnects do not own the realtime control state.
-
-Because the board ties each EG2133 active-high high-side command and active-low low-side command to one complementary MCU signal, a zero-duty command produces the board-defined low-side zero vector rather than a guaranteed high-impedance motor disconnect. Electrical semantics are therefore documented separately from abstract controller intent.
-
-## 🔬 Validation and evidence
-
-TriWhirl treats captured hardware data as evidence, not decoration.
-
-The dedicated stand-up trace records controller state and measured sample timing in firmware, then transfers the completed capture to the host for analysis. Plotting and disk I/O occur after the realtime experiment rather than inside the control path.
-
-A normal commissioning run is:
-
-```powershell
-python tools/twtool.py control standup --duration 10 --plot
-```
-
-The host produces the authoritative raw trace plus decoded analysis artifacts:
-
-```text
-.twtrace    binary stand-up evidence
-.csv        decoded samples
-.json       provenance / acceptance metadata
-.png        post-run visualization
-```
-
-Trace acceptance checks framing, CRC, sequence continuity, transport/ring drops, timing integrity, firmware provenance, and host/firmware revision agreement. The trace stores measured `dt_us`; analysis does not invent a perfect sample period after the fact.
-
-Existing runs can be replotted independently:
-
-```powershell
-python tools/twtool.py log plot-standup artifacts/standup/<capture>.twtrace
-```
+Captured timing, framing, sequence continuity, transport loss, firmware provenance, and measured sample intervals remain part of the evidence chain.
 
 ## 📏 Physical parameter gate
 
-Unknown physical values remain explicit unknowns until measured or identified. Current examples include final safe continuous/transient `Vq`, hard reaction-wheel speed limits, bus behavior under load, battery ADC transfer function, and final robust-control uncertainty bounds.
+Physical values are admitted only from supported evidence:
 
 ```text
-physical measurement / experiment
-              ↓
+schematic / datasheet / measurement
+              |
+              v
       identified evidence
-              ↓
+              |
+              v
        admissible parameter
-              ↓
+              |
+              v
       controller / safety use
 ```
 
-A convenient number from a seller sketch, simulation, or temporary tuning run does not become a TriWhirl physical fact merely because the controller happens to move.
-
-## 🧪 Identification and H∞ workflow
-
-Host-side engineering tools support actuator, body, and swing identification without moving realtime control authority off the ESP32.
-
-```text
-hardware experiment
-      ↓
-firmware-owned synchronized capture
-      ↓
-host decode / inspect
-      ↓
-plant fitting
-      ↓
-uncertainty characterization
-      ↓
-H∞ synthesis
-      ↓
-firmware coefficients / guarded trial
-```
-
-The ESP32 runtime does not depend on Python or an online convex solver. Identification, fitting, and controller synthesis are offline engineering operations whose outputs are consumed by deterministic firmware.
+Examples that require independent establishment include motor pole pairs, phase order, encoder direction, safe wheel-speed range, supply behavior, motor electrical limits, COM location, inertia, and rolling loss.
 
 ## 🧰 Host toolbox
 
-`twtool` is the canonical host entry point:
+`twtool` remains the canonical host entry point for logging, inspection, experiments, fitting, and evidence handling:
 
 ```powershell
 python tools/twtool.py --help
 python tools/twtool.py --list
 ```
 
-Current command groups:
+Host tools support engineering work but never close the realtime balance loop.
+
+## 🔧 Build and motor-layer migration
+
+The current repository is migrating from the existing native motor path to the latest-stable SimpleFOC ownership model tracked by Issue #39.
+
+The compatibility work currently probes:
 
 ```text
-log      firmware logging, download, decode, inspection, plotting
-control  autonomous stand-up and guarded balance deployment
-id       actuator / body / swing identification experiments
-fit      model fitting from measured data
+ESP-IDF 6.1
++ Arduino-ESP32 integration
++ SimpleFOC v2.4.0
 ```
 
-Examples:
+Toolchain compatibility is not hardware validation. If the current Arduino/ESP-IDF combination is incompatible, the integration stack may change while SimpleFOC remains on the latest stable release target.
 
-```powershell
-python tools/twtool.py control standup --duration 10 --plot
-python tools/twtool.py id swing --probes 12 -o artifacts/auto-swing-id-01.csv
-python tools/twtool.py log inspect artifacts/run-01.twlog
-```
-
-See [`tools/README.md`](tools/README.md) for the complete host workflow.
-
-## 🔧 Build
-
-TriWhirl uses the official Espressif toolchain directly:
-
-```text
-ESP-IDF      v6.1
-target       ESP-WROOM-32 / classic ESP32
-runtime      native ESP-IDF C/C++ + CMake
-```
-
-Build:
-
-```bash
-idf.py build
-```
-
-Flash the currently verified Windows setup:
-
-```bash
-idf.py -p COM28 flash
-```
-
-The board uses a CH340 USB/UART path and requires manual ESP32 ROM download-mode entry on the verified hardware. See [`docs/development.md`](docs/development.md) for the exact procedure.
+No standup hardware trial is authorized merely because the compatibility project builds.
 
 ## 📚 Documentation
 
+- [Full-fuzzy control boundary](docs/full-fuzzy-control.md)
 - [Architecture](docs/architecture.md)
 - [Hardware](docs/hardware.md)
 - [Development](docs/development.md)
@@ -286,11 +277,11 @@ The board uses a CH340 USB/UART path and requires manual ESP32 ROM download-mode
 - [Host tools](tools/README.md)
 - [Parameter identification](tools/parameter_id/README.md)
 
-## 📚 Documentation principle
+## Documentation principle
 
 > **README explains the system. Issues explain the journey. Code proves the current state.**
 
-README and durable documentation explain architecture, control boundaries, runtime authority, hardware semantics, validation interpretation, and research workflow. GitHub Issues preserve experiments, tuning, temporary constraints, implementation steps, and closure records. Code, configuration, captured evidence, and tests remain the authoritative proof of executable behavior.
+Durable documentation describes architecture, control boundaries, runtime authority, hardware semantics, and validation interpretation. GitHub Issues preserve experiments, temporary constraints, migration work, and closure records. Code, configuration, captured evidence, and tests remain the authoritative proof of executable behavior.
 
 ## License
 
