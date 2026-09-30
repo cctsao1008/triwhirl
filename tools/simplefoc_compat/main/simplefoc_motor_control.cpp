@@ -55,8 +55,13 @@ bool SimpleFocMotorControlBackend::beginImpl() {
   motor_.init();
   motor_.initFOC();
 
+  // Start the adapter in the de-energized command state.  SimpleFOC calls stay
+  // in the motor domain; the attitude-facing stop() callback only requests this
+  // state and never performs driver work itself.
+  motor_.disable();
   initialized_ = true;
   command_enabled_ = false;
+  motor_enabled_ = false;
   target_velocity_rad_s_ = 0.0F;
   observation_ = {};
   observation_.initialized = true;
@@ -71,9 +76,22 @@ void SimpleFocMotorControlBackend::serviceBackendImpl() {
   // This is the only adapter operation that enters SimpleFOC.  In the future
   // production runtime it belongs to the motor execution domain, not the
   // attitude-control task.
-  motor_.loopFOC();
-  motor_.move(command_enabled_ ? target_velocity_rad_s_ : 0.0F);
+  if (!command_enabled_) {
+    if (motor_enabled_) {
+      motor_.disable();
+      motor_enabled_ = false;
+    }
+  } else {
+    if (!motor_enabled_) {
+      motor_.enable();
+      motor_enabled_ = true;
+    }
+    motor_.loopFOC();
+    motor_.move(target_velocity_rad_s_);
+  }
 
+  // Shaft observation remains available while the actuator is disabled.  Any
+  // AS5600 access performed here is still confined to the motor domain.
   const float shaft_velocity_rad_s = motor_.shaftVelocity();
   const bool velocity_valid = std::isfinite(shaft_velocity_rad_s);
 
@@ -99,7 +117,8 @@ bool SimpleFocMotorControlBackend::commandTargetVelocityImpl(
 
 void SimpleFocMotorControlBackend::stopImpl() {
   // Do not call SimpleFOC here.  The command side is deliberately a cached,
-  // non-blocking operation; the motor domain applies zero on its next service.
+  // non-blocking request.  The motor domain de-energizes the actuator on its
+  // next service cycle rather than interpreting stop as a zero-speed hold.
   target_velocity_rad_s_ = 0.0F;
   command_enabled_ = false;
 }
