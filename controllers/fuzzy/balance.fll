@@ -1,0 +1,181 @@
+Engine: TriWhirlBalanceReference
+description: Structural normalized upright-balance parity baseline; not validated for closed-loop stability
+InputVariable: theta_error
+  enabled: true
+  range: -1.000000000 1.000000000
+  lock-range: true
+  term: NL Trapezoid -1.000000000 -1.000000000 -1.000000000 -0.500000000
+  term: NS Triangle -1.000000000 -0.500000000 0.000000000
+  term: ZE Triangle -0.500000000 0.000000000 0.500000000
+  term: PS Triangle 0.000000000 0.500000000 1.000000000
+  term: PL Trapezoid 0.500000000 1.000000000 1.000000000 1.000000000
+InputVariable: theta_dot
+  enabled: true
+  range: -1.000000000 1.000000000
+  lock-range: true
+  term: NL Trapezoid -1.000000000 -1.000000000 -1.000000000 -0.500000000
+  term: NS Triangle -1.000000000 -0.500000000 0.000000000
+  term: ZE Triangle -0.500000000 0.000000000 0.500000000
+  term: PS Triangle 0.000000000 0.500000000 1.000000000
+  term: PL Trapezoid 0.500000000 1.000000000 1.000000000 1.000000000
+InputVariable: wheel_velocity
+  enabled: true
+  range: -1.000000000 1.000000000
+  lock-range: true
+  term: NL Trapezoid -1.000000000 -1.000000000 -1.000000000 -0.500000000
+  term: NS Triangle -1.000000000 -0.500000000 0.000000000
+  term: ZE Triangle -0.500000000 0.000000000 0.500000000
+  term: PS Triangle 0.000000000 0.500000000 1.000000000
+  term: PL Trapezoid 0.500000000 1.000000000 1.000000000 1.000000000
+OutputVariable: target_velocity
+  enabled: true
+  range: -1.000000000 1.000000000
+  lock-range: true
+  aggregation: none
+  defuzzifier: WeightedAverage TakagiSugeno
+  default: nan
+  lock-previous: false
+  term: N6 Constant -1.000000000
+  term: N5 Constant -0.833333333
+  term: N4 Constant -0.666666667
+  term: N3 Constant -0.500000000
+  term: N2 Constant -0.333333333
+  term: N1 Constant -0.166666667
+  term: Z Constant 0.000000000
+  term: P1 Constant 0.166666667
+  term: P2 Constant 0.333333333
+  term: P3 Constant 0.500000000
+  term: P4 Constant 0.666666667
+  term: P5 Constant 0.833333333
+  term: P6 Constant 1.000000000
+RuleBlock: balance
+  enabled: true
+  conjunction: AlgebraicProduct
+  disjunction: none
+  implication: none
+  activation: General
+  rule: if theta_error is NL and theta_dot is NL and wheel_velocity is NL then target_velocity is P6
+  rule: if theta_error is NL and theta_dot is NL and wheel_velocity is NS then target_velocity is P5
+  rule: if theta_error is NL and theta_dot is NL and wheel_velocity is ZE then target_velocity is P4
+  rule: if theta_error is NL and theta_dot is NL and wheel_velocity is PS then target_velocity is P3
+  rule: if theta_error is NL and theta_dot is NL and wheel_velocity is PL then target_velocity is P2
+  rule: if theta_error is NL and theta_dot is NS and wheel_velocity is NL then target_velocity is P5
+  rule: if theta_error is NL and theta_dot is NS and wheel_velocity is NS then target_velocity is P4
+  rule: if theta_error is NL and theta_dot is NS and wheel_velocity is ZE then target_velocity is P3
+  rule: if theta_error is NL and theta_dot is NS and wheel_velocity is PS then target_velocity is P2
+  rule: if theta_error is NL and theta_dot is NS and wheel_velocity is PL then target_velocity is P1
+  rule: if theta_error is NL and theta_dot is ZE and wheel_velocity is NL then target_velocity is P4
+  rule: if theta_error is NL and theta_dot is ZE and wheel_velocity is NS then target_velocity is P3
+  rule: if theta_error is NL and theta_dot is ZE and wheel_velocity is ZE then target_velocity is P2
+  rule: if theta_error is NL and theta_dot is ZE and wheel_velocity is PS then target_velocity is P1
+  rule: if theta_error is NL and theta_dot is ZE and wheel_velocity is PL then target_velocity is Z
+  rule: if theta_error is NL and theta_dot is PS and wheel_velocity is NL then target_velocity is P3
+  rule: if theta_error is NL and theta_dot is PS and wheel_velocity is NS then target_velocity is P2
+  rule: if theta_error is NL and theta_dot is PS and wheel_velocity is ZE then target_velocity is P1
+  rule: if theta_error is NL and theta_dot is PS and wheel_velocity is PS then target_velocity is Z
+  rule: if theta_error is NL and theta_dot is PS and wheel_velocity is PL then target_velocity is N1
+  rule: if theta_error is NL and theta_dot is PL and wheel_velocity is NL then target_velocity is P2
+  rule: if theta_error is NL and theta_dot is PL and wheel_velocity is NS then target_velocity is P1
+  rule: if theta_error is NL and theta_dot is PL and wheel_velocity is ZE then target_velocity is Z
+  rule: if theta_error is NL and theta_dot is PL and wheel_velocity is PS then target_velocity is N1
+  rule: if theta_error is NL and theta_dot is PL and wheel_velocity is PL then target_velocity is N2
+  rule: if theta_error is NS and theta_dot is NL and wheel_velocity is NL then target_velocity is P5
+  rule: if theta_error is NS and theta_dot is NL and wheel_velocity is NS then target_velocity is P4
+  rule: if theta_error is NS and theta_dot is NL and wheel_velocity is ZE then target_velocity is P3
+  rule: if theta_error is NS and theta_dot is NL and wheel_velocity is PS then target_velocity is P2
+  rule: if theta_error is NS and theta_dot is NL and wheel_velocity is PL then target_velocity is P1
+  rule: if theta_error is NS and theta_dot is NS and wheel_velocity is NL then target_velocity is P4
+  rule: if theta_error is NS and theta_dot is NS and wheel_velocity is NS then target_velocity is P3
+  rule: if theta_error is NS and theta_dot is NS and wheel_velocity is ZE then target_velocity is P2
+  rule: if theta_error is NS and theta_dot is NS and wheel_velocity is PS then target_velocity is P1
+  rule: if theta_error is NS and theta_dot is NS and wheel_velocity is PL then target_velocity is Z
+  rule: if theta_error is NS and theta_dot is ZE and wheel_velocity is NL then target_velocity is P3
+  rule: if theta_error is NS and theta_dot is ZE and wheel_velocity is NS then target_velocity is P2
+  rule: if theta_error is NS and theta_dot is ZE and wheel_velocity is ZE then target_velocity is P1
+  rule: if theta_error is NS and theta_dot is ZE and wheel_velocity is PS then target_velocity is Z
+  rule: if theta_error is NS and theta_dot is ZE and wheel_velocity is PL then target_velocity is N1
+  rule: if theta_error is NS and theta_dot is PS and wheel_velocity is NL then target_velocity is P2
+  rule: if theta_error is NS and theta_dot is PS and wheel_velocity is NS then target_velocity is P1
+  rule: if theta_error is NS and theta_dot is PS and wheel_velocity is ZE then target_velocity is Z
+  rule: if theta_error is NS and theta_dot is PS and wheel_velocity is PS then target_velocity is N1
+  rule: if theta_error is NS and theta_dot is PS and wheel_velocity is PL then target_velocity is N2
+  rule: if theta_error is NS and theta_dot is PL and wheel_velocity is NL then target_velocity is P1
+  rule: if theta_error is NS and theta_dot is PL and wheel_velocity is NS then target_velocity is Z
+  rule: if theta_error is NS and theta_dot is PL and wheel_velocity is ZE then target_velocity is N1
+  rule: if theta_error is NS and theta_dot is PL and wheel_velocity is PS then target_velocity is N2
+  rule: if theta_error is NS and theta_dot is PL and wheel_velocity is PL then target_velocity is N3
+  rule: if theta_error is ZE and theta_dot is NL and wheel_velocity is NL then target_velocity is P4
+  rule: if theta_error is ZE and theta_dot is NL and wheel_velocity is NS then target_velocity is P3
+  rule: if theta_error is ZE and theta_dot is NL and wheel_velocity is ZE then target_velocity is P2
+  rule: if theta_error is ZE and theta_dot is NL and wheel_velocity is PS then target_velocity is P1
+  rule: if theta_error is ZE and theta_dot is NL and wheel_velocity is PL then target_velocity is Z
+  rule: if theta_error is ZE and theta_dot is NS and wheel_velocity is NL then target_velocity is P3
+  rule: if theta_error is ZE and theta_dot is NS and wheel_velocity is NS then target_velocity is P2
+  rule: if theta_error is ZE and theta_dot is NS and wheel_velocity is ZE then target_velocity is P1
+  rule: if theta_error is ZE and theta_dot is NS and wheel_velocity is PS then target_velocity is Z
+  rule: if theta_error is ZE and theta_dot is NS and wheel_velocity is PL then target_velocity is N1
+  rule: if theta_error is ZE and theta_dot is ZE and wheel_velocity is NL then target_velocity is P2
+  rule: if theta_error is ZE and theta_dot is ZE and wheel_velocity is NS then target_velocity is P1
+  rule: if theta_error is ZE and theta_dot is ZE and wheel_velocity is ZE then target_velocity is Z
+  rule: if theta_error is ZE and theta_dot is ZE and wheel_velocity is PS then target_velocity is N1
+  rule: if theta_error is ZE and theta_dot is ZE and wheel_velocity is PL then target_velocity is N2
+  rule: if theta_error is ZE and theta_dot is PS and wheel_velocity is NL then target_velocity is P1
+  rule: if theta_error is ZE and theta_dot is PS and wheel_velocity is NS then target_velocity is Z
+  rule: if theta_error is ZE and theta_dot is PS and wheel_velocity is ZE then target_velocity is N1
+  rule: if theta_error is ZE and theta_dot is PS and wheel_velocity is PS then target_velocity is N2
+  rule: if theta_error is ZE and theta_dot is PS and wheel_velocity is PL then target_velocity is N3
+  rule: if theta_error is ZE and theta_dot is PL and wheel_velocity is NL then target_velocity is Z
+  rule: if theta_error is ZE and theta_dot is PL and wheel_velocity is NS then target_velocity is N1
+  rule: if theta_error is ZE and theta_dot is PL and wheel_velocity is ZE then target_velocity is N2
+  rule: if theta_error is ZE and theta_dot is PL and wheel_velocity is PS then target_velocity is N3
+  rule: if theta_error is ZE and theta_dot is PL and wheel_velocity is PL then target_velocity is N4
+  rule: if theta_error is PS and theta_dot is NL and wheel_velocity is NL then target_velocity is P3
+  rule: if theta_error is PS and theta_dot is NL and wheel_velocity is NS then target_velocity is P2
+  rule: if theta_error is PS and theta_dot is NL and wheel_velocity is ZE then target_velocity is P1
+  rule: if theta_error is PS and theta_dot is NL and wheel_velocity is PS then target_velocity is Z
+  rule: if theta_error is PS and theta_dot is NL and wheel_velocity is PL then target_velocity is N1
+  rule: if theta_error is PS and theta_dot is NS and wheel_velocity is NL then target_velocity is P2
+  rule: if theta_error is PS and theta_dot is NS and wheel_velocity is NS then target_velocity is P1
+  rule: if theta_error is PS and theta_dot is NS and wheel_velocity is ZE then target_velocity is Z
+  rule: if theta_error is PS and theta_dot is NS and wheel_velocity is PS then target_velocity is N1
+  rule: if theta_error is PS and theta_dot is NS and wheel_velocity is PL then target_velocity is N2
+  rule: if theta_error is PS and theta_dot is ZE and wheel_velocity is NL then target_velocity is P1
+  rule: if theta_error is PS and theta_dot is ZE and wheel_velocity is NS then target_velocity is Z
+  rule: if theta_error is PS and theta_dot is ZE and wheel_velocity is ZE then target_velocity is N1
+  rule: if theta_error is PS and theta_dot is ZE and wheel_velocity is PS then target_velocity is N2
+  rule: if theta_error is PS and theta_dot is ZE and wheel_velocity is PL then target_velocity is N3
+  rule: if theta_error is PS and theta_dot is PS and wheel_velocity is NL then target_velocity is Z
+  rule: if theta_error is PS and theta_dot is PS and wheel_velocity is NS then target_velocity is N1
+  rule: if theta_error is PS and theta_dot is PS and wheel_velocity is ZE then target_velocity is N2
+  rule: if theta_error is PS and theta_dot is PS and wheel_velocity is PS then target_velocity is N3
+  rule: if theta_error is PS and theta_dot is PS and wheel_velocity is PL then target_velocity is N4
+  rule: if theta_error is PS and theta_dot is PL and wheel_velocity is NL then target_velocity is N1
+  rule: if theta_error is PS and theta_dot is PL and wheel_velocity is NS then target_velocity is N2
+  rule: if theta_error is PS and theta_dot is PL and wheel_velocity is ZE then target_velocity is N3
+  rule: if theta_error is PS and theta_dot is PL and wheel_velocity is PS then target_velocity is N4
+  rule: if theta_error is PS and theta_dot is PL and wheel_velocity is PL then target_velocity is N5
+  rule: if theta_error is PL and theta_dot is NL and wheel_velocity is NL then target_velocity is P2
+  rule: if theta_error is PL and theta_dot is NL and wheel_velocity is NS then target_velocity is P1
+  rule: if theta_error is PL and theta_dot is NL and wheel_velocity is ZE then target_velocity is Z
+  rule: if theta_error is PL and theta_dot is NL and wheel_velocity is PS then target_velocity is N1
+  rule: if theta_error is PL and theta_dot is NL and wheel_velocity is PL then target_velocity is N2
+  rule: if theta_error is PL and theta_dot is NS and wheel_velocity is NL then target_velocity is P1
+  rule: if theta_error is PL and theta_dot is NS and wheel_velocity is NS then target_velocity is Z
+  rule: if theta_error is PL and theta_dot is NS and wheel_velocity is ZE then target_velocity is N1
+  rule: if theta_error is PL and theta_dot is NS and wheel_velocity is PS then target_velocity is N2
+  rule: if theta_error is PL and theta_dot is NS and wheel_velocity is PL then target_velocity is N3
+  rule: if theta_error is PL and theta_dot is ZE and wheel_velocity is NL then target_velocity is Z
+  rule: if theta_error is PL and theta_dot is ZE and wheel_velocity is NS then target_velocity is N1
+  rule: if theta_error is PL and theta_dot is ZE and wheel_velocity is ZE then target_velocity is N2
+  rule: if theta_error is PL and theta_dot is ZE and wheel_velocity is PS then target_velocity is N3
+  rule: if theta_error is PL and theta_dot is ZE and wheel_velocity is PL then target_velocity is N4
+  rule: if theta_error is PL and theta_dot is PS and wheel_velocity is NL then target_velocity is N1
+  rule: if theta_error is PL and theta_dot is PS and wheel_velocity is NS then target_velocity is N2
+  rule: if theta_error is PL and theta_dot is PS and wheel_velocity is ZE then target_velocity is N3
+  rule: if theta_error is PL and theta_dot is PS and wheel_velocity is PS then target_velocity is N4
+  rule: if theta_error is PL and theta_dot is PS and wheel_velocity is PL then target_velocity is N5
+  rule: if theta_error is PL and theta_dot is PL and wheel_velocity is NL then target_velocity is N2
+  rule: if theta_error is PL and theta_dot is PL and wheel_velocity is NS then target_velocity is N3
+  rule: if theta_error is PL and theta_dot is PL and wheel_velocity is ZE then target_velocity is N4
+  rule: if theta_error is PL and theta_dot is PL and wheel_velocity is PS then target_velocity is N5
+  rule: if theta_error is PL and theta_dot is PL and wheel_velocity is PL then target_velocity is N6
