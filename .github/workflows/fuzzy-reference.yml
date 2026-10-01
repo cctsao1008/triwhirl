@@ -1,0 +1,59 @@
+name: Fuzzy reference
+
+on:
+  pull_request:
+    paths:
+      - '.gitmodules'
+      - 'third_party/fuzzylite'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy.hpp'
+      - 'controllers/fuzzy/**'
+      - 'tools/fuzzy/**'
+      - '.github/workflows/fuzzy-reference.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - '.gitmodules'
+      - 'third_party/fuzzylite'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy.hpp'
+      - 'controllers/fuzzy/**'
+      - 'tools/fuzzy/**'
+      - '.github/workflows/fuzzy-reference.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout TriWhirl without global submodule initialization
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Initialize pinned FuzzyLite reference only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync -- third_party/fuzzylite
+          git submodule update --init -- third_party/fuzzylite
+          test "$(git -C third_party/fuzzylite rev-parse HEAD)" = \
+            "fe62b61ad0e301fbd8868d5fc3d76d7590c59636"
+
+      - name: Verify generated upright-balance reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/fuzzy/generate_balance_reference.py --output /tmp/balance.fll
+          diff -u controllers/fuzzy/balance.fll /tmp/balance.fll
+          test "$(grep -c '^  rule:' controllers/fuzzy/balance.fll)" -eq 125
+
+      - name: Configure host-only FuzzyLite parity build
+        run: cmake -S tools/fuzzy -B build/fuzzy-reference -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build host-only fuzzy reference test
+        run: cmake --build build/fuzzy-reference --parallel
+
+      - name: Compare TriWhirl inference against FuzzyLite
+        run: ./build/fuzzy-reference/fuzzy_reference_test controllers/fuzzy/balance.fll
