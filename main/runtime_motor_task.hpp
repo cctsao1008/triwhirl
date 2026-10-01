@@ -10,13 +10,15 @@
 namespace triwhirl::runtime {
 
 struct MotorExecutionTaskConfig {
-  const char* task_name = "triwhirl_motor";
-  std::uint32_t stack_depth = 4096U;
-  UBaseType_t priority = configMAX_PRIORITIES - 2;
-  BaseType_t core_id = 0;
-  std::uint32_t service_period_us = 1000U;
-  std::uint32_t late_slack_us = 100U;
-  int release_interrupt_priority = 1;
+  // Deliberately invalid/incomplete defaults: task placement and cadence must be
+  // chosen explicitly by the integration site rather than inherited silently.
+  const char* task_name = nullptr;
+  std::uint32_t stack_depth = 0U;
+  UBaseType_t priority = 0U;
+  BaseType_t core_id = -1;
+  std::uint32_t service_period_us = 0U;
+  std::uint32_t late_slack_us = 0U;
+  int release_interrupt_priority = -1;
 };
 
 // Target-side FreeRTOS/GPTimer wrapper around the library-independent
