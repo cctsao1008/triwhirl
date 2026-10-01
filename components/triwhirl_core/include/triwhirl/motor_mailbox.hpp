@@ -8,7 +8,7 @@
 namespace triwhirl {
 
 // The motor/attitude boundary is intended to cross ESP32 task/core domains
-// without a mutex, queue backlog, or plain shared non-atomic structs.  Keep
+// without a mutex, queue backlog, or plain shared non-atomic structs. Keep
 // every shared cell 32-bit so the contract can require native lock-free atomic
 // access on the target rather than silently falling back to a library lock.
 static_assert(std::atomic<uint32_t>::is_always_lock_free,
@@ -48,18 +48,20 @@ struct MotorObservationSnapshot {
   float applied_target_velocity_rad_s = 0.0F;
   uint32_t observation_generation = 0U;
   uint32_t applied_command_generation = 0U;
+  uint32_t command_apply_latency_us = 0U;
   uint32_t serviced_at_us32 = 0U;
   bool initialized = false;
   bool sensor_valid = false;
   bool backend_faulted = false;
   bool actuator_enabled = false;
+  bool command_timed_out = false;
 };
 
 // Single-producer / single-consumer, latest-value command mailbox.
 //
 // The attitude domain is the only writer. The motor domain is the only reader.
 // publish*() overwrites stale commands rather than building a queue, which is
-// the desired semantic for a realtime velocity target.  generation is assigned
+// the desired semantic for a realtime velocity target. generation is assigned
 // by the mailbox and skips zero so zero can remain "not yet commanded".
 class MotorCommandMailbox {
  public:
@@ -124,7 +126,7 @@ class MotorCommandMailbox {
                        const uint32_t issued_at_us32) {
     const uint32_t generation = nextGeneration();
 
-    // Sequence-counter protocol over atomic payload cells.  seq_cst is
+    // Sequence-counter protocol over atomic payload cells. seq_cst is
     // intentional here: this transport values a simple, auditable ordering
     // contract over shaving a few cycles from a once-per-control-tick mailbox.
     sequence_.fetch_add(1U, std::memory_order_seq_cst);  // odd: write in flight
@@ -152,8 +154,8 @@ class MotorCommandMailbox {
 //
 // The motor domain is the only writer. The attitude domain is the only reader.
 // applied_command_generation links a published motor observation to the command
-// the backend actually consumed, which later allows command-to-apply latency to
-// be measured without exposing motor-library state.
+// the backend actually consumed. command_apply_latency_us makes command-to-apply
+// latency directly observable without exposing motor-library state.
 class MotorObservationMailbox {
  public:
   MotorObservationMailbox() = default;
@@ -163,9 +165,10 @@ class MotorObservationMailbox {
   uint32_t publish(const float shaft_velocity_rad_s,
                    const float applied_target_velocity_rad_s,
                    const uint32_t applied_command_generation,
+                   const uint32_t command_apply_latency_us,
                    const uint32_t serviced_at_us32, const bool initialized,
                    const bool sensor_valid, const bool backend_faulted,
-                   const bool actuator_enabled) {
+                   const bool actuator_enabled, const bool command_timed_out) {
     if (!std::isfinite(shaft_velocity_rad_s) ||
         !std::isfinite(applied_target_velocity_rad_s)) {
       return 0U;
@@ -185,6 +188,9 @@ class MotorObservationMailbox {
     if (actuator_enabled) {
       flags |= kActuatorEnabledFlag;
     }
+    if (command_timed_out) {
+      flags |= kCommandTimedOutFlag;
+    }
 
     sequence_.fetch_add(1U, std::memory_order_seq_cst);  // odd
     shaft_velocity_bits_.store(
@@ -197,6 +203,8 @@ class MotorObservationMailbox {
                                   std::memory_order_seq_cst);
     applied_command_generation_.store(applied_command_generation,
                                       std::memory_order_seq_cst);
+    command_apply_latency_us_.store(command_apply_latency_us,
+                                    std::memory_order_seq_cst);
     serviced_at_us32_.store(serviced_at_us32, std::memory_order_seq_cst);
     flags_.store(flags, std::memory_order_seq_cst);
     sequence_.fetch_add(1U, std::memory_order_seq_cst);  // even
@@ -227,6 +235,8 @@ class MotorObservationMailbox {
           observation_generation_.load(std::memory_order_seq_cst);
       candidate.applied_command_generation =
           applied_command_generation_.load(std::memory_order_seq_cst);
+      candidate.command_apply_latency_us =
+          command_apply_latency_us_.load(std::memory_order_seq_cst);
       candidate.serviced_at_us32 =
           serviced_at_us32_.load(std::memory_order_seq_cst);
       const uint32_t flags = flags_.load(std::memory_order_seq_cst);
@@ -234,6 +244,7 @@ class MotorObservationMailbox {
       candidate.sensor_valid = (flags & kSensorValidFlag) != 0U;
       candidate.backend_faulted = (flags & kBackendFaultedFlag) != 0U;
       candidate.actuator_enabled = (flags & kActuatorEnabledFlag) != 0U;
+      candidate.command_timed_out = (flags & kCommandTimedOutFlag) != 0U;
 
       const uint32_t after = sequence_.load(std::memory_order_seq_cst);
       if (before == after && (after & 1U) == 0U) {
@@ -249,6 +260,7 @@ class MotorObservationMailbox {
   static constexpr uint32_t kSensorValidFlag = 1U << 1U;
   static constexpr uint32_t kBackendFaultedFlag = 1U << 2U;
   static constexpr uint32_t kActuatorEnabledFlag = 1U << 3U;
+  static constexpr uint32_t kCommandTimedOutFlag = 1U << 4U;
 
   uint32_t nextGeneration() {
     ++writer_generation_;
@@ -265,6 +277,7 @@ class MotorObservationMailbox {
   std::atomic<uint32_t> applied_target_bits_{0U};
   std::atomic<uint32_t> observation_generation_{0U};
   std::atomic<uint32_t> applied_command_generation_{0U};
+  std::atomic<uint32_t> command_apply_latency_us_{0U};
   std::atomic<uint32_t> serviced_at_us32_{0U};
   std::atomic<uint32_t> flags_{0U};
 };

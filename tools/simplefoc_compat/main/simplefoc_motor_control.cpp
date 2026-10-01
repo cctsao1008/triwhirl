@@ -40,7 +40,7 @@ MotorControlObservation SimpleFocMotorControlBackend::observationThunk(
 }
 
 bool SimpleFocMotorControlBackend::beginImpl() {
-  // All values supplied here are compile-probe inputs.  This adapter does not
+  // All values supplied here are compile-probe inputs. This adapter does not
   // declare them to be valid TriWhirl commissioning parameters.
   encoder_bus_.begin(sda_gpio_, scl_gpio_, i2c_hz_);
   sensor_.init(&encoder_bus_);
@@ -55,9 +55,9 @@ bool SimpleFocMotorControlBackend::beginImpl() {
   motor_.init();
   motor_.initFOC();
 
-  // Start the adapter in the de-energized command state.  SimpleFOC calls stay
-  // in the motor domain; the attitude-facing stop() callback only requests this
-  // state and never performs driver work itself.
+  // Start the adapter in the de-energized command state. SimpleFOC calls stay
+  // in the motor domain; stop() only requests this state and never performs
+  // driver work itself.
   motor_.disable();
   initialized_ = true;
   command_enabled_ = false;
@@ -65,6 +65,7 @@ bool SimpleFocMotorControlBackend::beginImpl() {
   target_velocity_rad_s_ = 0.0F;
   observation_ = {};
   observation_.initialized = true;
+  observation_.actuator_enabled = false;
   return true;
 }
 
@@ -73,7 +74,7 @@ void SimpleFocMotorControlBackend::serviceBackendImpl() {
     return;
   }
 
-  // This is the only adapter operation that enters SimpleFOC.  In the future
+  // This is the only adapter operation that enters SimpleFOC. In the future
   // production runtime it belongs to the motor execution domain, not the
   // attitude-control task.
   if (!command_enabled_) {
@@ -90,7 +91,7 @@ void SimpleFocMotorControlBackend::serviceBackendImpl() {
     motor_.move(target_velocity_rad_s_);
   }
 
-  // Shaft observation remains available while the actuator is disabled.  Any
+  // Shaft observation remains available while the actuator is disabled. Any
   // AS5600 access performed here is still confined to the motor domain.
   const float shaft_velocity_rad_s = motor_.shaftVelocity();
   const bool velocity_valid = std::isfinite(shaft_velocity_rad_s);
@@ -98,6 +99,7 @@ void SimpleFocMotorControlBackend::serviceBackendImpl() {
   observation_.initialized = true;
   observation_.sensor_valid = velocity_valid;
   observation_.command_enabled = command_enabled_;
+  observation_.actuator_enabled = motor_enabled_;
   observation_.backend_faulted = !velocity_valid;
   observation_.shaft_velocity_rad_s =
       velocity_valid ? shaft_velocity_rad_s : 0.0F;
@@ -116,9 +118,9 @@ bool SimpleFocMotorControlBackend::commandTargetVelocityImpl(
 }
 
 void SimpleFocMotorControlBackend::stopImpl() {
-  // Do not call SimpleFOC here.  The command side is deliberately a cached,
-  // non-blocking request.  The motor domain de-energizes the actuator on its
-  // next service cycle rather than interpreting stop as a zero-speed hold.
+  // Do not call SimpleFOC here. The command side is deliberately a cached,
+  // bounded request. The motor domain de-energizes the actuator on its next
+  // service cycle rather than interpreting stop as a zero-speed hold.
   target_velocity_rad_s_ = 0.0F;
   command_enabled_ = false;
 }

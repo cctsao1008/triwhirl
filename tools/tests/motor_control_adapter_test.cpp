@@ -59,6 +59,7 @@ int main() {
   backend.observation.initialized = true;
   backend.observation.sensor_valid = true;
   backend.observation.command_enabled = true;
+  backend.observation.actuator_enabled = true;
   backend.observation.shaft_velocity_rad_s = 12.5F;
   backend.observation.target_velocity_rad_s = -7.0F;
 
@@ -88,6 +89,7 @@ int main() {
   assert(snapshot.initialized);
   assert(snapshot.sensor_valid);
   assert(snapshot.command_enabled);
+  assert(snapshot.actuator_enabled);
   assert(!snapshot.backend_faulted);
   assert(std::fabs(snapshot.shaft_velocity_rad_s - 12.5F) < 1.0e-6F);
   assert(std::fabs(snapshot.target_velocity_rad_s + 7.0F) < 1.0e-6F);
@@ -103,6 +105,7 @@ int main() {
   const auto empty = invalid.observation();
   assert(!empty.initialized);
   assert(!empty.sensor_valid);
+  assert(!empty.actuator_enabled);
 
   const triwhirl::MotorControl invalid_limit = makeControl(&backend, 0.0F);
   assert(!invalid_limit.valid());

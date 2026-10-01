@@ -53,14 +53,15 @@ void testObservationBasics() {
 
   assert(!mailbox.tryRead(&snapshot));
   assert(mailbox.publish(std::numeric_limits<float>::quiet_NaN(), 0.0F, 1U,
-                         10U, true, false, true, false) == 0U);
+                         9U, 10U, true, false, true, false, false) == 0U);
 
-  const uint32_t generation =
-      mailbox.publish(3.5F, -2.0F, 17U, 900U, true, true, false, true);
+  const uint32_t generation = mailbox.publish(
+      3.5F, -2.0F, 17U, 23U, 900U, true, true, false, true, true);
   assert(generation == 1U);
   assert(mailbox.tryRead(&snapshot));
   assert(snapshot.observation_generation == 1U);
   assert(snapshot.applied_command_generation == 17U);
+  assert(snapshot.command_apply_latency_us == 23U);
   assert(snapshot.serviced_at_us32 == 900U);
   assert(snapshot.shaft_velocity_rad_s == 3.5F);
   assert(snapshot.applied_target_velocity_rad_s == -2.0F);
@@ -68,6 +69,7 @@ void testObservationBasics() {
   assert(snapshot.sensor_valid);
   assert(!snapshot.backend_faulted);
   assert(snapshot.actuator_enabled);
+  assert(snapshot.command_timed_out);
 }
 
 void testCommandConcurrentCoherence() {
@@ -118,8 +120,9 @@ void testObservationConcurrentCoherence() {
     for (uint32_t i = 1U; i <= kCount; ++i) {
       const uint32_t observation_generation = mailbox.publish(
           static_cast<float>(i) * 0.5F, -static_cast<float>(i) * 0.25F,
-          i * 3U, i ^ 0x5A5A0000U, (i & 1U) != 0U, (i & 2U) != 0U,
-          (i & 4U) != 0U, (i & 8U) != 0U);
+          i * 3U, i * 7U, i ^ 0x5A5A0000U, (i & 1U) != 0U,
+          (i & 2U) != 0U, (i & 4U) != 0U, (i & 8U) != 0U,
+          (i & 16U) != 0U);
       assert(observation_generation == i);
     }
     writer_done.store(true, std::memory_order_release);
@@ -140,11 +143,13 @@ void testObservationConcurrentCoherence() {
     assert(snapshot.applied_target_velocity_rad_s * -4.0F ==
            static_cast<float>(generation));
     assert(snapshot.applied_command_generation == generation * 3U);
+    assert(snapshot.command_apply_latency_us == generation * 7U);
     assert(snapshot.serviced_at_us32 == (generation ^ 0x5A5A0000U));
     assert(snapshot.initialized == ((generation & 1U) != 0U));
     assert(snapshot.sensor_valid == ((generation & 2U) != 0U));
     assert(snapshot.backend_faulted == ((generation & 4U) != 0U));
     assert(snapshot.actuator_enabled == ((generation & 8U) != 0U));
+    assert(snapshot.command_timed_out == ((generation & 16U) != 0U));
     assert(generation >= last_generation);
     last_generation = generation;
   }
