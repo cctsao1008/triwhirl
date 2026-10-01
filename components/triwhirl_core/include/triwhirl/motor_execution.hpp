@@ -106,15 +106,18 @@ class MotorExecutionDomain {
       command_timed_out_ = false;
       if (!command.enabled) {
         consumeStopCommand(command, service_start_us32);
-      } else if (commandExpired(command, service_start_us32)) {
+      } else if (commandExpired(command.issued_at_us32, service_start_us32)) {
         consumeTimedOutCommand(command, service_start_us32);
       } else if (!backend_fault_latched_) {
         consumeTargetCommand(command, service_start_us32);
       }
-    } else if (desired_enabled_ && commandTimeoutEnabled() && have_command &&
-               commandExpired(command, service_start_us32)) {
-      // The last accepted target has gone stale because the attitude domain has
-      // not refreshed the latest-value command within the configured policy.
+    } else if (desired_enabled_ && commandTimeoutEnabled() &&
+               commandExpired(last_enabled_command_issued_at_us32_,
+                              service_start_us32)) {
+      // Timeout is based on the last target the executor actually accepted, not
+      // on whether this particular service call managed to read a coherent
+      // mailbox snapshot. A temporarily contended mailbox therefore fails safe
+      // instead of extending actuator authority indefinitely.
       motor_control_.stop();
       desired_enabled_ = false;
       accepted_target_velocity_rad_s_ = 0.0F;
@@ -175,11 +178,10 @@ class MotorExecutionDomain {
     return config_.command_timeout_us != 0U;
   }
 
-  bool commandExpired(const MotorCommandSnapshot& command,
+  bool commandExpired(const uint32_t issued_at_us32,
                       const uint32_t now_us32) const {
     return commandTimeoutEnabled() &&
-           elapsedUs32(now_us32, command.issued_at_us32) >
-               config_.command_timeout_us;
+           elapsedUs32(now_us32, issued_at_us32) > config_.command_timeout_us;
   }
 
   static bool observationFinite(const MotorControlObservation& observation) {
@@ -208,6 +210,7 @@ class MotorExecutionDomain {
     desired_enabled_ = true;
     accepted_target_velocity_rad_s_ = command.target_velocity_rad_s;
     consumed_command_generation_ = command.generation;
+    last_enabled_command_issued_at_us32_ = command.issued_at_us32;
     command_accept_latency_us_ =
         elapsedUs32(service_start_us32, command.issued_at_us32);
     ++stats_.consumed_targets;
@@ -282,6 +285,7 @@ class MotorExecutionDomain {
   bool command_timed_out_ = false;
   uint32_t last_seen_command_generation_ = 0U;
   uint32_t consumed_command_generation_ = 0U;
+  uint32_t last_enabled_command_issued_at_us32_ = 0U;
   uint32_t command_accept_latency_us_ = 0U;
   float accepted_target_velocity_rad_s_ = 0.0F;
 };
