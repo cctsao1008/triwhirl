@@ -110,10 +110,10 @@ void testBeginStartsDeenergized() {
   assert(snapshot.sensor_valid);
   assert(!snapshot.backend_faulted);
   assert(!snapshot.actuator_enabled);
-  assert(snapshot.applied_command_generation == 0U);
+  assert(snapshot.consumed_command_generation == 0U);
 }
 
-void testTargetAndStopAreAppliedOnMotorService() {
+void testTargetAndStopAreConsumedOnMotorService() {
   FakeBackend backend{};
   triwhirl::MotorCommandMailbox commands;
   triwhirl::MotorObservationMailbox observations;
@@ -128,9 +128,10 @@ void testTargetAndStopAreAppliedOnMotorService() {
   assert(backend.command_calls == 1);
   assert(backend.actuator_enabled);
   assert(snapshot.actuator_enabled);
-  assert(snapshot.applied_command_generation == target_generation);
-  assert(snapshot.command_apply_latency_us == 250U);
-  assert(snapshot.applied_target_velocity_rad_s == 20.0F);
+  assert(snapshot.consumed_command_generation == target_generation);
+  assert(snapshot.command_accept_latency_us == 250U);
+  assert(snapshot.service_start_us32 == 1250U);
+  assert(snapshot.accepted_target_velocity_rad_s == 20.0F);
   assert(!snapshot.command_timed_out);
 
   const uint32_t stop_generation = commands.publishStop(1500U);
@@ -141,11 +142,12 @@ void testTargetAndStopAreAppliedOnMotorService() {
   assert(backend.service_calls == services_before_stop + 1);
   assert(!backend.actuator_enabled);
   assert(!snapshot.actuator_enabled);
-  assert(snapshot.applied_command_generation == stop_generation);
-  assert(snapshot.command_apply_latency_us == 100U);
-  assert(snapshot.applied_target_velocity_rad_s == 0.0F);
-  assert(executor.stats().applied_commands == 1U);
-  assert(executor.stats().applied_stops == 1U);
+  assert(snapshot.consumed_command_generation == stop_generation);
+  assert(snapshot.command_accept_latency_us == 100U);
+  assert(snapshot.service_start_us32 == 1600U);
+  assert(snapshot.accepted_target_velocity_rad_s == 0.0F);
+  assert(executor.stats().consumed_targets == 1U);
+  assert(executor.stats().consumed_stops == 1U);
 }
 
 void testLatestCommandWinsWithoutQueueBacklog() {
@@ -163,8 +165,8 @@ void testLatestCommandWinsWithoutQueueBacklog() {
   const auto snapshot = readObservation(&observations);
   assert(backend.command_calls == 1);
   assert(backend.requested_target_rad_s == 30.0F);
-  assert(snapshot.applied_command_generation == 2U);
-  assert(snapshot.command_apply_latency_us == 60U);
+  assert(snapshot.consumed_command_generation == 2U);
+  assert(snapshot.command_accept_latency_us == 60U);
 }
 
 void testCommandTimeoutStopsInOneServiceInvocation() {
@@ -187,7 +189,7 @@ void testCommandTimeoutStopsInOneServiceInvocation() {
   assert(backend.service_calls == services_before_timeout + 1);
   assert(!snapshot.actuator_enabled);
   assert(snapshot.command_timed_out);
-  assert(snapshot.applied_target_velocity_rad_s == 0.0F);
+  assert(snapshot.accepted_target_velocity_rad_s == 0.0F);
   assert(executor.stats().timeout_stops == 1U);
 }
 
@@ -207,8 +209,8 @@ void testAlreadyExpiredNewTargetNeverEnergizes() {
   assert(backend.command_calls == 0);
   assert(!snapshot.actuator_enabled);
   assert(snapshot.command_timed_out);
-  assert(snapshot.applied_command_generation == 1U);
-  assert(snapshot.command_apply_latency_us == 1101U);
+  assert(snapshot.consumed_command_generation == 1U);
+  assert(snapshot.command_accept_latency_us == 1101U);
 }
 
 void testSensorInvalidityForcesSameInvocationStop() {
@@ -278,7 +280,7 @@ void testBackendCommandRejectionFailsClosed() {
   assert(executor.backendFaultLatched());
   assert(snapshot.backend_faulted);
   assert(!snapshot.actuator_enabled);
-  assert(snapshot.applied_command_generation == 0U);
+  assert(snapshot.consumed_command_generation == 0U);
 }
 
 void testStuckEnabledIsVisibleAsHardBackendFailure() {
@@ -301,7 +303,7 @@ void testStuckEnabledIsVisibleAsHardBackendFailure() {
   assert(snapshot.actuator_enabled);
 }
 
-void testUint32TimestampWrapKeepsLatencyMeasurable() {
+void testUint32TimestampWrapKeepsAcceptLatencyMeasurable() {
   FakeBackend backend{};
   triwhirl::MotorCommandMailbox commands;
   triwhirl::MotorObservationMailbox observations;
@@ -310,11 +312,11 @@ void testUint32TimestampWrapKeepsLatencyMeasurable() {
   assert(executor.begin(0U));
 
   constexpr uint32_t issued = 0xFFFFFFF0U;
-  constexpr uint32_t serviced = 0x00000020U;
+  constexpr uint32_t service_start = 0x00000020U;
   assert(commands.publishTarget(4.0F, issued) == 1U);
-  executor.service(serviced);
+  executor.service(service_start);
   const auto snapshot = readObservation(&observations);
-  assert(snapshot.command_apply_latency_us == 48U);
+  assert(snapshot.command_accept_latency_us == 48U);
 }
 
 void testBeginFailurePublishesFaultedSnapshot() {
@@ -330,14 +332,14 @@ void testBeginFailurePublishesFaultedSnapshot() {
   assert(!snapshot.sensor_valid);
   assert(snapshot.backend_faulted);
   assert(!snapshot.actuator_enabled);
-  assert(snapshot.serviced_at_us32 == 77U);
+  assert(snapshot.service_start_us32 == 77U);
 }
 
 }  // namespace
 
 int main() {
   testBeginStartsDeenergized();
-  testTargetAndStopAreAppliedOnMotorService();
+  testTargetAndStopAreConsumedOnMotorService();
   testLatestCommandWinsWithoutQueueBacklog();
   testCommandTimeoutStopsInOneServiceInvocation();
   testAlreadyExpiredNewTargetNeverEnergizes();
@@ -345,7 +347,7 @@ int main() {
   testBackendFaultLatchesAndPreventsReenable();
   testBackendCommandRejectionFailsClosed();
   testStuckEnabledIsVisibleAsHardBackendFailure();
-  testUint32TimestampWrapKeepsLatencyMeasurable();
+  testUint32TimestampWrapKeepsAcceptLatencyMeasurable();
   testBeginFailurePublishesFaultedSnapshot();
   return 0;
 }

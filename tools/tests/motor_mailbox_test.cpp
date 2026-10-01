@@ -60,11 +60,11 @@ void testObservationBasics() {
   assert(generation == 1U);
   assert(mailbox.tryRead(&snapshot));
   assert(snapshot.observation_generation == 1U);
-  assert(snapshot.applied_command_generation == 17U);
-  assert(snapshot.command_apply_latency_us == 23U);
-  assert(snapshot.serviced_at_us32 == 900U);
+  assert(snapshot.consumed_command_generation == 17U);
+  assert(snapshot.command_accept_latency_us == 23U);
+  assert(snapshot.service_start_us32 == 900U);
   assert(snapshot.shaft_velocity_rad_s == 3.5F);
-  assert(snapshot.applied_target_velocity_rad_s == -2.0F);
+  assert(snapshot.accepted_target_velocity_rad_s == -2.0F);
   assert(snapshot.initialized);
   assert(snapshot.sensor_valid);
   assert(!snapshot.backend_faulted);
@@ -96,8 +96,6 @@ void testCommandConcurrentCoherence() {
       continue;
     }
 
-    // If a tuple were torn, at least one of these independent relationships
-    // would almost certainly refer to a different publication generation.
     assert(snapshot.enabled);
     assert(snapshot.target_velocity_rad_s * 4.0F ==
            static_cast<float>(snapshot.generation));
@@ -140,11 +138,11 @@ void testObservationConcurrentCoherence() {
     const uint32_t generation = snapshot.observation_generation;
     assert(snapshot.shaft_velocity_rad_s * 2.0F ==
            static_cast<float>(generation));
-    assert(snapshot.applied_target_velocity_rad_s * -4.0F ==
+    assert(snapshot.accepted_target_velocity_rad_s * -4.0F ==
            static_cast<float>(generation));
-    assert(snapshot.applied_command_generation == generation * 3U);
-    assert(snapshot.command_apply_latency_us == generation * 7U);
-    assert(snapshot.serviced_at_us32 == (generation ^ 0x5A5A0000U));
+    assert(snapshot.consumed_command_generation == generation * 3U);
+    assert(snapshot.command_accept_latency_us == generation * 7U);
+    assert(snapshot.service_start_us32 == (generation ^ 0x5A5A0000U));
     assert(snapshot.initialized == ((generation & 1U) != 0U));
     assert(snapshot.sensor_valid == ((generation & 2U) != 0U));
     assert(snapshot.backend_faulted == ((generation & 4U) != 0U));
