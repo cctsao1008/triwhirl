@@ -45,11 +45,11 @@ struct MotorCommandSnapshot {
 
 struct MotorObservationSnapshot {
   float shaft_velocity_rad_s = 0.0F;
-  float applied_target_velocity_rad_s = 0.0F;
+  float accepted_target_velocity_rad_s = 0.0F;
   uint32_t observation_generation = 0U;
-  uint32_t applied_command_generation = 0U;
-  uint32_t command_apply_latency_us = 0U;
-  uint32_t serviced_at_us32 = 0U;
+  uint32_t consumed_command_generation = 0U;
+  uint32_t command_accept_latency_us = 0U;
+  uint32_t service_start_us32 = 0U;
   bool initialized = false;
   bool sensor_valid = false;
   bool backend_faulted = false;
@@ -153,9 +153,10 @@ class MotorCommandMailbox {
 // Single-producer / single-consumer, latest-value observation mailbox.
 //
 // The motor domain is the only writer. The attitude domain is the only reader.
-// applied_command_generation links a published motor observation to the command
-// the backend actually consumed. command_apply_latency_us makes command-to-apply
-// latency directly observable without exposing motor-library state.
+// consumed_command_generation identifies the latest command consumed by the
+// motor executor. command_accept_latency_us is measured at executor acceptance,
+// before backend service; it is deliberately NOT called command-to-apply
+// latency because physical actuation happens later inside the backend service.
 class MotorObservationMailbox {
  public:
   MotorObservationMailbox() = default;
@@ -163,14 +164,14 @@ class MotorObservationMailbox {
   MotorObservationMailbox& operator=(const MotorObservationMailbox&) = delete;
 
   uint32_t publish(const float shaft_velocity_rad_s,
-                   const float applied_target_velocity_rad_s,
-                   const uint32_t applied_command_generation,
-                   const uint32_t command_apply_latency_us,
-                   const uint32_t serviced_at_us32, const bool initialized,
+                   const float accepted_target_velocity_rad_s,
+                   const uint32_t consumed_command_generation,
+                   const uint32_t command_accept_latency_us,
+                   const uint32_t service_start_us32, const bool initialized,
                    const bool sensor_valid, const bool backend_faulted,
                    const bool actuator_enabled, const bool command_timed_out) {
     if (!std::isfinite(shaft_velocity_rad_s) ||
-        !std::isfinite(applied_target_velocity_rad_s)) {
+        !std::isfinite(accepted_target_velocity_rad_s)) {
       return 0U;
     }
 
@@ -196,16 +197,16 @@ class MotorObservationMailbox {
     shaft_velocity_bits_.store(
         motor_mailbox_detail::floatToBits(shaft_velocity_rad_s),
         std::memory_order_seq_cst);
-    applied_target_bits_.store(
-        motor_mailbox_detail::floatToBits(applied_target_velocity_rad_s),
+    accepted_target_bits_.store(
+        motor_mailbox_detail::floatToBits(accepted_target_velocity_rad_s),
         std::memory_order_seq_cst);
     observation_generation_.store(observation_generation,
                                   std::memory_order_seq_cst);
-    applied_command_generation_.store(applied_command_generation,
-                                      std::memory_order_seq_cst);
-    command_apply_latency_us_.store(command_apply_latency_us,
-                                    std::memory_order_seq_cst);
-    serviced_at_us32_.store(serviced_at_us32, std::memory_order_seq_cst);
+    consumed_command_generation_.store(consumed_command_generation,
+                                       std::memory_order_seq_cst);
+    command_accept_latency_us_.store(command_accept_latency_us,
+                                     std::memory_order_seq_cst);
+    service_start_us32_.store(service_start_us32, std::memory_order_seq_cst);
     flags_.store(flags, std::memory_order_seq_cst);
     sequence_.fetch_add(1U, std::memory_order_seq_cst);  // even
     published_.store(1U, std::memory_order_seq_cst);
@@ -228,17 +229,17 @@ class MotorObservationMailbox {
       MotorObservationSnapshot candidate{};
       candidate.shaft_velocity_rad_s = motor_mailbox_detail::bitsToFloat(
           shaft_velocity_bits_.load(std::memory_order_seq_cst));
-      candidate.applied_target_velocity_rad_s =
+      candidate.accepted_target_velocity_rad_s =
           motor_mailbox_detail::bitsToFloat(
-              applied_target_bits_.load(std::memory_order_seq_cst));
+              accepted_target_bits_.load(std::memory_order_seq_cst));
       candidate.observation_generation =
           observation_generation_.load(std::memory_order_seq_cst);
-      candidate.applied_command_generation =
-          applied_command_generation_.load(std::memory_order_seq_cst);
-      candidate.command_apply_latency_us =
-          command_apply_latency_us_.load(std::memory_order_seq_cst);
-      candidate.serviced_at_us32 =
-          serviced_at_us32_.load(std::memory_order_seq_cst);
+      candidate.consumed_command_generation =
+          consumed_command_generation_.load(std::memory_order_seq_cst);
+      candidate.command_accept_latency_us =
+          command_accept_latency_us_.load(std::memory_order_seq_cst);
+      candidate.service_start_us32 =
+          service_start_us32_.load(std::memory_order_seq_cst);
       const uint32_t flags = flags_.load(std::memory_order_seq_cst);
       candidate.initialized = (flags & kInitializedFlag) != 0U;
       candidate.sensor_valid = (flags & kSensorValidFlag) != 0U;
@@ -274,11 +275,11 @@ class MotorObservationMailbox {
   std::atomic<uint32_t> sequence_{0U};
   std::atomic<uint32_t> published_{0U};
   std::atomic<uint32_t> shaft_velocity_bits_{0U};
-  std::atomic<uint32_t> applied_target_bits_{0U};
+  std::atomic<uint32_t> accepted_target_bits_{0U};
   std::atomic<uint32_t> observation_generation_{0U};
-  std::atomic<uint32_t> applied_command_generation_{0U};
-  std::atomic<uint32_t> command_apply_latency_us_{0U};
-  std::atomic<uint32_t> serviced_at_us32_{0U};
+  std::atomic<uint32_t> consumed_command_generation_{0U};
+  std::atomic<uint32_t> command_accept_latency_us_{0U};
+  std::atomic<uint32_t> service_start_us32_{0U};
   std::atomic<uint32_t> flags_{0U};
 };
 

@@ -23,11 +23,11 @@ void testAccounting() {
   assert(tracker.valid());
 
   tracker.recordReleaseNotifications(1U, true);
-  tracker.recordIteration(1000U, 1100U, 40U);
+  tracker.recordIteration(1000U, 1100U, true, 40U);
   tracker.recordReleaseNotifications(1U, true);
-  tracker.recordIteration(2000U, 2250U, 70U);
+  tracker.recordIteration(2000U, 2250U, true, 70U);
   tracker.recordReleaseNotifications(3U, true);
-  tracker.recordIteration(3200U, 4300U, 60U);
+  tracker.recordIteration(3200U, 4300U, false, 999U);
 
   const auto snapshot = tracker.snapshot();
   assert(snapshot.service_period_us == 1000U);
@@ -40,7 +40,10 @@ void testAccounting() {
   assert(snapshot.deadline_misses == 1U);
   assert(snapshot.missed_release_ticks == 2U);
   assert(snapshot.max_notification_backlog == 3U);
-  assert(snapshot.max_command_apply_latency_us == 70U);
+  assert(snapshot.max_command_accept_latency_us == 70U);
+  // First consumed command: 40 + 100 = 140 us. Second: 70 + 250 = 320 us.
+  // The third iteration consumed no new command, so its 999-us fixture is ignored.
+  assert(snapshot.max_command_service_complete_upper_bound_us == 320U);
 }
 
 void testReleaseBacklogAccounting() {
@@ -54,27 +57,38 @@ void testReleaseBacklogAccounting() {
 
 void testTimestampWraparound() {
   triwhirl::MotorTaskTimingTracker tracker({1000U, 10U});
-  tracker.recordIteration(0xFFFFFF00U, 0xFFFFFF20U, 12U);
-  tracker.recordIteration(0x000002E8U, 0x00000320U, 48U);
+  tracker.recordIteration(0xFFFFFF00U, 0xFFFFFF20U, true, 12U);
+  tracker.recordIteration(0x000002E8U, 0x00000320U, true, 48U);
   const auto snapshot = tracker.snapshot();
   assert(snapshot.iterations == 2U);
   assert(snapshot.min_observed_period_us == 1000U);
   assert(snapshot.max_observed_period_us == 1000U);
   assert(snapshot.last_exec_us == 56U);
-  assert(snapshot.max_command_apply_latency_us == 48U);
+  assert(snapshot.max_command_accept_latency_us == 48U);
+  assert(snapshot.max_command_service_complete_upper_bound_us == 104U);
   assert(snapshot.late_periods == 0U);
   assert(snapshot.deadline_misses == 0U);
 }
 
+void testSaturatingServiceCompleteUpperBound() {
+  triwhirl::MotorTaskTimingTracker tracker({1000U, 0U});
+  tracker.recordIteration(10U, 30U, true, UINT32_MAX - 10U);
+  const auto snapshot = tracker.snapshot();
+  assert(snapshot.max_command_accept_latency_us == UINT32_MAX - 10U);
+  assert(snapshot.max_command_service_complete_upper_bound_us == UINT32_MAX);
+}
+
 void testReset() {
   triwhirl::MotorTaskTimingTracker tracker({1000U, 100U});
-  tracker.recordIteration(100U, 150U, 20U);
+  tracker.recordIteration(100U, 150U, true, 20U);
   tracker.reset();
   const auto snapshot = tracker.snapshot();
   assert(snapshot.service_period_us == 1000U);
   assert(snapshot.iterations == 0U);
   assert(snapshot.max_exec_us == 0U);
   assert(snapshot.min_observed_period_us == 0U);
+  assert(snapshot.max_command_accept_latency_us == 0U);
+  assert(snapshot.max_command_service_complete_upper_bound_us == 0U);
 }
 
 void testTimingMailboxBasics() {
@@ -93,7 +107,8 @@ void testTimingMailboxBasics() {
   written.deadline_misses = 1U;
   written.missed_release_ticks = 3U;
   written.max_notification_backlog = 4U;
-  written.max_command_apply_latency_us = 150U;
+  written.max_command_accept_latency_us = 150U;
+  written.max_command_service_complete_upper_bound_us = 230U;
   written.running = true;
   written.initialization_failed = false;
   written.release_clock_failed = true;
@@ -110,7 +125,8 @@ void testTimingMailboxBasics() {
   assert(snapshot.deadline_misses == 1U);
   assert(snapshot.missed_release_ticks == 3U);
   assert(snapshot.max_notification_backlog == 4U);
-  assert(snapshot.max_command_apply_latency_us == 150U);
+  assert(snapshot.max_command_accept_latency_us == 150U);
+  assert(snapshot.max_command_service_complete_upper_bound_us == 230U);
   assert(snapshot.running);
   assert(!snapshot.initialization_failed);
   assert(snapshot.release_clock_failed);
@@ -134,7 +150,8 @@ void testTimingMailboxConcurrentCoherence() {
       snapshot.deadline_misses = i * 3U;
       snapshot.missed_release_ticks = i * 4U;
       snapshot.max_notification_backlog = i * 5U;
-      snapshot.max_command_apply_latency_us = i * 6U;
+      snapshot.max_command_accept_latency_us = i * 6U;
+      snapshot.max_command_service_complete_upper_bound_us = i * 7U;
       snapshot.running = (i & 1U) != 0U;
       snapshot.initialization_failed = (i & 2U) != 0U;
       snapshot.release_clock_failed = (i & 4U) != 0U;
@@ -160,7 +177,8 @@ void testTimingMailboxConcurrentCoherence() {
     assert(snapshot.deadline_misses == i * 3U);
     assert(snapshot.missed_release_ticks == i * 4U);
     assert(snapshot.max_notification_backlog == i * 5U);
-    assert(snapshot.max_command_apply_latency_us == i * 6U);
+    assert(snapshot.max_command_accept_latency_us == i * 6U);
+    assert(snapshot.max_command_service_complete_upper_bound_us == i * 7U);
     assert(snapshot.running == ((i & 1U) != 0U));
     assert(snapshot.initialization_failed == ((i & 2U) != 0U));
     assert(snapshot.release_clock_failed == ((i & 4U) != 0U));
@@ -179,6 +197,7 @@ int main() {
   testAccounting();
   testReleaseBacklogAccounting();
   testTimestampWraparound();
+  testSaturatingServiceCompleteUpperBound();
   testReset();
   testTimingMailboxBasics();
   testTimingMailboxConcurrentCoherence();

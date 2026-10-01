@@ -6,6 +6,9 @@
 
 namespace triwhirl {
 
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "Motor timing snapshots require lock-free 32-bit atomics");
+
 struct MotorTaskTimingConfig {
   uint32_t service_period_us = 0U;
   uint32_t late_slack_us = 0U;
@@ -27,7 +30,8 @@ struct MotorTaskTimingSnapshot {
   uint32_t deadline_misses = 0U;
   uint32_t missed_release_ticks = 0U;
   uint32_t max_notification_backlog = 0U;
-  uint32_t max_command_apply_latency_us = 0U;
+  uint32_t max_command_accept_latency_us = 0U;
+  uint32_t max_command_service_complete_upper_bound_us = 0U;
   bool running = false;
   bool initialization_failed = false;
   bool release_clock_failed = false;
@@ -80,15 +84,25 @@ class MotorTaskTimingTracker {
   }
 
   void recordIteration(const uint32_t start_us32, const uint32_t end_us32,
-                       const uint32_t command_apply_latency_us) {
+                       const bool command_consumed_this_iteration,
+                       const uint32_t command_accept_latency_us) {
     const uint32_t exec_us =
         motor_task_timing_detail::elapsedUs32(end_us32, start_us32);
     snapshot_.iterations =
         motor_task_timing_detail::saturatingAdd(snapshot_.iterations, 1U);
     snapshot_.last_exec_us = exec_us;
     snapshot_.max_exec_us = std::max(snapshot_.max_exec_us, exec_us);
-    snapshot_.max_command_apply_latency_us = std::max(
-        snapshot_.max_command_apply_latency_us, command_apply_latency_us);
+
+    if (command_consumed_this_iteration) {
+      snapshot_.max_command_accept_latency_us = std::max(
+          snapshot_.max_command_accept_latency_us, command_accept_latency_us);
+      const uint32_t service_complete_upper_bound_us =
+          motor_task_timing_detail::saturatingAdd(command_accept_latency_us,
+                                                  exec_us);
+      snapshot_.max_command_service_complete_upper_bound_us = std::max(
+          snapshot_.max_command_service_complete_upper_bound_us,
+          service_complete_upper_bound_us);
+    }
 
     if (config_.valid() && exec_us > config_.service_period_us) {
       snapshot_.deadline_misses = motor_task_timing_detail::saturatingAdd(
@@ -157,8 +171,11 @@ class MotorTaskTimingMailbox {
                                 std::memory_order_seq_cst);
     max_notification_backlog_.store(snapshot.max_notification_backlog,
                                     std::memory_order_seq_cst);
-    max_command_apply_latency_us_.store(snapshot.max_command_apply_latency_us,
-                                        std::memory_order_seq_cst);
+    max_command_accept_latency_us_.store(snapshot.max_command_accept_latency_us,
+                                         std::memory_order_seq_cst);
+    max_command_service_complete_upper_bound_us_.store(
+        snapshot.max_command_service_complete_upper_bound_us,
+        std::memory_order_seq_cst);
     flags_.store(flags, std::memory_order_seq_cst);
     sequence_.fetch_add(1U, std::memory_order_seq_cst);
     published_.store(1U, std::memory_order_seq_cst);
@@ -190,8 +207,11 @@ class MotorTaskTimingMailbox {
           missed_release_ticks_.load(std::memory_order_seq_cst);
       candidate.max_notification_backlog =
           max_notification_backlog_.load(std::memory_order_seq_cst);
-      candidate.max_command_apply_latency_us =
-          max_command_apply_latency_us_.load(std::memory_order_seq_cst);
+      candidate.max_command_accept_latency_us =
+          max_command_accept_latency_us_.load(std::memory_order_seq_cst);
+      candidate.max_command_service_complete_upper_bound_us =
+          max_command_service_complete_upper_bound_us_.load(
+              std::memory_order_seq_cst);
       const uint32_t flags = flags_.load(std::memory_order_seq_cst);
       candidate.running = (flags & kRunningFlag) != 0U;
       candidate.initialization_failed =
@@ -225,7 +245,8 @@ class MotorTaskTimingMailbox {
   std::atomic<uint32_t> deadline_misses_{0U};
   std::atomic<uint32_t> missed_release_ticks_{0U};
   std::atomic<uint32_t> max_notification_backlog_{0U};
-  std::atomic<uint32_t> max_command_apply_latency_us_{0U};
+  std::atomic<uint32_t> max_command_accept_latency_us_{0U};
+  std::atomic<uint32_t> max_command_service_complete_upper_bound_us_{0U};
   std::atomic<uint32_t> flags_{0U};
 };
 

@@ -17,8 +17,8 @@ struct MotorExecutionConfig {
 
 struct MotorExecutionStats {
   uint32_t service_calls = 0U;
-  uint32_t applied_commands = 0U;
-  uint32_t applied_stops = 0U;
+  uint32_t consumed_targets = 0U;
+  uint32_t consumed_stops = 0U;
   uint32_t timeout_stops = 0U;
   uint32_t safety_stops = 0U;
   uint32_t backend_faults = 0U;
@@ -74,7 +74,7 @@ class MotorExecutionDomain {
     // backends make stop() a cached request and enact it in serviceBackend().
     motor_control_.stop();
     desired_enabled_ = false;
-    applied_target_velocity_rad_s_ = 0.0F;
+    accepted_target_velocity_rad_s_ = 0.0F;
     motor_control_.serviceBackend();
     ++stats_.service_calls;
 
@@ -89,10 +89,10 @@ class MotorExecutionDomain {
     return !backend_fault_latched_;
   }
 
-  void service(const uint32_t now_us32) {
+  void service(const uint32_t service_start_us32) {
     if (!valid() || !started_) {
       backend_fault_latched_ = true;
-      publishSyntheticFault(now_us32);
+      publishSyntheticFault(service_start_us32);
       return;
     }
 
@@ -105,19 +105,19 @@ class MotorExecutionDomain {
       last_seen_command_generation_ = command.generation;
       command_timed_out_ = false;
       if (!command.enabled) {
-        applyStopCommand(command, now_us32);
-      } else if (commandExpired(command, now_us32)) {
-        applyTimedOutCommand(command, now_us32);
+        consumeStopCommand(command, service_start_us32);
+      } else if (commandExpired(command, service_start_us32)) {
+        consumeTimedOutCommand(command, service_start_us32);
       } else if (!backend_fault_latched_) {
-        applyTargetCommand(command, now_us32);
+        consumeTargetCommand(command, service_start_us32);
       }
     } else if (desired_enabled_ && commandTimeoutEnabled() && have_command &&
-               commandExpired(command, now_us32)) {
+               commandExpired(command, service_start_us32)) {
       // The last accepted target has gone stale because the attitude domain has
       // not refreshed the latest-value command within the configured policy.
       motor_control_.stop();
       desired_enabled_ = false;
-      applied_target_velocity_rad_s_ = 0.0F;
+      accepted_target_velocity_rad_s_ = 0.0F;
       command_timed_out_ = true;
       ++stats_.timeout_stops;
     }
@@ -154,14 +154,14 @@ class MotorExecutionDomain {
       }
     }
 
-    publishObservation(observation, now_us32);
+    publishObservation(observation, service_start_us32);
   }
 
   bool started() const { return started_; }
   bool backendFaultLatched() const { return backend_fault_latched_; }
   bool commandTimedOut() const { return command_timed_out_; }
-  uint32_t appliedCommandGeneration() const {
-    return applied_command_generation_;
+  uint32_t consumedCommandGeneration() const {
+    return consumed_command_generation_;
   }
   const MotorExecutionStats& stats() const { return stats_; }
 
@@ -194,44 +194,44 @@ class MotorExecutionDomain {
     backend_fault_latched_ = true;
   }
 
-  void applyTargetCommand(const MotorCommandSnapshot& command,
-                          const uint32_t now_us32) {
+  void consumeTargetCommand(const MotorCommandSnapshot& command,
+                            const uint32_t service_start_us32) {
     if (!motor_control_.commandTargetVelocityRadS(
             command.target_velocity_rad_s)) {
       latchBackendFault();
       motor_control_.stop();
       desired_enabled_ = false;
-      applied_target_velocity_rad_s_ = 0.0F;
+      accepted_target_velocity_rad_s_ = 0.0F;
       return;
     }
 
     desired_enabled_ = true;
-    applied_target_velocity_rad_s_ = command.target_velocity_rad_s;
-    applied_command_generation_ = command.generation;
-    command_apply_latency_us_ =
-        elapsedUs32(now_us32, command.issued_at_us32);
-    ++stats_.applied_commands;
+    accepted_target_velocity_rad_s_ = command.target_velocity_rad_s;
+    consumed_command_generation_ = command.generation;
+    command_accept_latency_us_ =
+        elapsedUs32(service_start_us32, command.issued_at_us32);
+    ++stats_.consumed_targets;
   }
 
-  void applyStopCommand(const MotorCommandSnapshot& command,
-                        const uint32_t now_us32) {
+  void consumeStopCommand(const MotorCommandSnapshot& command,
+                          const uint32_t service_start_us32) {
     motor_control_.stop();
     desired_enabled_ = false;
-    applied_target_velocity_rad_s_ = 0.0F;
-    applied_command_generation_ = command.generation;
-    command_apply_latency_us_ =
-        elapsedUs32(now_us32, command.issued_at_us32);
-    ++stats_.applied_stops;
+    accepted_target_velocity_rad_s_ = 0.0F;
+    consumed_command_generation_ = command.generation;
+    command_accept_latency_us_ =
+        elapsedUs32(service_start_us32, command.issued_at_us32);
+    ++stats_.consumed_stops;
   }
 
-  void applyTimedOutCommand(const MotorCommandSnapshot& command,
-                            const uint32_t now_us32) {
+  void consumeTimedOutCommand(const MotorCommandSnapshot& command,
+                              const uint32_t service_start_us32) {
     motor_control_.stop();
     desired_enabled_ = false;
-    applied_target_velocity_rad_s_ = 0.0F;
-    applied_command_generation_ = command.generation;
-    command_apply_latency_us_ =
-        elapsedUs32(now_us32, command.issued_at_us32);
+    accepted_target_velocity_rad_s_ = 0.0F;
+    consumed_command_generation_ = command.generation;
+    command_accept_latency_us_ =
+        elapsedUs32(service_start_us32, command.issued_at_us32);
     command_timed_out_ = true;
     ++stats_.timeout_stops;
   }
@@ -239,23 +239,23 @@ class MotorExecutionDomain {
   void forceStopAndService() {
     motor_control_.stop();
     desired_enabled_ = false;
-    applied_target_velocity_rad_s_ = 0.0F;
+    accepted_target_velocity_rad_s_ = 0.0F;
     motor_control_.serviceBackend();
     ++stats_.service_calls;
     ++stats_.safety_stops;
   }
 
-  void publishSyntheticFault(const uint32_t now_us32) {
+  void publishSyntheticFault(const uint32_t service_start_us32) {
     if (observation_mailbox_ == nullptr) {
       return;
     }
     observation_mailbox_->publish(
-        0.0F, 0.0F, applied_command_generation_, command_apply_latency_us_,
-        now_us32, false, false, true, false, command_timed_out_);
+        0.0F, 0.0F, consumed_command_generation_, command_accept_latency_us_,
+        service_start_us32, false, false, true, false, command_timed_out_);
   }
 
   void publishObservation(const MotorControlObservation& observation,
-                          const uint32_t now_us32) {
+                          const uint32_t service_start_us32) {
     const bool finite = observationFinite(observation);
     const float shaft_velocity =
         finite ? observation.shaft_velocity_rad_s : 0.0F;
@@ -264,10 +264,10 @@ class MotorExecutionDomain {
         backend_fault_latched_ || observation.backend_faulted || !finite;
 
     observation_mailbox_->publish(
-        shaft_velocity, applied_target_velocity_rad_s_,
-        applied_command_generation_, command_apply_latency_us_, now_us32,
-        observation.initialized, sensor_valid, backend_faulted,
-        observation.actuator_enabled, command_timed_out_);
+        shaft_velocity, accepted_target_velocity_rad_s_,
+        consumed_command_generation_, command_accept_latency_us_,
+        service_start_us32, observation.initialized, sensor_valid,
+        backend_faulted, observation.actuator_enabled, command_timed_out_);
   }
 
   MotorControl motor_control_{};
@@ -281,9 +281,9 @@ class MotorExecutionDomain {
   bool desired_enabled_ = false;
   bool command_timed_out_ = false;
   uint32_t last_seen_command_generation_ = 0U;
-  uint32_t applied_command_generation_ = 0U;
-  uint32_t command_apply_latency_us_ = 0U;
-  float applied_target_velocity_rad_s_ = 0.0F;
+  uint32_t consumed_command_generation_ = 0U;
+  uint32_t command_accept_latency_us_ = 0U;
+  float accepted_target_velocity_rad_s_ = 0.0F;
 };
 
 }  // namespace triwhirl

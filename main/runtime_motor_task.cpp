@@ -71,7 +71,10 @@ bool MotorExecutionTask::initReleaseClock() {
   if (result == ESP_OK) {
     gptimer_event_callbacks_t callbacks{};
     callbacks.on_alarm = motorReleaseAlarmCallback;
-    result = gptimer_register_event_callbacks(timer, &callbacks, task_handle_);
+    // Resolve the receiving task from inside the pinned motor task itself. This
+    // avoids depending on when the creator's output handle becomes visible.
+    result = gptimer_register_event_callbacks(
+        timer, &callbacks, xTaskGetCurrentTaskHandle());
   }
   if (result == ESP_OK) {
     gptimer_alarm_config_t alarm{};
@@ -130,6 +133,7 @@ void MotorExecutionTask::taskMain() {
   publishLifecycle(true, false, false);
   (void)ulTaskNotifyTake(pdTRUE, 0);
 
+  std::uint32_t last_consumed_command_generation = 0U;
   while (true) {
     // Hardware release ticks accumulate as task notifications. Taking with
     // pdTRUE collapses backlog into a count rather than replaying stale service
@@ -142,15 +146,26 @@ void MotorExecutionTask::taskMain() {
     executor_->service(start_us32);
     const std::uint32_t end_us32 = nowUs32();
 
-    std::uint32_t command_apply_latency_us = 0U;
+    bool command_consumed_this_iteration = false;
+    std::uint32_t command_accept_latency_us = 0U;
     MotorObservationSnapshot observation{};
     if (observation_mailbox_->tryRead(&observation) &&
-        observation.applied_command_generation != 0U) {
-      command_apply_latency_us = observation.command_apply_latency_us;
+        observation.consumed_command_generation != 0U &&
+        observation.consumed_command_generation !=
+            last_consumed_command_generation) {
+      command_consumed_this_iteration = true;
+      command_accept_latency_us = observation.command_accept_latency_us;
+      last_consumed_command_generation =
+          observation.consumed_command_generation;
     }
 
+    // command_accept_latency_us ends at executor acceptance (service start), not
+    // physical PWM application. Adding this iteration's measured execution time
+    // yields a conservative software upper bound to backend service completion.
+    // Exact command-to-PWM timing remains a later backend/hardware measurement.
     timing_tracker_.recordIteration(start_us32, end_us32,
-                                    command_apply_latency_us);
+                                    command_consumed_this_iteration,
+                                    command_accept_latency_us);
     publishLifecycle(true, false, false);
   }
 }
