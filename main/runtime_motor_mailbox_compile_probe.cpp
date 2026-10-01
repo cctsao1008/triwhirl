@@ -17,7 +17,17 @@ namespace {
   triwhirl::MotorExecutionConfig execution_config{};
   triwhirl::MotorTaskTimingConfig timing_config{1000U, 100U};
   triwhirl::MotorTaskTimingTracker timing_tracker(timing_config);
+
+  // Compile-only placeholders: this function is never called, and these values
+  // intentionally carry no production scheduling authority.
   triwhirl::runtime::MotorExecutionTaskConfig task_config{};
+  task_config.task_name = "triwhirl_motor_probe";
+  task_config.stack_depth = 4096U;
+  task_config.priority = configMAX_PRIORITIES - 2;
+  task_config.core_id = 0;
+  task_config.service_period_us = 1000U;
+  task_config.late_slack_us = 100U;
+  task_config.release_interrupt_priority = 1;
 
   (void)command_mailbox.tryRead(&command);
   (void)observation_mailbox.tryRead(&observation);
