@@ -7,18 +7,28 @@ on:
       - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_execution.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_execution_timing.hpp'
+      - 'main/runtime_motor_task.hpp'
+      - 'main/runtime_motor_task.cpp'
+      - 'main/runtime_motor_mailbox_compile_probe.cpp'
       - 'tools/tests/motor_control_adapter_test.cpp'
       - 'tools/tests/motor_mailbox_test.cpp'
       - 'tools/tests/motor_execution_test.cpp'
+      - 'tools/tests/motor_execution_timing_test.cpp'
   pull_request:
     paths:
       - '.github/workflows/motor-control-contract.yml'
       - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_execution.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_execution_timing.hpp'
+      - 'main/runtime_motor_task.hpp'
+      - 'main/runtime_motor_task.cpp'
+      - 'main/runtime_motor_mailbox_compile_probe.cpp'
       - 'tools/tests/motor_control_adapter_test.cpp'
       - 'tools/tests/motor_mailbox_test.cpp'
       - 'tools/tests/motor_execution_test.cpp'
+      - 'tools/tests/motor_execution_timing_test.cpp'
 
 jobs:
   test:
@@ -52,3 +62,12 @@ jobs:
             tools/tests/motor_execution_test.cpp \
             -o /tmp/motor-execution-test
           /tmp/motor-execution-test
+
+      - name: Build and run motor execution timing test
+        shell: bash
+        run: |
+          g++ -std=c++17 -pthread \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/motor_execution_timing_test.cpp \
+            -o /tmp/motor-execution-timing-test
+          /tmp/motor-execution-timing-test
