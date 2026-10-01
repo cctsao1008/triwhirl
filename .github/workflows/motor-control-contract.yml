@@ -6,15 +6,19 @@ on:
       - '.github/workflows/motor-control-contract.yml'
       - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_execution.hpp'
       - 'tools/tests/motor_control_adapter_test.cpp'
       - 'tools/tests/motor_mailbox_test.cpp'
+      - 'tools/tests/motor_execution_test.cpp'
   pull_request:
     paths:
       - '.github/workflows/motor-control-contract.yml'
       - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_execution.hpp'
       - 'tools/tests/motor_control_adapter_test.cpp'
       - 'tools/tests/motor_mailbox_test.cpp'
+      - 'tools/tests/motor_execution_test.cpp'
 
 jobs:
   test:
@@ -39,3 +43,12 @@ jobs:
             tools/tests/motor_mailbox_test.cpp \
             -o /tmp/motor-mailbox-test
           /tmp/motor-mailbox-test
+
+      - name: Build and run motor execution-domain test
+        shell: bash
+        run: |
+          g++ -std=c++17 \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/motor_execution_test.cpp \
+            -o /tmp/motor-execution-test
+          /tmp/motor-execution-test

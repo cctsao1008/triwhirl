@@ -14,6 +14,7 @@ struct MotorControlObservation {
   bool initialized = false;
   bool sensor_valid = false;
   bool command_enabled = false;
+  bool actuator_enabled = false;
   bool backend_faulted = false;
 };
 
@@ -35,9 +36,8 @@ struct MotorControlOps {
 // Small, allocation-free system-level motor boundary.
 //
 // commandTargetVelocityRadS(), stop(), and observation() are the operations
-// intended for the attitude/control domain.  A concrete backend must implement
-// them as bounded, non-blocking command/snapshot operations when crossing task
-// or core domains.
+// intended for the attitude/control boundary. A cross-task implementation may
+// map them to bounded command/snapshot transport rather than a motor library.
 //
 // serviceBackend() belongs to the motor backend's own execution domain.  It is
 // explicitly separate because a backend may perform sensor-bus I/O there; the
@@ -63,8 +63,8 @@ class MotorControl {
 
   bool begin() const { return valid() && ops_.begin(context_); }
 
-  // Motor-domain hook.  Do not call this from the attitude loop when the
-  // backend can perform synchronous I/O.
+  // Motor-domain hook. Do not call this from the attitude loop when the backend
+  // can perform synchronous I/O.
   void serviceBackend() const {
     if (valid()) {
       ops_.service_backend(context_);
