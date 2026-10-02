@@ -21,11 +21,16 @@ add_executable(triwhirl-standup-sitl-live
   ../../components/triwhirl_core/standup_controller.cpp
 )
 
+add_executable(triwhirl-velocity-servo-contract
+  velocity_servo_model_test.cpp
+)
+
 foreach(target
     triwhirl-standup-sitl
     triwhirl-standup-sitl-full
     triwhirl-standup-sitl-disturbance
-    triwhirl-standup-sitl-live)
+    triwhirl-standup-sitl-live
+    triwhirl-velocity-servo-contract)
   target_compile_features(${target} PRIVATE cxx_std_17)
   target_include_directories(${target} PRIVATE
     ../../components/triwhirl_core/include
