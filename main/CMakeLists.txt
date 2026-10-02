@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "runtime_main.cpp" "runtime_state.cpp" "runtime_balance.cpp" "runtime_standup.cpp" "runtime_trace.cpp" "runtime_command_parser.cpp" "runtime_encoder_acquisition.cpp" "runtime_imu_acquisition.cpp" "runtime_sensor_pipeline.cpp" "runtime_sensor_state.cpp" "runtime_supervisor_io.cpp" "runtime_snapshot.cpp" "runtime_diagnostics.cpp" "runtime_release.cpp" "runtime_platform.cpp" "runtime_motor_task.cpp" "runtime_route_b_simplefoc_link_probe.cpp" "runtime_motor_mailbox_compile_probe.cpp"
     INCLUDE_DIRS "."
-    REQUIRES triwhirl_core triwhirl_hw triwhirl_ble triwhirl_log esp_driver_uart esp_driver_gptimer esp_driver_gpio esp_timer freertos
+    REQUIRES triwhirl_core triwhirl_hw triwhirl_ble triwhirl_log triwhirl_simplefoc esp_driver_uart esp_driver_gptimer esp_driver_gpio esp_timer freertos
 )
 
 # Embed the exact source revision that produced the flashed firmware. The trace
@@ -73,10 +73,11 @@ string(SUBSTRING "${TRIWHIRL_GIT_SHA40}" 32 8 TRIWHIRL_GIT_SHA4)
 # acquisition/pipeline, supervisor I/O, bounded diagnostics/snapshot,
 # release-clock, platform-affinity services, and the compile-only motor-task
 # scheduling wrapper are explicit translation units. No .cpp source inclusion
-# or symbol-renaming composition shim remains. The Route-B link-probe TU is empty
-# in native builds unless the PlatformIO spike explicitly defines
-# TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE. Merely compiling runtime_motor_task.cpp
-# does not instantiate/start a motor task or change production motor ownership.
+# or symbol-renaming composition shim remains. The production-shaped
+# triwhirl_simplefoc component is always present in the graph but compiles inert
+# in native IDF builds; Route-B explicitly enables its Arduino/SimpleFOC body.
+# The retained link-probe TU is likewise empty in native builds. Merely linking
+# either unit does not instantiate/start a motor task or change live ownership.
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2)
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     TRIWHIRL_GIT_SHA0=0x${TRIWHIRL_GIT_SHA0}U

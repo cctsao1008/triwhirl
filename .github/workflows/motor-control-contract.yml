@@ -8,6 +8,7 @@ on:
       - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_execution.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_execution_timing.hpp'
+      - 'components/triwhirl_simplefoc/include/triwhirl/simplefoc_motor_backend.hpp'
       - 'main/runtime_motor_task.hpp'
       - 'main/runtime_motor_task.cpp'
       - 'main/runtime_motor_mailbox_compile_probe.cpp'
@@ -15,6 +16,7 @@ on:
       - 'tools/tests/motor_mailbox_test.cpp'
       - 'tools/tests/motor_execution_test.cpp'
       - 'tools/tests/motor_execution_timing_test.cpp'
+      - 'tools/tests/simplefoc_backend_config_test.cpp'
   pull_request:
     paths:
       - '.github/workflows/motor-control-contract.yml'
@@ -22,6 +24,7 @@ on:
       - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_execution.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_execution_timing.hpp'
+      - 'components/triwhirl_simplefoc/include/triwhirl/simplefoc_motor_backend.hpp'
       - 'main/runtime_motor_task.hpp'
       - 'main/runtime_motor_task.cpp'
       - 'main/runtime_motor_mailbox_compile_probe.cpp'
@@ -29,6 +32,7 @@ on:
       - 'tools/tests/motor_mailbox_test.cpp'
       - 'tools/tests/motor_execution_test.cpp'
       - 'tools/tests/motor_execution_timing_test.cpp'
+      - 'tools/tests/simplefoc_backend_config_test.cpp'
 
 jobs:
   test:
@@ -71,3 +75,13 @@ jobs:
             tools/tests/motor_execution_timing_test.cpp \
             -o /tmp/motor-execution-timing-test
           /tmp/motor-execution-timing-test
+
+      - name: Build and run SimpleFOC backend configuration test
+        shell: bash
+        run: |
+          g++ -std=c++17 \
+            -Icomponents/triwhirl_core/include \
+            -Icomponents/triwhirl_simplefoc/include \
+            tools/tests/simplefoc_backend_config_test.cpp \
+            -o /tmp/simplefoc-backend-config-test
+          /tmp/simplefoc-backend-config-test
