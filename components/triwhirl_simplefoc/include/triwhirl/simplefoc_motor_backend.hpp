@@ -7,8 +7,13 @@
 #include "triwhirl/motor_control.hpp"
 
 #if defined(TRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND)
-#include <SimpleFOC.h>
+// Keep the production-shaped backend coupled only to the upstream APIs it
+// actually owns. Avoid SimpleFOC.h's umbrella sensor includes so Route-B does
+// not acquire unrelated SPI/library header dependencies.
+#include <BLDCMotor.h>
 #include <Wire.h>
+#include <drivers/BLDCDriver3PWM.h>
+#include <sensors/MagneticSensorI2C.h>
 #endif
 
 namespace triwhirl::simplefoc {
