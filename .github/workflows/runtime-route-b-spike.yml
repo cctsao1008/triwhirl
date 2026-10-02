@@ -3,7 +3,7 @@ name: Route-B runtime spike
 on:
   push:
     branches:
-      - simplefoc-runtime-spike
+      - main
     paths:
       - '.github/workflows/runtime-route-b-spike.yml'
       - 'platformio.ini'
@@ -38,7 +38,7 @@ jobs:
             "uv"
           "$HOME/.platformio/penv/bin/pio" --version
 
-      - name: Build existing runtime graph with Route-B dual framework
+      - name: Build production-shaped runtime graph with Route-B dual framework
         shell: bash
         run: |
           export PATH="$HOME/.platformio/penv/bin:$PATH"

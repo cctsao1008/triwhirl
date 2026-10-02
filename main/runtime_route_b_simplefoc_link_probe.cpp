@@ -1,56 +1,72 @@
-// Issue #45 build/link spike only.
+// Issue #53 production-shaped Route-B compile/link proof only.
 //
-// This translation unit is compiled by the native ESP-IDF build as an empty
-// file.  The Route-B PlatformIO environment defines
-// TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE and asks the linker to retain the
-// extern "C" symbol below.  That retained function references the real
-// SimpleFOC AS5600 / velocity / FOC path, so a green Route-B build proves more
-// than dependency download: the existing TriWhirl ESP-IDF component graph can
-// actually compile and link against the pinned Arduino/SimpleFOC stack.
-//
-// The function is NEVER called.  Its pins, pole-pair count, voltage and target
-// are compile-only placeholders and are not hardware authority.
+// Native ESP-IDF builds compile this translation unit as empty. The Route-B
+// environment enables the production-shaped triwhirl_simplefoc component and
+// retains the function below at link time. The function is NEVER called by
+// app_main(), so it performs no I2C access, FOC initialization, PWM enable, or
+// task creation on a running device.
 
-#if defined(TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE)
+#if defined(TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE) && \
+    defined(TRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND)
 
-#include <Arduino.h>
-#include <SimpleFOC.h>
-#include <Wire.h>
+#include <cstdint>
+
+#include "runtime_motor_task.hpp"
+#include "triwhirl/motor_execution.hpp"
+#include "triwhirl/motor_mailbox.hpp"
+#include "triwhirl/simplefoc_motor_backend.hpp"
 
 extern "C" __attribute__((used, noinline))
 void triwhirl_route_b_simplefoc_link_probe() {
-  constexpr int kCompileOnlyPolePairs = 1;
-  constexpr int kCompileOnlyPwmA = 2;
-  constexpr int kCompileOnlyPwmB = 4;
-  constexpr int kCompileOnlyPwmC = 16;
-  constexpr float kCompileOnlySupplyV = 5.0F;
-  constexpr float kCompileOnlyTargetVelocityRadS = 0.0F;
+  // Compile/link placeholders only. None of these values are TriWhirl hardware
+  // authority or commissioning data; real values require schematic/datasheet
+  // evidence and independent motor/encoder measurement before activation.
+  triwhirl::simplefoc::SimpleFocMotorBackendConfig backend_config{};
+  backend_config.i2c_bus_index = 1;
+  backend_config.sda_gpio = 21;
+  backend_config.scl_gpio = 22;
+  backend_config.i2c_hz = 400000U;
+  backend_config.pole_pairs = 1;
+  backend_config.pwm_a_gpio = 2;
+  backend_config.pwm_b_gpio = 4;
+  backend_config.pwm_c_gpio = 16;
+  backend_config.supply_voltage_v = 5.0F;
+  backend_config.voltage_limit_v = 1.0F;
+  backend_config.sensor_align_voltage_v = 0.5F;
+  backend_config.target_velocity_limit_rad_s = 10.0F;
+  backend_config.velocity_p = 0.1F;
+  backend_config.velocity_i = 0.1F;
+  backend_config.velocity_d = 0.0F;
+  backend_config.velocity_output_ramp = 100.0F;
+  backend_config.velocity_lpf_tf_s = 0.02F;
 
-  MagneticSensorI2C sensor(AS5600_I2C);
-  BLDCMotor motor(kCompileOnlyPolePairs);
-  BLDCDriver3PWM driver(kCompileOnlyPwmA, kCompileOnlyPwmB,
-                        kCompileOnlyPwmC);
+  triwhirl::simplefoc::SimpleFocMotorBackend backend(backend_config);
+  triwhirl::MotorControl motor_control = backend.makeControl();
 
-  // These calls intentionally live in retained-but-unexecuted code.  They
-  // force the Route-B linker to resolve the API surface that the production
-  // motor domain will eventually need, without performing hardware I/O.
-  sensor.init(&Wire);
-  motor.linkSensor(&sensor);
+  triwhirl::MotorCommandMailbox command_mailbox;
+  triwhirl::MotorObservationMailbox observation_mailbox;
+  triwhirl::MotorExecutionConfig execution_config{};
+  execution_config.command_timeout_us = 5000U;
+  triwhirl::MotorExecutionDomain executor(
+      motor_control, &command_mailbox, &observation_mailbox, execution_config);
 
-  driver.voltage_power_supply = kCompileOnlySupplyV;
-  driver.init();
-  motor.linkDriver(&driver);
+  triwhirl::runtime::MotorExecutionTaskConfig task_config{};
+  task_config.task_name = "sfoc-link-probe";
+  task_config.stack_depth = 4096U;
+  task_config.priority = configMAX_PRIORITIES - 3;
+  task_config.core_id = 0;
+  task_config.service_period_us = 1000U;
+  task_config.late_slack_us = 100U;
+  task_config.release_interrupt_priority = 1;
+  triwhirl::runtime::MotorExecutionTask motor_task(
+      &executor, &observation_mailbox, task_config);
 
-  motor.torque_controller = TorqueControlType::voltage;
-  motor.controller = MotionControlType::velocity;
-  motor.init();
-  motor.initFOC();
-  motor.enable();
-  motor.loopFOC();
-  motor.move(kCompileOnlyTargetVelocityRadS);
-  volatile float shaft_velocity_rad_s = motor.shaftVelocity();
-  (void)shaft_velocity_rad_s;
-  motor.disable();
+  // These are validation-only calls. They contain no hardware I/O and create no
+  // RTOS task. Referencing the objects forces the linker to resolve the actual
+  // production-shaped backend plus execution/scheduling stack.
+  volatile bool stack_valid = backend.configValid() && motor_control.valid() &&
+                              executor.valid() && motor_task.valid();
+  (void)stack_valid;
 }
 
-#endif  // TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE
+#endif  // Route-B production-shaped SimpleFOC proof
