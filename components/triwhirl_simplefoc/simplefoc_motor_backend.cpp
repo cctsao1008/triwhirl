@@ -129,8 +129,15 @@ void SimpleFocMotorBackend::serviceBackendImpl() {
     motor_.move(target_velocity_rad_s_);
   }
 
+  // In SimpleFOC v2.4.0 MagneticSensorI2C::currWireError is assigned from the
+  // most recent Wire::endTransmission(false). A finite velocity alone is not
+  // sufficient evidence that the AS5600 transaction succeeded, so propagate
+  // both conditions through the mechanical-domain validity snapshot.
   const float shaft_velocity_rad_s = motor_.shaftVelocity();
   const bool velocity_valid = std::isfinite(shaft_velocity_rad_s);
+  const bool transport_valid = sensor_.currWireError == 0U;
+  const bool sensor_valid = velocity_valid && transport_valid;
+
   if (!velocity_valid) {
     if (motor_enabled_) {
       motor_.disable();
@@ -140,7 +147,7 @@ void SimpleFocMotorBackend::serviceBackendImpl() {
   }
 
   observation_.initialized = initialized_;
-  observation_.sensor_valid = velocity_valid;
+  observation_.sensor_valid = sensor_valid;
   observation_.command_enabled = command_enabled_;
   observation_.actuator_enabled = motor_enabled_;
   observation_.backend_faulted = backend_faulted_;
