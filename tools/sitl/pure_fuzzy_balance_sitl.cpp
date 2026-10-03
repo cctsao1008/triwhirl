@@ -42,7 +42,9 @@ triwhirl::FuzzyBalanceConfig fuzzySimulationFixture() {
   config.wheel_velocity_scale_rad_s = 17.0F;
   config.target_velocity_limit_rad_s = 80.0F;
   config.target_velocity_singletons =
-      triwhirl::fuzzy_balance::makeQualitativeRuleSeed();
+      triwhirl::fuzzy_balance::makeQualitativeRuleSeed(
+          config.wheel_velocity_scale_rad_s,
+          config.target_velocity_limit_rad_s);
   config.rule_surface_configured = true;
   return config;
 }
