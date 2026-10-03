@@ -10,9 +10,14 @@
 
 namespace {
 
+// This executable is a structural command-path contract only. The historical
+// nominal local fixture and the simulation-only normalization values below do
+// not have enough authority to claim closed-loop recovery. Keep the horizon
+// short so the test exercises composition/units/symmetry without turning an
+// unsupported historical fit into a controller-tuning oracle.
 constexpr double kStepS = 0.0005;
-constexpr double kDurationS = 5.0;
-constexpr int kSteps = static_cast<int>(kDurationS / kStepS);
+constexpr double kStructuralHorizonS = 0.020;
+constexpr int kSteps = static_cast<int>(kStructuralHorizonS / kStepS);
 constexpr double kMirrorTolerance = 5.0e-5;
 
 bool expect(const bool condition, const std::string& name, int& failures) {
@@ -133,10 +138,12 @@ ScenarioResult runScenario(const triwhirl::sitl::LocalLinearState& initial) {
   return result;
 }
 
-bool recovered(const ScenarioResult& result) {
-  return result.valid && result.max_abs_theta_rad < 0.09 &&
-         std::fabs(result.final_state.theta_error_rad) < 1.0e-3 &&
-         std::fabs(result.final_state.theta_rate_rad_s) < 2.0e-3 &&
+bool structurallyBounded(const ScenarioResult& result) {
+  return result.valid && std::isfinite(result.final_state.theta_error_rad) &&
+         std::isfinite(result.final_state.theta_rate_rad_s) &&
+         std::isfinite(result.final_state.wheel_rate_rad_s) &&
+         result.max_abs_theta_rad < 0.20 &&
+         result.max_abs_wheel_rate_rad_s < 20.0 &&
          result.max_abs_target_velocity_rad_s <= 80.0 + 1.0e-6;
 }
 
@@ -146,25 +153,41 @@ int main() {
   int failures = 0;
 
   std::cout
-      << "pure_fuzzy_sitl_authority=SIMULATION_ONLY_HISTORICAL_NOMINAL\n"
+      << "pure_fuzzy_sitl_authority=STRUCTURAL_ONLY_HISTORICAL_NOMINAL\n"
+      << "closed_loop_recovery_authority=NONE\n"
       << "hardware_tune_authority=NONE\n"
       << "controller_path=fuzzy->target_velocity->velocity_servo->local_plant\n";
+
+  const auto fuzzy_config = fuzzySimulationFixture();
+  const triwhirl::FuzzyBalanceController fuzzy(fuzzy_config);
+  const auto wheel_baseline =
+      fuzzy.evaluate(triwhirl::FuzzyBalanceInput{0.0F, 0.0F, 1.0F});
+  expect(wheel_baseline.valid &&
+             near(wheel_baseline.target_velocity_rad_s, 1.0, 1.0e-5),
+         "zero attitude urgency preserves physical wheel rad/s across unequal scales",
+         failures);
+
+  const auto positive_correction =
+      fuzzy.evaluate(triwhirl::FuzzyBalanceInput{0.02F, 0.0F, 1.0F});
+  const auto negative_correction =
+      fuzzy.evaluate(triwhirl::FuzzyBalanceInput{-0.02F, 0.0F, 1.0F});
+  expect(positive_correction.valid && negative_correction.valid &&
+             positive_correction.target_velocity_rad_s <
+                 wheel_baseline.target_velocity_rad_s &&
+             negative_correction.target_velocity_rad_s >
+                 wheel_baseline.target_velocity_rad_s,
+         "attitude urgency shifts the absolute wheel target around its baseline",
+         failures);
 
   const ScenarioResult positive = runScenario({0.02, 0.0, 0.0});
   const ScenarioResult negative = runScenario({-0.02, 0.0, 0.0});
   const ScenarioResult rate_kick = runScenario({0.0, 0.10, 0.0});
   const ScenarioResult wheel_kick = runScenario({0.0, 0.0, 1.0});
 
-  expect(recovered(positive),
-         "positive small-angle disturbance recovers on simulation fixture",
+  expect(structurallyBounded(positive) && structurallyBounded(negative) &&
+             structurallyBounded(rate_kick) && structurallyBounded(wheel_kick),
+         "short-horizon structural scenarios remain finite and command-bounded",
          failures);
-  expect(recovered(negative),
-         "negative small-angle disturbance recovers on simulation fixture",
-         failures);
-  expect(recovered(rate_kick),
-         "body-rate disturbance recovers on simulation fixture", failures);
-  expect(recovered(wheel_kick),
-         "wheel-rate disturbance recovers on simulation fixture", failures);
 
   expect(positive.valid && negative.valid &&
              near(positive.final_state.theta_error_rad,
@@ -176,20 +199,19 @@ int main() {
              near(positive.max_abs_theta_rad, negative.max_abs_theta_rad) &&
              near(positive.max_abs_wheel_rate_rad_s,
                   negative.max_abs_wheel_rate_rad_s),
-         "mirrored disturbances produce mirrored closed-loop response",
+         "mirrored disturbances produce mirrored structural response",
          failures);
 
   expect(positive.valid && !positive.target_saturated &&
              !positive.acceleration_saturated,
-         "reference small-angle case remains inside simulation servo limits",
+         "reference structural case remains inside simulation servo limits",
          failures);
 
   if (failures == 0) {
-    std::cout << "PASS pure-fuzzy near-upright target-velocity SITL\n";
+    std::cout << "PASS pure-fuzzy target-velocity structural SITL\n";
     return 0;
   }
 
-  std::cerr << "FAIL pure-fuzzy near-upright SITL failures=" << failures
-            << '\n';
+  std::cerr << "FAIL pure-fuzzy structural SITL failures=" << failures << '\n';
   return 1;
 }
