@@ -25,6 +25,8 @@ jobs:
         run: |
           cmake -S tools/sitl -B /tmp/triwhirl-sitl-build
           cmake --build /tmp/triwhirl-sitl-build --config Release
+      - name: Gate target-velocity motor-servo contract
+        run: /tmp/triwhirl-sitl-build/triwhirl-velocity-servo-contract
       - name: Run invariant and long-run local closed-loop gates
         run: /tmp/triwhirl-sitl-build/triwhirl-standup-sitl --self-test
       - name: Generate 10-second local balance evidence

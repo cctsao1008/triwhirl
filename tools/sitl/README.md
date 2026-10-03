@@ -51,6 +51,39 @@ COM offset and rolling-loss parameters are not measured, so the global model is
 **exploratory**. A simulated swing-up or Stable indication is an observation,
 not validation authority.
 
+## Target-velocity motor-servo contract
+
+The target architecture does not expose `Vq` to the attitude controller. Before
+tuning full-fuzzy control, SITL therefore has a separate mechanical-domain
+contract for the future actuator boundary:
+
+```text
+target_velocity [rad/s]
+        |
+        v
+provisional velocity-servo surrogate
+        |
+        v
+wheel_accel_command [rad/s^2]
+```
+
+`velocity_servo_model.hpp` implements a bounded first-order surrogate:
+
+```text
+wheel_accel_command = clamp((target_velocity - wheel_velocity) / tau,
+                            -acceleration_limit,
+                            +acceleration_limit)
+```
+
+Its configuration is invalid by default. The round values used by the contract
+test are simulation fixtures only: they are **not** SimpleFOC PI/LPF settings,
+not hardware commissioning data, and not vendor-derived parameters.
+
+This contract is intentionally separate from the existing Vq-input B/C
+commissioning SITL. It proves units, bounds, symmetry, saturation behavior and
+fail-closed numeric handling only. It does not identify the real motor servo,
+change current local-model authority, or validate global swing-up.
+
 ## Timing
 
 - production controller opportunity: 1 kHz;
@@ -81,6 +114,7 @@ triwhirl-standup-sitl                 local deterministic balance regression
 triwhirl-standup-sitl-disturbance     local deterministic disturbance regression
 triwhirl-standup-sitl-full            geometry-derived global observation
 triwhirl-standup-sitl-live            continuous WebUI native process
+triwhirl-velocity-servo-contract       target-velocity mechanical-boundary contract
 ```
 
 ## Local regression gates
@@ -92,6 +126,16 @@ triwhirl-standup-sitl-live            continuous WebUI native process
 The 10-second local balance gate requires continuous Balance, settling/stable
 acquisition, bounded body error/wheel speed, bilateral correction, and no Vq
 saturation.
+
+The independent target-velocity boundary contract can be run with:
+
+```powershell
+.\build\sitl\Release\triwhirl-velocity-servo-contract.exe
+```
+
+It gates invalid configuration, zero-error behavior, sign symmetry, target and
+acceleration clamping, monotonic unsaturated response, and non-finite input
+rejection without changing the existing commissioning controller.
 
 ## Geometry-derived global checks
 
@@ -142,7 +186,9 @@ rendered rolling/contact motion is the same geometry used by the global model.
 ## Evidence boundary
 
 Passing local regression gates means the production controller is stable on the
-stated provisional local models for those scenarios. Passing geometry invariant
-checks means the global rolling implementation is internally consistent with the
-ideal Reuleaux geometry and the chosen local anchors. Neither statement proves
-hardware stability.
+stated provisional local models for those scenarios. Passing the target-velocity
+servo contract means only that the future mechanical command boundary is
+finite, bounded and dimensionally explicit for the stated simulation fixture.
+Passing geometry invariant checks means the global rolling implementation is
+internally consistent with the ideal Reuleaux geometry and the chosen local
+anchors. None of these statements proves hardware stability.
