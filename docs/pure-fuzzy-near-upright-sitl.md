@@ -1,6 +1,6 @@
 # Pure-fuzzy near-upright SITL
 
-This note records the first closed-loop software-in-the-loop path for the target pure-fuzzy attitude architecture. It is a **simulation contract**, not a hardware tune.
+This note records the first software-in-the-loop command path for the target pure-fuzzy attitude architecture. It is a **structural simulation contract**, not a hardware tune and not currently a closed-loop recovery authority.
 
 ## Command semantics
 
@@ -49,7 +49,31 @@ Momentum unloading is a later full-fuzzy behavior. It must account for attitude 
    historical nominal local fixture
 ```
 
-The executable checks small positive/negative body-angle disturbances, a body-rate disturbance, a wheel-rate disturbance, bounded target velocity, and mirrored closed-loop response.
+The executable now uses a short horizon to check unit consistency, finite/bounded composition, attitude-command direction, and mirrored response. It intentionally does **not** claim long-horizon balance or disturbance recovery.
+
+## Why recovery authority was withdrawn
+
+The first #67 SITL seed matched the wheel linguistic input directly to the normalized target output. With different physical scales (`17 rad/s` wheel input scale versus `80 rad/s` target limit), that made
+
+```text
+normalized target = normalized wheel velocity
+```
+
+but did **not** make
+
+```text
+target_velocity [rad/s] = wheel_velocity [rad/s].
+```
+
+The resulting extra wheel-speed feedback happened to make the historical nominal fixture recover in the earlier simulation. That recovery result depended on a unit/coordinate mismatch and is therefore withdrawn as control evidence.
+
+After correcting the wheel baseline with the `17/80` scale ratio, the same untuned qualitative seed no longer stabilizes the historical nominal fixture over the previous five-second horizon. We do not retune the fuzzy law merely to rescue that provisional historical fit. Until supported plant/tuning evidence exists, CI treats this executable as a structural path test only and reports:
+
+```text
+pure_fuzzy_sitl_authority=STRUCTURAL_ONLY_HISTORICAL_NOMINAL
+closed_loop_recovery_authority=NONE
+hardware_tune_authority=NONE
+```
 
 ## Authority boundary
 
@@ -72,9 +96,10 @@ These values were selected only to exercise the complete software path on the ex
 - validated hardware normalization scales;
 - SimpleFOC PI/LPF settings;
 - motor capability limits;
+- local closed-loop recovery authority;
 - global swing-up authority;
 - proof that the real TriWhirl will balance with these values.
 
-Hardware normalization, motor/output polarity, real target-velocity limits, and SimpleFOC velocity-loop behavior still require independent bench evidence.
+Hardware normalization, motor/output polarity, real target-velocity limits, momentum-management behavior, and SimpleFOC velocity-loop behavior still require independent bench evidence.
 
 No LQR, PID, or H-infinity controller is part of this path.
