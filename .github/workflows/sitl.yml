@@ -29,7 +29,7 @@ jobs:
         run: /tmp/triwhirl-sitl-build/triwhirl-velocity-servo-contract
       - name: Gate local wheel-acceleration coordinate contract
         run: /tmp/triwhirl-sitl-build/triwhirl-local-accel-coordinate-contract
-      - name: Gate current B/C shared-feedback model feasibility
+      - name: Diagnostic historical B/C shared-feedback mismatch
         run: /tmp/triwhirl-sitl-build/triwhirl-local-shared-feedback-feasibility
       - name: Run invariant and long-run local closed-loop gates
         run: /tmp/triwhirl-sitl-build/triwhirl-standup-sitl --self-test
