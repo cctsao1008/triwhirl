@@ -36,7 +36,14 @@ jobs:
             components/triwhirl_core/balance_controller.cpp \
             -o /tmp/balance-controller-test
           /tmp/balance-controller-test
-      - name: "test: vendor-aligned standup controller"
+      - name: "test: generic fuzzy inference contract"
+        run: |
+          g++ -std=c++17 \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/fuzzy_core_test.cpp \
+            -o /tmp/fuzzy-core-test
+          /tmp/fuzzy-core-test
+      - name: "test: legacy commissioning standup controller"
         run: |
           g++ -std=c++17 \
             -Icomponents/triwhirl_core/include \
