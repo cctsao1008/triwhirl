@@ -27,6 +27,8 @@ jobs:
           cmake --build /tmp/triwhirl-sitl-build --config Release
       - name: Gate target-velocity motor-servo contract
         run: /tmp/triwhirl-sitl-build/triwhirl-velocity-servo-contract
+      - name: Gate local wheel-acceleration coordinate contract
+        run: /tmp/triwhirl-sitl-build/triwhirl-local-accel-coordinate-contract
       - name: Run invariant and long-run local closed-loop gates
         run: /tmp/triwhirl-sitl-build/triwhirl-standup-sitl --self-test
       - name: Generate 10-second local balance evidence
