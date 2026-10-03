@@ -1,0 +1,37 @@
+name: Fuzzy attitude command contract
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fuzzy-attitude-command.yml'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy.hpp'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy_balance_controller.hpp'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy_balance_seed.hpp'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy_attitude_command.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
+      - 'components/triwhirl_core/include/triwhirl/upright_geometry.hpp'
+      - 'tools/tests/fuzzy_attitude_command_test.cpp'
+  pull_request:
+    paths:
+      - '.github/workflows/fuzzy-attitude-command.yml'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy.hpp'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy_balance_controller.hpp'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy_balance_seed.hpp'
+      - 'components/triwhirl_core/include/triwhirl/fuzzy_attitude_command.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
+      - 'components/triwhirl_core/include/triwhirl/upright_geometry.hpp'
+      - 'tools/tests/fuzzy_attitude_command_test.cpp'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run fail-closed pure-fuzzy attitude command contract
+        shell: bash
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/fuzzy_attitude_command_test.cpp \
+            -o /tmp/fuzzy-attitude-command-test
+          /tmp/fuzzy-attitude-command-test
