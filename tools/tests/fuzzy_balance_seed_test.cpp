@@ -9,6 +9,10 @@
 
 namespace {
 
+constexpr float kWheelScaleRadS = 0.4F;
+constexpr float kTargetLimitRadS = 1.0F;
+constexpr float kWheelToTargetRatio = kWheelScaleRadS / kTargetLimitRadS;
+
 bool near(const float lhs, const float rhs, const float tolerance = 1.0e-5F) {
   return std::fabs(lhs - rhs) <= tolerance;
 }
@@ -34,10 +38,12 @@ triwhirl::FuzzyBalanceController seedController() {
   triwhirl::FuzzyBalanceConfig config{};
   config.theta_error_scale_rad = 1.0F;
   config.theta_rate_scale_rad_s = 1.0F;
-  config.wheel_velocity_scale_rad_s = 1.0F;
-  config.target_velocity_limit_rad_s = 1.0F;
+  config.wheel_velocity_scale_rad_s = kWheelScaleRadS;
+  config.target_velocity_limit_rad_s = kTargetLimitRadS;
   config.target_velocity_singletons =
-      triwhirl::fuzzy_balance::makeQualitativeRuleSeed();
+      triwhirl::fuzzy_balance::makeQualitativeRuleSeed(
+          config.wheel_velocity_scale_rad_s,
+          config.target_velocity_limit_rad_s);
   config.rule_surface_configured = true;
   return triwhirl::FuzzyBalanceController(config);
 }
@@ -46,7 +52,8 @@ triwhirl::FuzzyBalanceController seedController() {
 
 int main() {
   int failures = 0;
-  const auto seed = triwhirl::fuzzy_balance::makeQualitativeRuleSeed();
+  const auto seed = triwhirl::fuzzy_balance::makeQualitativeRuleSeed(
+      kWheelScaleRadS, kTargetLimitRadS);
 
   bool bounded = true;
   bool odd = true;
@@ -76,12 +83,12 @@ int main() {
   for (std::size_t wheel = 0; wheel < triwhirl::fuzzy::kFiveTermCount;
        ++wheel) {
     const float expected =
-        0.5F * static_cast<float>(static_cast<int>(wheel) - 2);
+        triwhirl::fuzzy::kFiveTermCenters[wheel] * kWheelToTargetRatio;
     wheel_baseline = wheel_baseline &&
                      near(seed[ruleIndex(2, 2, wheel)], expected);
   }
   expect(wheel_baseline,
-         "ZE/ZE/wheel reproduces the absolute target-velocity baseline",
+         "ZE/ZE/wheel converts the wheel center into the physical target scale",
          failures);
 
   expect(seed[ruleIndex(4, 2, 2)] < seed[ruleIndex(2, 2, 2)] &&
@@ -101,11 +108,14 @@ int main() {
          failures);
 
   {
-    const auto output =
-        controller.evaluate(triwhirl::FuzzyBalanceInput{0.0F, 0.0F, 0.25F});
-    expect(output.valid && near(output.target_velocity_normalized, 0.25F) &&
-               near(output.target_velocity_rad_s, 0.25F),
-           "continuous fuzzy inference preserves wheel velocity at zero attitude urgency",
+    constexpr float wheel_velocity = 0.25F;
+    const auto output = controller.evaluate(
+        triwhirl::FuzzyBalanceInput{0.0F, 0.0F, wheel_velocity});
+    expect(output.valid &&
+               near(output.target_velocity_rad_s, wheel_velocity) &&
+               near(output.target_velocity_normalized,
+                    wheel_velocity / kTargetLimitRadS),
+           "zero attitude urgency preserves wheel rad/s even when input/output scales differ",
            failures);
   }
 
@@ -173,6 +183,14 @@ int main() {
                near(out_a.target_velocity_normalized,
                     out_c.target_velocity_normalized),
            "A/B/C 120-degree uprights share one fuzzy control coordinate",
+           failures);
+  }
+
+  {
+    const auto invalid = triwhirl::fuzzy_balance::makeQualitativeRuleSeed(
+        1.0F, 0.0F);
+    expect(!std::isfinite(invalid[0]),
+           "invalid scale ratio produces a fail-closed invalid rule seed",
            failures);
   }
 
