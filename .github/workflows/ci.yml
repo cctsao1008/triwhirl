@@ -42,6 +42,13 @@ jobs:
             tools/tests/fuzzy_balance_controller_test.cpp \
             -o /tmp/fuzzy-balance-controller-test
           /tmp/fuzzy-balance-controller-test
+      - name: "test: qualitative pure-fuzzy balance seed"
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/fuzzy_balance_seed_test.cpp \
+            -o /tmp/fuzzy-balance-seed-test
+          /tmp/fuzzy-balance-seed-test
       - name: "test: balance controller contract"
         run: |
           g++ -std=c++17 \
