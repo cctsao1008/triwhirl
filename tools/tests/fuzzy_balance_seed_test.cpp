@@ -72,29 +72,58 @@ int main() {
   expect(near(seed[ruleIndex(2, 2, 2)], 0.0F),
          "ZE/ZE/ZE maps to zero target", failures);
 
-  expect(seed[ruleIndex(4, 2, 2)] < 0.0F &&
-             seed[ruleIndex(0, 2, 2)] > 0.0F,
-         "body-angle terms provide restoring intent", failures);
-  expect(seed[ruleIndex(2, 4, 2)] < 0.0F &&
-             seed[ruleIndex(2, 0, 2)] > 0.0F,
-         "body-rate terms provide damping intent", failures);
-  expect(seed[ruleIndex(2, 2, 4)] < 0.0F &&
-             seed[ruleIndex(2, 2, 0)] > 0.0F,
-         "wheel-rate terms provide momentum-centering intent near equilibrium",
+  bool wheel_baseline = true;
+  for (std::size_t wheel = 0; wheel < triwhirl::fuzzy::kFiveTermCount;
+       ++wheel) {
+    const float expected =
+        0.5F * static_cast<float>(static_cast<int>(wheel) - 2);
+    wheel_baseline = wheel_baseline &&
+                     near(seed[ruleIndex(2, 2, wheel)], expected);
+  }
+  expect(wheel_baseline,
+         "ZE/ZE/wheel reproduces the absolute target-velocity baseline",
          failures);
 
-  expect(near(seed[ruleIndex(4, 2, 0)], seed[ruleIndex(4, 2, 4)]) &&
-             near(seed[ruleIndex(4, 2, 2)], -1.0F),
-         "strong attitude recovery is not reversed by wheel momentum",
-         failures);
-  expect(seed[ruleIndex(3, 2, 0)] <= 0.0F &&
-             seed[ruleIndex(3, 2, 4)] < 0.0F,
-         "near-equilibrium momentum trim may soften but not reverse restoring intent",
+  expect(seed[ruleIndex(4, 2, 2)] < seed[ruleIndex(2, 2, 2)] &&
+             seed[ruleIndex(0, 2, 2)] > seed[ruleIndex(2, 2, 2)],
+         "body-angle terms shift target in the restoring direction", failures);
+  expect(seed[ruleIndex(2, 4, 2)] < seed[ruleIndex(2, 2, 2)] &&
+             seed[ruleIndex(2, 0, 2)] > seed[ruleIndex(2, 2, 2)],
+         "body-rate terms shift target in the damping direction", failures);
+
+  expect(seed[ruleIndex(3, 2, 3)] < seed[ruleIndex(2, 2, 3)] &&
+             seed[ruleIndex(1, 2, 3)] > seed[ruleIndex(2, 2, 3)],
+         "attitude correction is relative to a nonzero wheel baseline",
          failures);
 
   const auto controller = seedController();
   expect(controller.valid(), "qualitative seed forms a valid fuzzy controller",
          failures);
+
+  {
+    const auto output =
+        controller.evaluate(triwhirl::FuzzyBalanceInput{0.0F, 0.0F, 0.25F});
+    expect(output.valid && near(output.target_velocity_normalized, 0.25F) &&
+               near(output.target_velocity_rad_s, 0.25F),
+           "continuous fuzzy inference preserves wheel velocity at zero attitude urgency",
+           failures);
+  }
+
+  {
+    const auto baseline =
+        controller.evaluate(triwhirl::FuzzyBalanceInput{0.0F, 0.0F, 0.25F});
+    const auto restoring =
+        controller.evaluate(triwhirl::FuzzyBalanceInput{0.25F, 0.0F, 0.25F});
+    const auto damping =
+        controller.evaluate(triwhirl::FuzzyBalanceInput{0.0F, 0.25F, 0.25F});
+    expect(baseline.valid && restoring.valid && damping.valid &&
+               restoring.target_velocity_normalized <
+                   baseline.target_velocity_normalized &&
+               damping.target_velocity_normalized <
+                   baseline.target_velocity_normalized,
+           "restoring and damping intent shift target below a positive wheel baseline",
+           failures);
+  }
 
   {
     const auto positive =
