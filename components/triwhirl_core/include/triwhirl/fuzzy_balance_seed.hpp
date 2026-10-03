@@ -8,8 +8,7 @@
 
 namespace triwhirl::fuzzy_balance {
 
-// Qualitative normalized rule seed for the first pure-fuzzy near-upright
-// controller milestone.
+// Qualitative normalized rule seed for the pure-fuzzy near-upright controller.
 //
 // This is deliberately not a hardware tune and contains no plant-derived,
 // LQR, PID, or H-infinity gains. Physical influence is still set by the
@@ -19,23 +18,29 @@ namespace triwhirl::fuzzy_balance {
 // Linguistic term rank:
 //   NL=-2, NS=-1, ZE=0, PS=+1, PL=+2
 //
-// Rule semantics:
-//   1. theta_error and theta_rate form the attitude-restoring/damping intent;
-//   2. that intent saturates linguistically at PL/NL rather than growing
-//      linearly without bound;
-//   3. wheel momentum may trim the command only while attitude urgency is ZE
-//      or one linguistic step away from ZE;
-//   4. mirrored state produces mirrored command and ZE/ZE/ZE -> 0.
+// Important command-coordinate semantic:
+//   the controller emits an ABSOLUTE wheel target velocity, not wheel torque,
+//   Vq, or wheel acceleration. Therefore, with theta_error=theta_rate=ZE, the
+//   qualitative target should preserve the current wheel-velocity operating
+//   point rather than command the opposite wheel direction.
 //
-// Canonical sign convention: positive local attitude intent requests negative
-// wheel target velocity. Hardware sensor/motor polarity must be established
-// independently before this seed is enabled on a real unit.
+// Rule semantics:
+//   1. wheel rank supplies the absolute target-velocity baseline;
+//   2. theta_error and theta_rate form restoring/damping urgency;
+//   3. restoring/damping urgency shifts the target relative to that baseline;
+//   4. the final linguistic command saturates at PL/NL;
+//   5. mirrored state produces mirrored command and ZE/ZE/ZE -> 0.
+//
+// Momentum unloading is intentionally not encoded here as "command opposite
+// wheel speed at zero attitude error". That would conflate an absolute
+// velocity target with torque intent. Saturation-aware momentum management is
+// a later full-fuzzy behavior.
+//
+// Canonical sign convention: positive local attitude urgency shifts the wheel
+// target in the negative direction. Hardware sensor/motor polarity must be
+// established independently before this seed is enabled on a real unit.
 inline int termRank(const std::size_t term) {
   return static_cast<int>(term) - 2;
-}
-
-inline int signOfRank(const int value) {
-  return (value > 0) - (value < 0);
 }
 
 inline float qualitativeSingleton(const std::size_t theta_term,
@@ -45,19 +50,16 @@ inline float qualitativeSingleton(const std::size_t theta_term,
   const int rate_rank = termRank(theta_rate_term);
   const int wheel_rank = termRank(wheel_term);
 
-  // Equal linguistic priority here does not imply equal physical gain: each
-  // input has its own normalization scale in FuzzyBalanceConfig.
+  // Equal linguistic priority here does not imply equal physical influence:
+  // each input has its own normalization scale in FuzzyBalanceConfig.
   const int attitude_urgency =
       std::clamp(theta_rank + rate_rank, -2, 2);
-  int command_rank = -attitude_urgency;
 
-  // Near equilibrium, use wheel velocity as momentum-centering intent. During
-  // strong attitude recovery, preserve the restoring command and do not let a
-  // stored wheel-speed term reverse it.
-  if (attitude_urgency >= -1 && attitude_urgency <= 1) {
-    command_rank =
-        std::clamp(command_rank - signOfRank(wheel_rank), -2, 2);
-  }
+  // Absolute target-velocity semantics: preserve the wheel operating point at
+  // zero attitude urgency, then shift that target to create correcting wheel
+  // acceleration through the downstream velocity servo.
+  const int command_rank =
+      std::clamp(wheel_rank - attitude_urgency, -2, 2);
 
   return 0.5F * static_cast<float>(command_rank);
 }
