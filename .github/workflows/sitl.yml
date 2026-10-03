@@ -31,6 +31,8 @@ jobs:
         run: /tmp/triwhirl-sitl-build/triwhirl-local-accel-coordinate-contract
       - name: Diagnostic historical B/C shared-feedback mismatch
         run: /tmp/triwhirl-sitl-build/triwhirl-local-shared-feedback-feasibility
+      - name: Exercise pure-fuzzy target-velocity pipeline (simulation-only)
+        run: /tmp/triwhirl-sitl-build/triwhirl-pure-fuzzy-balance-sitl
       - name: Run invariant and long-run local closed-loop gates
         run: /tmp/triwhirl-sitl-build/triwhirl-standup-sitl --self-test
       - name: Generate 10-second local balance evidence
