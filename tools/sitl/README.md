@@ -84,6 +84,56 @@ commissioning SITL. It proves units, bounds, symmetry, saturation behavior and
 fail-closed numeric handling only. It does not identify the real motor servo,
 change current local-model authority, or validate global swing-up.
 
+## Local actuator-coordinate transform
+
+The provisional B/C local models were identified with `Vq` as their input:
+
+```text
+x_dot = A x + B * Vq
+```
+
+The target-velocity servo contract instead emits commanded wheel acceleration.
+Those quantities are not interchangeable. `local_linear_plant.hpp` therefore
+adds an algebraic simulation-only coordinate transform around the same local
+linear model.
+
+For the identified wheel-rate row,
+
+```text
+wheel_accel = A_w x + B_w * Vq
+```
+
+the transformed coordinate solves the latent old input as
+
+```text
+Vq_equiv = (wheel_accel_command - A_w x) / B_w
+```
+
+and uses that value only inside the local-model algebra. `Vq_equiv` is not a
+production actuator command and is never an output of the fuzzy controller.
+The transformed derivative uses
+
+```text
+theta dynamics <- original body rows evaluated at Vq_equiv
+wheel_dot      <- wheel_accel_command
+```
+
+The deterministic contract constructs `wheel_accel_command` from the original
+Vq derivative over B, C, and nominal fixtures and verifies that the transformed
+state derivative reproduces the original derivative to numerical tolerance.
+It also checks the full simulation boundary
+
+```text
+target_velocity
+    -> provisional velocity servo
+    -> wheel_accel_command
+    -> transformed local plant derivative
+```
+
+for finite, dimensionally explicit behavior. This is a coordinate change of a
+**provisional near-upright model**, not an upgrade of plant authority and not a
+claim that the real SimpleFOC motor path is an ideal acceleration source.
+
 ## Timing
 
 - production controller opportunity: 1 kHz;
@@ -110,11 +160,12 @@ cmake --build build/sitl
 Built executables:
 
 ```text
-triwhirl-standup-sitl                 local deterministic balance regression
-triwhirl-standup-sitl-disturbance     local deterministic disturbance regression
-triwhirl-standup-sitl-full            geometry-derived global observation
-triwhirl-standup-sitl-live            continuous WebUI native process
-triwhirl-velocity-servo-contract       target-velocity mechanical-boundary contract
+triwhirl-standup-sitl                         local deterministic balance regression
+triwhirl-standup-sitl-disturbance             local deterministic disturbance regression
+triwhirl-standup-sitl-full                    geometry-derived global observation
+triwhirl-standup-sitl-live                    continuous WebUI native process
+triwhirl-velocity-servo-contract              target-velocity mechanical-boundary contract
+triwhirl-local-accel-coordinate-contract      local Vq/wheel-acceleration parity contract
 ```
 
 ## Local regression gates
@@ -136,6 +187,16 @@ The independent target-velocity boundary contract can be run with:
 It gates invalid configuration, zero-error behavior, sign symmetry, target and
 acceleration clamping, monotonic unsaturated response, and non-finite input
 rejection without changing the existing commissioning controller.
+
+The local actuator-coordinate parity contract can be run with:
+
+```powershell
+.\build\sitl\Release\triwhirl-local-accel-coordinate-contract.exe
+```
+
+It verifies B/C/nominal Vq-to-wheel-acceleration derivative parity, rejects
+non-invertible/non-finite fixtures, and checks the velocity-servo-to-local-plant
+simulation boundary. It does not assert closed-loop fuzzy stability.
 
 ## Geometry-derived global checks
 
@@ -189,6 +250,9 @@ Passing local regression gates means the production controller is stable on the
 stated provisional local models for those scenarios. Passing the target-velocity
 servo contract means only that the future mechanical command boundary is
 finite, bounded and dimensionally explicit for the stated simulation fixture.
-Passing geometry invariant checks means the global rolling implementation is
-internally consistent with the ideal Reuleaux geometry and the chosen local
-anchors. None of these statements proves hardware stability.
+Passing the local actuator-coordinate contract means the new wheel-acceleration
+coordinate is algebraically equivalent to the old Vq coordinate for the tested
+provisional local fixtures. Passing geometry invariant checks means the global
+rolling implementation is internally consistent with the ideal Reuleaux
+geometry and the chosen local anchors. None of these statements proves hardware
+stability or identifies the real SimpleFOC servo dynamics.

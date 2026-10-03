@@ -25,12 +25,17 @@ add_executable(triwhirl-velocity-servo-contract
   velocity_servo_model_test.cpp
 )
 
+add_executable(triwhirl-local-accel-coordinate-contract
+  local_linear_plant_test.cpp
+)
+
 foreach(target
     triwhirl-standup-sitl
     triwhirl-standup-sitl-full
     triwhirl-standup-sitl-disturbance
     triwhirl-standup-sitl-live
-    triwhirl-velocity-servo-contract)
+    triwhirl-velocity-servo-contract
+    triwhirl-local-accel-coordinate-contract)
   target_compile_features(${target} PRIVATE cxx_std_17)
   target_include_directories(${target} PRIVATE
     ../../components/triwhirl_core/include
