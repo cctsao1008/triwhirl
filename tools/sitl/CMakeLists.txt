@@ -33,6 +33,10 @@ add_executable(triwhirl-local-shared-feedback-feasibility
   local_shared_feedback_feasibility_test.cpp
 )
 
+add_executable(triwhirl-pure-fuzzy-balance-sitl
+  pure_fuzzy_balance_sitl.cpp
+)
+
 foreach(target
     triwhirl-standup-sitl
     triwhirl-standup-sitl-full
@@ -40,7 +44,8 @@ foreach(target
     triwhirl-standup-sitl-live
     triwhirl-velocity-servo-contract
     triwhirl-local-accel-coordinate-contract
-    triwhirl-local-shared-feedback-feasibility)
+    triwhirl-local-shared-feedback-feasibility
+    triwhirl-pure-fuzzy-balance-sitl)
   target_compile_features(${target} PRIVATE cxx_std_17)
   target_include_directories(${target} PRIVATE
     ../../components/triwhirl_core/include
