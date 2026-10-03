@@ -26,12 +26,17 @@ bool expect(const bool condition, const std::string& name, int& failures) {
 triwhirl::FuzzyAttitudeCommandConfig testConfig() {
   triwhirl::FuzzyAttitudeCommandConfig config{};
   // Unit-test fixture only. These values are not firmware or hardware tuning.
+  // Keep wheel input scale intentionally different from target output limit so
+  // the test detects normalized-coordinate mistakes at the physical rad/s
+  // command boundary.
   config.fuzzy.theta_error_scale_rad = 1.0F;
   config.fuzzy.theta_rate_scale_rad_s = 1.0F;
-  config.fuzzy.wheel_velocity_scale_rad_s = 10.0F;
+  config.fuzzy.wheel_velocity_scale_rad_s = 5.0F;
   config.fuzzy.target_velocity_limit_rad_s = 10.0F;
   config.fuzzy.target_velocity_singletons =
-      triwhirl::fuzzy_balance::makeQualitativeRuleSeed();
+      triwhirl::fuzzy_balance::makeQualitativeRuleSeed(
+          config.fuzzy.wheel_velocity_scale_rad_s,
+          config.fuzzy.target_velocity_limit_rad_s);
   config.fuzzy.rule_surface_configured = true;
   config.upright_reference_rad = 1.1F;
   config.max_motor_observation_age_us = 3000U;
@@ -92,7 +97,7 @@ int main() {
                near(output.theta_error_rad, 0.0F) &&
                near(output.target_velocity_rad_s, 2.5F) &&
                output.motor_observation_age_us == 1000U,
-           "fresh zero-attitude state preserves absolute wheel target baseline",
+           "fresh zero-attitude state preserves wheel rad/s across unequal scales",
            failures);
 
     triwhirl::MotorCommandMailbox mailbox;
