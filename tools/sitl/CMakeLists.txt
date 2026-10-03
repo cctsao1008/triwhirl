@@ -29,13 +29,18 @@ add_executable(triwhirl-local-accel-coordinate-contract
   local_linear_plant_test.cpp
 )
 
+add_executable(triwhirl-local-shared-feedback-feasibility
+  local_shared_feedback_feasibility_test.cpp
+)
+
 foreach(target
     triwhirl-standup-sitl
     triwhirl-standup-sitl-full
     triwhirl-standup-sitl-disturbance
     triwhirl-standup-sitl-live
     triwhirl-velocity-servo-contract
-    triwhirl-local-accel-coordinate-contract)
+    triwhirl-local-accel-coordinate-contract
+    triwhirl-local-shared-feedback-feasibility)
   target_compile_features(${target} PRIVATE cxx_std_17)
   target_include_directories(${target} PRIVATE
     ../../components/triwhirl_core/include
