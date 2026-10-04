@@ -28,6 +28,15 @@ def require(text: str, tokens: tuple[str, ...], label: str) -> None:
         fail(f"{label} missing {missing}")
 
 
+def code_without_line_comments(text: str) -> str:
+    """Remove // comments before checking for executable activation tokens."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        code, _separator, _comment = line.partition("//")
+        lines.append(code)
+    return "\n".join(lines)
+
+
 def main() -> None:
     probe = PROBE.read_text(encoding="utf-8")
     runtime_main = RUNTIME_MAIN.read_text(encoding="utf-8")
@@ -57,8 +66,10 @@ def main() -> None:
     )
 
     # The link probe may construct and validate objects, but it must never start
-    # hardware service or a FreeRTOS task. If any of these appear, the proof is
-    # no longer compile/link-only and must be reviewed as a runtime migration.
+    # hardware service or a FreeRTOS task. Search executable text only so an
+    # explanatory comment such as "no executor.service()" cannot false-trigger
+    # this safety guard.
+    executable_probe = code_without_line_comments(probe)
     forbidden_activation = (
         "executor.begin(",
         "executor.service(",
@@ -67,7 +78,7 @@ def main() -> None:
         "motor_control.serviceBackend(",
         "backend.begin(",
     )
-    leaked = [token for token in forbidden_activation if token in probe]
+    leaked = [token for token in forbidden_activation if token in executable_probe]
     if leaked:
         fail(f"inactive probe contains runtime activation calls: {leaked}")
 
