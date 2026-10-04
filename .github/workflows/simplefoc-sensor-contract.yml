@@ -1,0 +1,32 @@
+name: SimpleFOC sensor contract
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/simplefoc-sensor-contract.yml'
+      - 'components/triwhirl_simplefoc/**'
+      - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
+      - 'tools/tests/simplefoc_sensor_config_test.cpp'
+  pull_request:
+    paths:
+      - '.github/workflows/simplefoc-sensor-contract.yml'
+      - 'components/triwhirl_simplefoc/**'
+      - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
+      - 'tools/tests/simplefoc_sensor_config_test.cpp'
+
+jobs:
+  host-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test sensor-only vs full motor configuration boundary
+        shell: bash
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -Icomponents/triwhirl_core/include \
+            -Icomponents/triwhirl_simplefoc/include \
+            tools/tests/simplefoc_sensor_config_test.cpp \
+            -o /tmp/simplefoc-sensor-config-test
+          /tmp/simplefoc-sensor-config-test

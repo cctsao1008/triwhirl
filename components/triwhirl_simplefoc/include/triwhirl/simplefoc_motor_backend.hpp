@@ -5,22 +5,21 @@
 #include <limits>
 
 #include "triwhirl/motor_control.hpp"
+#include "triwhirl/simplefoc_sensor_path.hpp"
 
 #if defined(TRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND)
 // Keep the production-shaped backend coupled only to the upstream APIs it
 // actually owns. Avoid SimpleFOC.h's umbrella sensor includes so Route-B does
 // not acquire unrelated SPI/library header dependencies.
 #include <BLDCMotor.h>
-#include <Wire.h>
 #include <drivers/BLDCDriver3PWM.h>
-#include <sensors/MagneticSensorI2C.h>
 #endif
 
 namespace triwhirl::simplefoc {
 
 // Explicit commissioning boundary for the production-shaped SimpleFOC owner.
-// Every value that can affect motor/sensor behavior starts invalid so merely
-// default-constructing this object can never produce a usable motor setup.
+// Every value that can affect motor behavior starts invalid so merely default-
+// constructing this object can never produce a usable motor setup.
 struct SimpleFocMotorBackendConfig {
   int i2c_bus_index = -1;
   int sda_gpio = -1;
@@ -45,6 +44,16 @@ struct SimpleFocMotorBackendConfig {
   float velocity_lpf_tf_s = std::numeric_limits<float>::quiet_NaN();
 };
 
+inline SimpleFocSensorConfig simpleFocSensorConfigFromMotorBackendConfig(
+    const SimpleFocMotorBackendConfig& config) {
+  SimpleFocSensorConfig sensor{};
+  sensor.i2c_bus_index = config.i2c_bus_index;
+  sensor.sda_gpio = config.sda_gpio;
+  sensor.scl_gpio = config.scl_gpio;
+  sensor.i2c_hz = config.i2c_hz;
+  return sensor;
+}
+
 inline bool validSimpleFocMotorBackendConfig(
     const SimpleFocMotorBackendConfig& config) {
   const auto finite_positive = [](const float value) {
@@ -54,17 +63,14 @@ inline bool validSimpleFocMotorBackendConfig(
     return std::isfinite(value) && value >= 0.0F;
   };
 
-  const bool valid_i2c_bus = config.i2c_bus_index == 0 ||
-                             config.i2c_bus_index == 1;
-  const bool valid_i2c_pins = config.sda_gpio >= 0 && config.scl_gpio >= 0 &&
-                              config.sda_gpio != config.scl_gpio;
   const bool valid_pwm_pins =
       config.pwm_a_gpio >= 0 && config.pwm_b_gpio >= 0 &&
       config.pwm_c_gpio >= 0 && config.pwm_a_gpio != config.pwm_b_gpio &&
       config.pwm_a_gpio != config.pwm_c_gpio &&
       config.pwm_b_gpio != config.pwm_c_gpio;
 
-  return valid_i2c_bus && valid_i2c_pins && config.i2c_hz > 0U &&
+  return validSimpleFocSensorConfig(
+             simpleFocSensorConfigFromMotorBackendConfig(config)) &&
          config.pole_pairs > 0 && valid_pwm_pins &&
          finite_positive(config.supply_voltage_v) &&
          finite_positive(config.voltage_limit_v) &&
@@ -88,8 +94,7 @@ class SimpleFocMotorBackend {
  public:
   explicit SimpleFocMotorBackend(const SimpleFocMotorBackendConfig& config)
       : config_(config),
-        encoder_bus_(config.i2c_bus_index),
-        sensor_(AS5600_I2C),
+        sensor_path_(simpleFocSensorConfigFromMotorBackendConfig(config)),
         motor_(config.pole_pairs),
         driver_(config.pwm_a_gpio, config.pwm_b_gpio, config.pwm_c_gpio) {}
 
@@ -118,8 +123,7 @@ class SimpleFocMotorBackend {
   void setFaulted();
 
   SimpleFocMotorBackendConfig config_{};
-  TwoWire encoder_bus_;
-  MagneticSensorI2C sensor_;
+  SimpleFocSensorPath sensor_path_;
   BLDCMotor motor_;
   BLDCDriver3PWM driver_;
 

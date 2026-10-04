@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "simplefoc_motor_backend.cpp"
+    SRCS "simplefoc_sensor_path.cpp" "simplefoc_motor_backend.cpp"
     INCLUDE_DIRS "include"
     REQUIRES triwhirl_core
 )
@@ -13,8 +13,8 @@ idf_component_register(
 idf_component_optional_requires(PUBLIC framework-arduinoespressif32)
 
 # This component is intentionally present in both build graphs. In the native
-# ESP-IDF build TRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND is absent, so the source is
-# inert and introduces no Arduino/SimpleFOC dependency. The Route-B PlatformIO
-# graph defines the flag explicitly and resolves the pinned Arduino/SimpleFOC
-# libraries, proving the production-shaped backend without activating it.
+# ESP-IDF build TRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND is absent, so the sources are
+# inert and introduce no Arduino/SimpleFOC dependency. Route-B explicitly
+# enables both the passive sensor path and the full motor backend against the
+# pinned Arduino/SimpleFOC libraries.
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2)
