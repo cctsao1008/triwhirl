@@ -1,0 +1,59 @@
+name: SimpleFOC sensor commissioning
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/simplefoc-sensor-commissioning.yml'
+      - 'platformio.ini'
+      - 'CMakeLists.txt'
+      - 'sdkconfig.defaults'
+      - 'partitions.csv'
+      - 'commissioning/**'
+      - 'main/CMakeLists.txt'
+      - 'main/runtime_simplefoc_sensor_commissioning.*'
+      - 'components/triwhirl_simplefoc/**'
+      - 'components/triwhirl_hw/include/triwhirl/board.hpp'
+      - 'tools/tests/simplefoc_sensor_commissioning_contract.py'
+  pull_request:
+    paths:
+      - '.github/workflows/simplefoc-sensor-commissioning.yml'
+      - 'platformio.ini'
+      - 'CMakeLists.txt'
+      - 'sdkconfig.defaults'
+      - 'partitions.csv'
+      - 'commissioning/**'
+      - 'main/CMakeLists.txt'
+      - 'main/runtime_simplefoc_sensor_commissioning.*'
+      - 'components/triwhirl_simplefoc/**'
+      - 'components/triwhirl_hw/include/triwhirl/board.hpp'
+      - 'tools/tests/simplefoc_sensor_commissioning_contract.py'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard passive-only commissioning graph
+        shell: bash
+        run: python tools/tests/simplefoc_sensor_commissioning_contract.py
+
+      - name: Install pinned pioarduino core
+        shell: bash
+        run: |
+          python3 -m venv "$HOME/.platformio/penv"
+          "$HOME/.platformio/penv/bin/python" -m pip install --upgrade pip
+          "$HOME/.platformio/penv/bin/python" -m pip install \
+            "pioarduino==6.2.0" \
+            "uv"
+          "$HOME/.platformio/penv/bin/pio" --version
+
+      - name: Build flashable passive SimpleFOC sensor firmware
+        shell: bash
+        run: |
+          export PATH="$HOME/.platformio/penv/bin:$PATH"
+          export UV_CACHE_DIR="${RUNNER_TEMP}/pioarduino-uv-cache"
+          mkdir -p "$UV_CACHE_DIR"
+          pio run -e simplefoc-sensor-commissioning
