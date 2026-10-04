@@ -1,4 +1,4 @@
-// Issue #53/#75 production-shaped Route-B compile/link proof only.
+// Issue #53/#75/#80 production-shaped Route-B compile/link proof only.
 //
 // Native ESP-IDF builds compile this translation unit as empty. The Route-B
 // environment enables the production-shaped triwhirl_simplefoc component and
@@ -6,16 +6,8 @@
 // app_main(), so it performs no I2C access, FOC initialization, PWM enable, or
 // task creation on a running device.
 //
-// #75 extends the inactive proof across the complete target architecture:
-//
-//   mechanical attitude + motor observation
-//              -> pure fuzzy target_velocity
-//              -> MotorCommandMailbox
-//              -> MotorExecutionDomain
-//              -> SimpleFOC backend
-//              -> MotorExecutionTask
-//
-// This deliberately contains no Vq -> target-velocity translation.
+// #75 proves the complete inactive target architecture; #80 additionally keeps
+// the passive AS5600 commissioning object in the same pinned SimpleFOC graph.
 
 #if defined(TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE) && \
     defined(TRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND)
@@ -29,6 +21,7 @@
 #include "triwhirl/motor_execution.hpp"
 #include "triwhirl/motor_mailbox.hpp"
 #include "triwhirl/simplefoc_motor_backend.hpp"
+#include "triwhirl/simplefoc_sensor_path.hpp"
 
 extern "C" __attribute__((used, noinline))
 void triwhirl_route_b_simplefoc_link_probe() {
@@ -37,6 +30,18 @@ void triwhirl_route_b_simplefoc_link_probe() {
   // make each production-shaped API path type/config-valid so the compiler and
   // linker must resolve the complete architecture. app_main() never calls this
   // function and therefore cannot energize these objects.
+  triwhirl::simplefoc::SimpleFocSensorConfig sensor_config{};
+  sensor_config.i2c_bus_index = 1;
+  sensor_config.sda_gpio = 21;
+  sensor_config.scl_gpio = 22;
+  sensor_config.i2c_hz = 400000U;
+  triwhirl::simplefoc::SimpleFocSensorPath sensor_only(sensor_config);
+
+  // Taking the addresses of the out-of-line passive APIs forces the Route-B
+  // linker to resolve their implementations without executing begin/service.
+  auto sensor_begin = &triwhirl::simplefoc::SimpleFocSensorPath::begin;
+  auto sensor_service = &triwhirl::simplefoc::SimpleFocSensorPath::service;
+
   triwhirl::simplefoc::SimpleFocMotorBackendConfig backend_config{};
   backend_config.i2c_bus_index = 1;
   backend_config.sda_gpio = 21;
@@ -59,9 +64,6 @@ void triwhirl_route_b_simplefoc_link_probe() {
   triwhirl::simplefoc::SimpleFocMotorBackend backend(backend_config);
   triwhirl::MotorControl motor_control = backend.makeControl();
 
-  // These exact mailboxes are shared by the system-control and motor-execution
-  // halves of the probe. The fuzzy side sees only mechanical observation and
-  // can publish only target_velocity [rad/s] or an explicit stop request.
   triwhirl::MotorCommandMailbox command_mailbox;
   triwhirl::MotorObservationMailbox observation_mailbox;
 
@@ -81,10 +83,6 @@ void triwhirl_route_b_simplefoc_link_probe() {
   triwhirl::runtime::MotorExecutionTask motor_task(
       &executor, &observation_mailbox, task_config);
 
-  // Compile-only pure-fuzzy system-side fixture. These scales and rule values
-  // are NOT firmware defaults, plant-derived tuning, or a hardware balance
-  // claim. They simply make the already tested fuzzy command adapter valid in
-  // this target-toolchain translation unit.
   constexpr float kProbeWheelScaleRadS = 10.0F;
   constexpr float kProbeTargetLimitRadS = 10.0F;
   triwhirl::FuzzyAttitudeCommandConfig fuzzy_config{};
@@ -100,19 +98,9 @@ void triwhirl_route_b_simplefoc_link_probe() {
   fuzzy_config.max_motor_observation_age_us = 3000U;
   triwhirl::FuzzyAttitudeCommandController fuzzy_controller(fuzzy_config);
 
-  // Seed a purely mechanical observation into the same observation mailbox
-  // that MotorExecutionDomain owns. No SimpleFOC/backend call occurs here.
-  // Referencing publish/read + fuzzy publish forces the target build to compile
-  // the complete cross-domain boundary, not just construct otherwise unrelated
-  // types in one function.
   const std::uint32_t observation_generation = observation_mailbox.publish(
       2.0F, 0.0F, 0U, 0U, 1000U,
-      true,   // initialized
-      true,   // sensor_valid
-      false,  // backend_faulted
-      false,  // actuator_enabled
-      false   // command_timed_out
-  );
+      true, true, false, false, false);
 
   triwhirl::MotorObservationSnapshot mechanical_observation{};
   const bool observation_available =
@@ -134,16 +122,19 @@ void triwhirl_route_b_simplefoc_link_probe() {
   triwhirl::MotorCommandSnapshot mechanical_command{};
   const bool command_available = command_mailbox.tryRead(&mechanical_command);
 
-  // Validation-only reads: no begin(), no executor.service(), no I2C, no PWM,
-  // no FOC service, and no FreeRTOS task creation. The volatile aggregate keeps
-  // the full data path observable to the compiler while remaining unreachable
-  // from the real firmware entry point.
+  // Validation-only reads: no begin(), no service(), no I2C, no PWM, no FOC
+  // service, and no FreeRTOS task creation. The volatile aggregate keeps the
+  // complete passive + target path observable to the compiler/linker while it
+  // remains unreachable from the real firmware entry point.
   volatile bool stack_valid =
-      backend.configValid() && motor_control.valid() && executor.valid() &&
-      motor_task.valid() && fuzzy_controller.valid() &&
-      observation_generation != 0U && observation_available &&
-      fuzzy_output.target_valid && std::isfinite(fuzzy_output.target_velocity_rad_s) &&
-      command_generation != 0U && command_available && mechanical_command.enabled &&
+      sensor_only.configValid() && sensor_begin != nullptr &&
+      sensor_service != nullptr && backend.configValid() &&
+      motor_control.valid() && executor.valid() && motor_task.valid() &&
+      fuzzy_controller.valid() && observation_generation != 0U &&
+      observation_available && fuzzy_output.target_valid &&
+      std::isfinite(fuzzy_output.target_velocity_rad_s) &&
+      command_generation != 0U && command_available &&
+      mechanical_command.enabled &&
       std::isfinite(mechanical_command.target_velocity_rad_s);
   (void)stack_valid;
 }
