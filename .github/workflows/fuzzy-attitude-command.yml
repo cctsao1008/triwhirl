@@ -8,9 +8,12 @@ on:
       - 'components/triwhirl_core/include/triwhirl/fuzzy_balance_controller.hpp'
       - 'components/triwhirl_core/include/triwhirl/fuzzy_balance_seed.hpp'
       - 'components/triwhirl_core/include/triwhirl/fuzzy_attitude_command.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_execution.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
       - 'components/triwhirl_core/include/triwhirl/upright_geometry.hpp'
       - 'tools/tests/fuzzy_attitude_command_test.cpp'
+      - 'tools/tests/fuzzy_motor_execution_roundtrip_test.cpp'
   pull_request:
     paths:
       - '.github/workflows/fuzzy-attitude-command.yml'
@@ -18,9 +21,12 @@ on:
       - 'components/triwhirl_core/include/triwhirl/fuzzy_balance_controller.hpp'
       - 'components/triwhirl_core/include/triwhirl/fuzzy_balance_seed.hpp'
       - 'components/triwhirl_core/include/triwhirl/fuzzy_attitude_command.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_control.hpp'
+      - 'components/triwhirl_core/include/triwhirl/motor_execution.hpp'
       - 'components/triwhirl_core/include/triwhirl/motor_mailbox.hpp'
       - 'components/triwhirl_core/include/triwhirl/upright_geometry.hpp'
       - 'tools/tests/fuzzy_attitude_command_test.cpp'
+      - 'tools/tests/fuzzy_motor_execution_roundtrip_test.cpp'
 
 jobs:
   test:
@@ -35,3 +41,11 @@ jobs:
             tools/tests/fuzzy_attitude_command_test.cpp \
             -o /tmp/fuzzy-attitude-command-test
           /tmp/fuzzy-attitude-command-test
+      - name: Build and run fuzzy motor execution round-trip contract
+        shell: bash
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -Icomponents/triwhirl_core/include \
+            tools/tests/fuzzy_motor_execution_roundtrip_test.cpp \
+            -o /tmp/fuzzy-motor-execution-roundtrip-test
+          /tmp/fuzzy-motor-execution-roundtrip-test
