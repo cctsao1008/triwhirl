@@ -46,15 +46,17 @@ COMMANDS: tuple[ToolCommand, ...] = (
     ToolCommand(group="id", name="actuator-ble", script="parameter_id/acquire_ble.py", description="Run untethered BLE actuator identification acquisition."),
     ToolCommand(group="id", name="body-free", script="parameter_id/body_free_ble.py", description="Acquire untethered free-body motion over BLE."),
     ToolCommand(group="id", name="body-local", script="parameter_id/body_local_ble.py", description="Acquire passive local upright release data over BLE."),
-    ToolCommand(group="id", name="body-active", script="parameter_id/body_active_ble.py", description="Manual hold/release active-ID diagnostic; not the primary calibration path."),
+    ToolCommand(group="id", name="body-active", script="parameter_id/body_active_ble.py", description="Acquire signed vertex-agnostic local-upright Vq excitation with a fresh theta_ref per trial."),
     ToolCommand(group="id", name="swing", handler="commands.swing:swing_main", description="Primary plant acquisition: firmware autonomously rocks the body and captures 1 kHz local upright probe windows."),
     ToolCommand(group="plant", name="merge-active", script="parameter_id/merge_active.py", description="Merge independent fit-ready active-ID runs with global trial renumbering and provenance."),
-    ToolCommand(group="plant", name="calibrate", handler="commands.plant:calibrate_main", description="Fit the local plant, build the linear model, and run replay parity with holdout gating."),
-    ToolCommand(group="plant", name="replay", handler="commands.plant:replay_main", description="Replay a fitted local plant against active-ID or standup CSV data."),
+    ToolCommand(group="plant", name="calibrate", handler="commands.local_plant:calibrate_main", description="Fit the vertex-agnostic local plant and evaluate independent holdout replay parity."),
+    ToolCommand(group="plant", name="calibrate-legacy", handler="commands.plant:calibrate_main", description="Historical A/B/C vertex-aware calibration path retained for reproducibility only."),
+    ToolCommand(group="plant", name="replay", handler="commands.local_plant:replay_main", description="Replay current local or historical vertex-aware plant artifacts against measured data."),
     ToolCommand(group="fit", name="actuator", script="parameter_id/local_fit.py", description="Fit the preliminary actuator/local continuous-time model."),
     ToolCommand(group="fit", name="body-local", script="parameter_id/body_local_fit.py", description="Fit the passive local upright body model."),
-    ToolCommand(group="fit", name="body-active", script="parameter_id/body_active_fit.py", description="Fit active local upright plant dynamics."),
-    ToolCommand(group="fit", name="hinf", script="synthesis/hinf/run_pipeline.py", description="Synthesize H-infinity gains only from a holdout-validated plant calibration manifest."),
+    ToolCommand(group="fit", name="body-active-local", script="parameter_id/body_active_local_fit.py", description="Fit the current shared vertex-agnostic active local plant."),
+    ToolCommand(group="fit", name="body-active", script="parameter_id/body_active_fit.py", description="Historical A/B/C-aware active local fit retained for reproducibility."),
+    ToolCommand(group="fit", name="hinf", script="synthesis/hinf/run_pipeline.py", description="Synthesize H-infinity gains only from a holdout-validated legacy calibration manifest."),
 )
 
 

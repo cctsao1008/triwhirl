@@ -35,6 +35,32 @@ The default signed excitation is `+0.25 V / -0.25 V`. The measured telemetry `vq
 
 Collect calibration and validation runs independently. Failed standup traces are useful closed-loop evidence but are not primary plant-fitting data.
 
+## Current fitting and replay path
+
+Fit and validate the vertex-agnostic local model through the toolbox:
+
+```powershell
+python tools/twtool.py plant calibrate `
+  artifacts/plant-id/calibration/local.csv `
+  --validation artifacts/plant-id/validation/local.csv `
+  --output-dir artifacts/plant-calibration
+```
+
+The default path uses `body_active_local_fit.py` and emits `triwhirl-local-linear-model-v1`. The fitter uses each trial's recorded `theta_ref_rad`, rejects derivative windows that cross measured-Vq or phase transitions, and reports shared-fit quality plus per-trial coefficient variation. It does not classify trials by a fixed A/B/C angle.
+
+Replay uses the same local coordinate:
+
+```powershell
+python tools/twtool.py plant replay `
+  artifacts/plant-calibration/linear-model.json `
+  artifacts/plant-id/validation/local.csv `
+  -o artifacts/plant-calibration/replay-parity.json
+```
+
+Independent holdout replay remains required before the model-evidence gate can pass. A holdout run with no explicit empirically justified parity thresholds is `REVIEW`, not `PASS`.
+
+Historical A/B/C-aware fitting remains available through `plant calibrate-legacy` and the old fit/converter scripts for reproducibility of earlier evidence. It is not the default route for new acquisition.
+
 ## Other acquisition tools
 
 ```text
@@ -46,8 +72,4 @@ body-active     signed local-upright Vq excitation
 swing           firmware-owned swing identification
 ```
 
-## Fitting and replay
-
-The plant-calibration workflow is being migrated to the same local-upright contract. Existing historical A/B/C-aware fit artifacts remain reproducible from git history, but new hardware acquisition should use the vertex-agnostic `body-active` path above.
-
-Do not promote a plant to H-infinity synthesis solely because a least-squares fit is full rank. Use independent holdout replay and explicit parity thresholds before synthesis promotion.
+The repository intentionally does not fabricate plant coefficients. Fresh hardware calibration and an independent validation capture are still required before near-upright fuzzy tuning can be treated as physically supported.

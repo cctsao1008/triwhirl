@@ -1,12 +1,10 @@
 # TriWhirl host tools
 
-This directory contains programs that run on the development host rather than on the ESP32. Host tools may configure experiments, acquire or decode data, fit models, and generate control artifacts, but they are not part of the real-time ESP32 control loop.
+This directory contains programs that run on the development host rather than on the ESP32. Host tools may configure experiments, acquire or decode data, fit models, and generate analysis artifacts, but they are not part of the realtime ESP32 control loop.
 
 ## TriWhirl Toolbox
 
-`twtool` is the canonical host-tool entry point. It presents acquisition, fitting, logging, plotting, and analysis as one command tree while legacy scripts are progressively folded into shared modules.
-
-From the repository root:
+`twtool` is the canonical host-tool entry point. From the repository root:
 
 ```powershell
 python tools/twtool.py --help
@@ -36,55 +34,93 @@ log
   plot-standup   plot a standup .twtrace or decoded standup CSV
 
 control
-  balance        deploy/run a guarded H-infinity near-upright controller
-  standup        autonomous vendor-aligned swing-up -> balance (+ optional plot)
+  balance        legacy guarded H-infinity commissioning path
+  standup        legacy commissioning swing-up/balance path
 
 id
   actuator-uart  tethered actuator acquisition
   actuator-ble   untethered actuator acquisition
   body-free      free-body BLE acquisition
   body-local     passive local-upright acquisition
-  body-active    signed per-vertex active local identification
-  swing          autonomous reaction-wheel swing acquisition
+  body-active    signed vertex-agnostic local identification; fresh theta_ref each trial
+  swing          firmware-owned reaction-wheel swing acquisition
 
 plant
-  merge-active   merge separate A/B/C active-ID runs with trial renumbering
-  calibrate      fit + linearize + holdout replay + synthesis gate manifest
-  replay         one-step and free-run replay parity against measured Vq
+  merge-active       merge independent local active-ID runs with trial renumbering
+  calibrate          current vertex-agnostic fit + linear model + holdout replay
+  calibrate-legacy   historical A/B/C-aware calibration route
+  replay             replay current local or historical vertex-aware model artifacts
 
 fit
-  actuator       preliminary actuator/local continuous-time fit
-  body-local     passive local-upright fit
-  body-active    active per-vertex A/B/C fit
-  hinf           synthesize only from a PASS calibration manifest
+  actuator           preliminary actuator/local continuous-time fit
+  body-local         passive local-upright fit
+  body-active-local  current shared vertex-agnostic active local fit
+  body-active        historical A/B/C-aware active fit
+  hinf               historical H-infinity synthesis from a compatible v1 manifest
 ```
 
-The TWLG, standup-trace, plant-calibration, and replay commands are native toolbox commands backed by shared modules. Some identification/fitting commands still route to proven legacy implementations during migration.
+The target system architecture is full-fuzzy attitude control emitting bounded `target_velocity [rad/s]` into SimpleFOC velocity control. The legacy `control balance`, `control standup`, and H-infinity tooling remain useful for historical evidence and commissioning/reproducibility, but they do not define the target attitude-control architecture.
 
-### Plant calibration and synthesis gate
+## Current local plant calibration gate
 
-The active commissioning phase is plant calibration. Freeze standup-gain tuning until the plant calibration/holdout gate is resolved.
-
-The formal controller path is:
+The active modeling blocker is fresh near-upright physical evidence. New active-ID data use one local coordinate independent of A/B/C labels:
 
 ```text
-signed A/B/C active-ID calibration data
-    -> per-vertex fit
-    -> continuous local plant family
-    -> independent holdout replay parity
-    -> PASS calibration manifest
-    -> H-infinity synthesis
+x = [theta_error_rad, theta_rate_rad_s, wheel_rate_rad_s]^T
+u = measured firmware Vq_v
+
+theta_ref   = median held attitude for each trial
+theta_error = wrap(theta_rad - theta_ref)
 ```
 
-Use separate calibration and validation acquisitions, merge A/B/C files with `plant merge-active`, then run `plant calibrate`. H-infinity synthesis no longer accepts a raw active-ID CSV as plant authority. `fit hinf` consumes only a calibration manifest whose fit, holdout parity, and synthesis gates are `PASS`, and it verifies the validated linear-model SHA-256 before invoking the solver.
+Acquire independent calibration and validation datasets:
 
-Failed closed-loop standup traces are not primary fitting data. They return after the plant exists as additional closed-loop validation evidence.
+```powershell
+python tools/twtool.py id body-active --trials 6 `
+  -o artifacts/plant-id/calibration/local.csv
 
-See `docs/plant-acquisition-runbook.md` and `docs/plant-calibration.md` for the acquisition procedure and promotion contract.
+python tools/twtool.py id body-active --trials 6 `
+  -o artifacts/plant-id/validation/local.csv
+```
 
-### Firmware logger workflow
+If several independent runs need to be combined, `plant merge-active` globally renumbers trials and preserves each recorded `theta_ref_rad`; it does not require a `vertex_id`:
 
-The normal logger lifecycle no longer needs a serial terminal:
+```powershell
+python tools/twtool.py plant merge-active `
+  artifacts/run-01.csv artifacts/run-02.csv `
+  -o artifacts/plant-id/calibration/local.csv
+```
+
+Then fit and evaluate holdout replay:
+
+```powershell
+python tools/twtool.py plant calibrate `
+  artifacts/plant-id/calibration/local.csv `
+  --validation artifacts/plant-id/validation/local.csv `
+  --output-dir artifacts/plant-calibration
+```
+
+The current calibration route emits:
+
+```text
+active-local-fit.json
+linear-model.json              # triwhirl-local-linear-model-v1
+replay-parity.json
+replay-parity.csv
+calibration-manifest.json      # triwhirl-plant-calibration-v2
+```
+
+The v2 manifest is **model-evidence provenance only**. It is deliberately not accepted by the legacy H-infinity synthesis gate. A separate validation dataset is mandatory before model promotion; if empirical replay thresholds have not yet been established, holdout parity is `REVIEW`, not `PASS`.
+
+Synthetic CI fixtures prove only coordinate/tool behavior. They do not provide hardware plant coefficients or authorize fuzzy tuning.
+
+Historical A/B/C evidence remains reproducible through `plant calibrate-legacy` and the old `triwhirl-vertex-normalized-linear-model-v1` replay path.
+
+See `docs/plant-acquisition-runbook.md`, `docs/plant-calibration.md`, and `tools/parameter_id/README.md` for the acquisition and promotion contracts.
+
+## Firmware logger workflow
+
+The normal logger lifecycle does not require a serial terminal:
 
 ```powershell
 python tools/twtool.py log status
@@ -97,7 +133,7 @@ python tools/twtool.py log inspect artifacts/run-01.twlog
 python tools/twtool.py log decode artifacts/run-01.twlog -o artifacts/run-01.csv
 ```
 
-For a simple fixed-duration recording, the same lifecycle can be collapsed into one host command. The data path is still firmware-owned; the host only starts/stops the session and downloads after capture:
+For a fixed-duration recording:
 
 ```powershell
 python tools/twtool.py log session 45 `
@@ -105,65 +141,48 @@ python tools/twtool.py log session 45 `
   --csv artifacts/run-01.csv
 ```
 
-`log session` reserves a small amount of extra flash capacity for host stop-command latency, then runs `prepare -> start -> wait -> stop/finalize -> download`. `Ctrl-C` still asks firmware to finalize and download the partial log before the tool exits.
+`log session` drives `prepare -> start -> wait -> stop/finalize -> download`. `Ctrl-C` still asks firmware to finalize and download the partial log before the tool exits.
 
-`log prepare` waits for the background flash erase to reach firmware `state=ready` unless `--no-wait` is supplied. `log stop` waits until the SRAM buffer has drained, the TWLG header/CRC are finalized, and firmware reaches `state=complete`.
+`log prepare` waits for background flash erase to reach firmware `state=ready` unless `--no-wait` is supplied. `log stop` waits until the SRAM buffer has drained, the TWLG header/CRC are finalized, and firmware reaches `state=complete`.
 
-`log critical on` pauses flash programming without stopping 1 kHz SRAM capture; `log critical off` resumes flash writes. The future firmware-owned upright experiment supervisor will drive this automatically around critical local windows rather than relying on BLE timing.
+`log critical on` pauses flash programming without stopping 1 kHz SRAM capture; `log critical off` resumes flash writes.
 
-`log inspect` reports the validated TWLG header plus useful acquisition ranges such as body angle, body rate, wheel rate, Vq, dropped records, and fault coverage. Use `--json` for a machine-readable summary.
+`log inspect` reports the validated TWLG header plus acquisition ranges such as body angle, body rate, wheel rate, Vq, dropped records, and fault coverage. Use `--json` for a machine-readable summary.
 
-### Standup trace and plot
+## Standup trace and plot
 
-`control standup` captures the dedicated binary standup trace into host RAM, then writes `.twtrace`, `.csv`, and `.json` only after the motor has stopped. The controller itself remains at 1 kHz; the trace is intentionally decimated before BLE transport so the captured stream can remain lossless. Add `--plot` to also write a four-panel PNG after the trace is safely persisted:
+The legacy commissioning `control standup` path captures a dedicated binary standup trace into host RAM, then writes `.twtrace`, `.csv`, and `.json` only after the motor has stopped. Trace transport is decimated so BLE handling does not become part of the realtime control loop.
 
 ```powershell
 python tools/twtool.py control standup --duration 10 --plot
 ```
 
-The TWTR2 trace records the measured inter-sample `dt_us` from the firmware control clock rather than reconstructing time from an assumed sample period. Each frame also carries the full 160-bit git commit embedded into the flashed firmware plus a dirty-worktree flag. The JSON sidecar records the host commit separately and reports whether host and firmware revisions match.
+The TWTR2 trace records measured `dt_us`, firmware git provenance, and acquisition integrity. Plotting occurs only after the trace is persisted.
 
-The end-of-run `standup_trace` summary reports a strict acquisition result. `acceptance=PASS` requires START/END markers, valid CRC and frame/sample sequences, no missing/reordered samples, no ESP32 ring or BLE transport drops, no malformed/trailing bytes, no clamped/zero noninitial `dt_us`, clean firmware provenance, and an exact host/firmware git-commit match. BLE transport-drop accounting is reset logically at the start of each trace so an older failed run does not contaminate the next run.
-
-Use `--show-plot` to save the PNG and also open it interactively. Plotting is post-run only and never participates in the BLE callback or realtime control path.
-
-Existing standup captures can be replotted independently from either the authoritative raw trace or its decoded CSV:
+Existing captures can be replotted independently:
 
 ```powershell
-python tools/twtool.py log plot-standup artifacts/standup/standup-20260923-213000.twtrace
-python tools/twtool.py log plot-standup artifacts/standup/standup-20260923-213000.csv --show
+python tools/twtool.py log plot-standup artifacts/standup/run.twtrace
+python tools/twtool.py log plot-standup artifacts/standup/run.csv --show
 ```
 
-The plot shows upright error with the capture/release boundaries, body and filtered gyro rates, wheel rate versus target velocity, and PI/Vq behavior. Matplotlib is imported only when plotting is requested; if it is not installed, install it in the active host environment with `python -m pip install matplotlib`.
+Failed closed-loop standup traces are validation/diagnostic evidence after a plant model exists; do not repeatedly refit the plant from failed standup runs.
 
-Other examples:
-
-```powershell
-python tools/twtool.py id swing --probes 12 -o artifacts/auto-swing-id-01.csv
-python tools/twtool.py fit body-active artifacts/body-active-B.csv -o artifacts/body-active-B-fit.json
-python tools/twtool.py plant merge-active artifacts/plant-id/calibration/A.csv `
-  artifacts/plant-id/calibration/B.csv artifacts/plant-id/calibration/C.csv `
-  -o artifacts/plant-id/calibration.csv
-python tools/twtool.py plant calibrate artifacts/plant-id/calibration.csv `
-  --validation artifacts/plant-id/validation.csv `
-  --output-dir artifacts/plant-calibration
-```
-
-Use `help` to open command-specific argument help through the unified entry point:
+## Useful command help
 
 ```powershell
-python tools/twtool.py help log session
-python tools/twtool.py help control standup
+python tools/twtool.py help id body-active
 python tools/twtool.py help plant merge-active
 python tools/twtool.py help plant calibrate
+python tools/twtool.py help plant calibrate-legacy
 python tools/twtool.py help plant replay
-python tools/twtool.py help fit hinf
+python tools/twtool.py help fit body-active-local
 ```
 
-The old scripts remain available during migration. New host workflows should prefer `twtool` so command naming and shared BLE/TWLG/metadata infrastructure have one stable interface.
+Legacy scripts remain available during migration. New host workflows should prefer `twtool` so command naming and shared metadata infrastructure have one stable interface.
 
 ## Design boundary
 
-The toolbox is for commissioning, acquisition, identification, logging, plotting, analysis, and synthesis. Timing-critical control decisions belong in the ESP32 firmware. BLE is not a real-time control transport: standup trace callbacks append binary notifications into host RAM without parsing/plotting/disk I/O, and visualization happens only after the trial.
+The toolbox is for commissioning, acquisition, identification, logging, plotting, and analysis. Timing-critical control decisions belong in ESP32 firmware. BLE is not a realtime control transport.
 
 Do not create a separate `host/` application hierarchy unless TriWhirl later gains an actual host-side runtime application.
