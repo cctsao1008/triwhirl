@@ -16,6 +16,9 @@ FUZZY_COMMAND = (
     / "triwhirl"
     / "fuzzy_attitude_command.hpp"
 )
+SIMPLEFOC = ROOT / "components" / "triwhirl_simplefoc"
+SENSOR_PATH = SIMPLEFOC / "simplefoc_sensor_path.cpp"
+MOTOR_BACKEND = SIMPLEFOC / "simplefoc_motor_backend.cpp"
 
 
 def fail(message: str) -> None:
@@ -41,6 +44,8 @@ def main() -> None:
     probe = PROBE.read_text(encoding="utf-8")
     runtime_main = RUNTIME_MAIN.read_text(encoding="utf-8")
     fuzzy_command = FUZZY_COMMAND.read_text(encoding="utf-8")
+    sensor_path = SENSOR_PATH.read_text(encoding="utf-8")
+    motor_backend = MOTOR_BACKEND.read_text(encoding="utf-8")
 
     require(
         probe,
@@ -50,6 +55,10 @@ def main() -> None:
             '"triwhirl/motor_execution.hpp"',
             '"triwhirl/motor_mailbox.hpp"',
             '"triwhirl/simplefoc_motor_backend.hpp"',
+            '"triwhirl/simplefoc_sensor_path.hpp"',
+            "SimpleFocSensorPath sensor_only",
+            "&triwhirl::simplefoc::SimpleFocSensorPath::begin",
+            "&triwhirl::simplefoc::SimpleFocSensorPath::service",
             "FuzzyAttitudeCommandController fuzzy_controller",
             "MotorCommandMailbox command_mailbox",
             "MotorObservationMailbox observation_mailbox",
@@ -77,6 +86,8 @@ def main() -> None:
         "motor_control.begin(",
         "motor_control.serviceBackend(",
         "backend.begin(",
+        "sensor_only.begin(",
+        "sensor_only.service(",
     )
     leaked = [token for token in forbidden_activation if token in executable_probe]
     if leaked:
@@ -85,6 +96,53 @@ def main() -> None:
     symbol = "triwhirl_route_b_simplefoc_link_probe"
     if symbol in runtime_main:
         fail("native app_main/runtime_main references the Route-B link probe")
+
+    # The passive commissioning class must be structurally incapable of motor
+    # actuation. It may own only TwoWire + MagneticSensorI2C operations.
+    sensor_code = code_without_line_comments(sensor_path)
+    require(
+        sensor_code,
+        (
+            "encoder_bus_.begin(",
+            "sensor_.init(&encoder_bus_)",
+            "sensor_.update()",
+            "sensor_.getAngle()",
+            "sensor_.getVelocity()",
+            "sensor_.currWireError",
+        ),
+        "SimpleFOC passive sensor path",
+    )
+    forbidden_sensor_motor_tokens = (
+        "driver_",
+        "motor_",
+        "initFOC(",
+        "loopFOC(",
+        ".move(",
+        ".enable(",
+        "setPwm(",
+    )
+    leaked = [token for token in forbidden_sensor_motor_tokens if token in sensor_code]
+    if leaked:
+        fail(f"passive sensor path leaked motor/PWM operation: {leaked}")
+
+    # The full backend must reuse the exact SimpleFOC sensor stage before motor
+    # initialization rather than creating a parallel AS5600 reader.
+    require(
+        motor_backend,
+        (
+            "sensor_path_.begin()",
+            "sensor_path_.service()",
+            "motor_.linkSensor(sensor_path_.motorSensorHandle())",
+            "driver_.init()",
+            "motor_.init()",
+            "motor_.initFOC()",
+        ),
+        "full backend staged sensor ownership",
+    )
+    if motor_backend.find("sensor_path_.begin()") > motor_backend.find("driver_.init()"):
+        fail("full backend initializes the motor driver before the sensor stage")
+    if motor_backend.find("motor_.linkSensor(sensor_path_.motorSensorHandle())") > motor_backend.find("motor_.init()"):
+        fail("full backend initializes BLDCMotor before linking the shared sensor")
 
     # System-control API must remain mechanical. The adapter is allowed to
     # depend on fuzzy + mailbox/upright geometry only; it must not acquire a
