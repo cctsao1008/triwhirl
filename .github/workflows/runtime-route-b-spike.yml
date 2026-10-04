@@ -12,6 +12,7 @@ on:
       - 'partitions.csv'
       - 'main/**'
       - 'components/**'
+      - 'tools/tests/route_b_full_path_contract.py'
   pull_request:
     paths:
       - '.github/workflows/runtime-route-b-spike.yml'
@@ -21,12 +22,17 @@ on:
       - 'partitions.csv'
       - 'main/**'
       - 'components/**'
+      - 'tools/tests/route_b_full_path_contract.py'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Guard inactive full-fuzzy to SimpleFOC boundary
+        shell: bash
+        run: python tools/tests/route_b_full_path_contract.py
 
       - name: Install pinned pioarduino core
         shell: bash
@@ -38,7 +44,7 @@ jobs:
             "uv"
           "$HOME/.platformio/penv/bin/pio" --version
 
-      - name: Build production-shaped runtime graph with Route-B dual framework
+      - name: Build complete inactive target graph with Route-B dual framework
         shell: bash
         run: |
           export PATH="$HOME/.platformio/penv/bin:$PATH"
