@@ -7,13 +7,13 @@
 
 #include <algorithm>
 #include <cinttypes>
-#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <limits>
 
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "triwhirl/board.hpp"
 #include "triwhirl/simplefoc_sensor_path.hpp"
@@ -21,11 +21,15 @@
 namespace triwhirl::runtime {
 namespace {
 
-// This is the existing AS5600 bus rate used by the board runtime. It is a bus
-// configuration only, not a motor-control or fuzzy tuning parameter.
+// Existing physical AS5600 bus configuration. This is not a motor-control or
+// fuzzy tuning parameter.
 constexpr std::uint32_t kSensorBusHz = 400000U;
 constexpr std::uint32_t kServicePeriodMs = 1U;
-constexpr std::uint32_t kTelemetryEverySamples = 50U;
+constexpr std::uint32_t kTelemetryPeriodMs = 50U;
+constexpr UBaseType_t kSensorTaskPriority = configMAX_PRIORITIES - 3;
+constexpr UBaseType_t kTelemetryTaskPriority = 2U;
+constexpr BaseType_t kSensorTaskCore = 0;
+constexpr BaseType_t kTelemetryTaskCore = 1;
 
 struct TimingStats {
   std::uint64_t count = 0U;
@@ -50,6 +54,32 @@ struct TimingStats {
   }
 };
 
+struct SensorCommissioningSnapshot {
+  std::uint64_t timestamp_us = 0U;
+  std::uint64_t sample_count = 0U;
+  std::uint64_t invalid_samples = 0U;
+  std::uint32_t service_us = 0U;
+  std::uint32_t service_min_us = 0U;
+  std::uint32_t service_max_us = 0U;
+  double service_mean_us = 0.0;
+  std::uint32_t period_us = 0U;
+  std::uint32_t period_min_us = 0U;
+  std::uint32_t period_max_us = 0U;
+  double period_mean_us = 0.0;
+  simplefoc::SimpleFocSensorObservation sensor{};
+};
+
+QueueHandle_t snapshot_queue = nullptr;
+
+simplefoc::SimpleFocSensorConfig boardSensorConfig() {
+  simplefoc::SimpleFocSensorConfig config{};
+  config.i2c_bus_index = 0;
+  config.sda_gpio = board::kAs5600SdaGpio;
+  config.scl_gpio = board::kAs5600SclGpio;
+  config.i2c_hz = kSensorBusHz;
+  return config;
+}
+
 [[noreturn]] void fatalLoop(const char* const reason) {
   std::printf("FATAL sfoc_sensor reason=%s\r\n", reason);
   std::fflush(stdout);
@@ -58,34 +88,15 @@ struct TimingStats {
   }
 }
 
-}  // namespace
-
-[[noreturn]] void runSimpleFocSensorCommissioning() {
-  // This Route-B profile uses Arduino's TwoWire implementation underneath the
-  // pinned SimpleFOC MagneticSensorI2C path. Because TriWhirl supplies its own
-  // ESP-IDF app_main(), initialize the Arduino core explicitly instead of
-  // relying on CONFIG_AUTOSTART_ARDUINO.
-  initArduino();
-
-  simplefoc::SimpleFocSensorConfig config{};
-  config.i2c_bus_index = 0;
-  config.sda_gpio = board::kAs5600SdaGpio;
-  config.scl_gpio = board::kAs5600SclGpio;
-  config.i2c_hz = kSensorBusHz;
-
+void sensorTask(void*) {
+  const simplefoc::SimpleFocSensorConfig config = boardSensorConfig();
   if (!simplefoc::validSimpleFocSensorConfig(config)) {
     fatalLoop("invalid_config");
   }
 
+  // This is the only hardware object in the active commissioning path.
+  // SimpleFocSensorPath contains TwoWire + MagneticSensorI2C only.
   simplefoc::SimpleFocSensorPath sensor(config);
-
-  std::printf(
-      "TriWhirl SimpleFOC sensor-only commissioning\r\n"
-      "owner=SimpleFOC,actuator=DISABLED,motor_init=ABSENT,"
-      "sda=%d,scl=%d,i2c_hz=%" PRIu32 "\r\n",
-      config.sda_gpio, config.scl_gpio, config.i2c_hz);
-  std::fflush(stdout);
-
   if (!sensor.begin()) {
     fatalLoop("sensor_begin_failed");
   }
@@ -93,86 +104,135 @@ struct TimingStats {
   TimingStats service_timing{};
   TimingStats period_timing{};
   std::uint64_t invalid_samples = 0U;
-  std::uint32_t previous_service_start_us = 0U;
+  std::uint64_t previous_service_start_us = 0U;
   TickType_t last_wake = xTaskGetTickCount();
 
   for (;;) {
-    const std::uint32_t service_start_us =
-        static_cast<std::uint32_t>(esp_timer_get_time());
+    const std::uint64_t service_start_us =
+        static_cast<std::uint64_t>(esp_timer_get_time());
+    std::uint32_t period_us = 0U;
     if (previous_service_start_us != 0U) {
-      period_timing.record(service_start_us - previous_service_start_us);
+      const std::uint64_t delta_us = service_start_us - previous_service_start_us;
+      period_us = delta_us > std::numeric_limits<std::uint32_t>::max()
+                      ? std::numeric_limits<std::uint32_t>::max()
+                      : static_cast<std::uint32_t>(delta_us);
+      period_timing.record(period_us);
     }
     previous_service_start_us = service_start_us;
 
     const bool sample_ok = sensor.service();
-    const std::uint32_t service_end_us =
-        static_cast<std::uint32_t>(esp_timer_get_time());
-    const std::uint32_t service_us = service_end_us - service_start_us;
+    const std::uint64_t service_end_us =
+        static_cast<std::uint64_t>(esp_timer_get_time());
+    const std::uint64_t elapsed_us = service_end_us - service_start_us;
+    const std::uint32_t service_us =
+        elapsed_us > std::numeric_limits<std::uint32_t>::max()
+            ? std::numeric_limits<std::uint32_t>::max()
+            : static_cast<std::uint32_t>(elapsed_us);
     service_timing.record(service_us);
 
-    const simplefoc::SimpleFocSensorObservation observation =
-        sensor.observation();
     if (!sample_ok) {
       ++invalid_samples;
     }
 
-    if ((service_timing.count % kTelemetryEverySamples) == 0U) {
-      const std::uint32_t latest_period_us =
-          period_timing.count == 0U ? 0U :
-          (service_start_us - (previous_service_start_us -
-                               (period_timing.count == 0U ? 0U : 0U)));
-      // The latest period is reported separately below from the 1 kHz release
-      // cadence statistics; min/max/mean are the useful accumulated measures.
-      (void)latest_period_us;
-
-      std::printf(
-          "sfoc_sensor,t_us=%" PRIu32
-          ",sample=%" PRIu64
-          ",valid=%u,wire_error=%u,angle_rad=%.6f,velocity_rad_s=%.6f"
-          ",service_us=%" PRIu32
-          ",service_min_us=%" PRIu32
-          ",service_max_us=%" PRIu32
-          ",service_mean_us=%.2f"
-          ",period_min_us=%" PRIu32
-          ",period_max_us=%" PRIu32
-          ",period_mean_us=%.2f"
-          ",invalid_samples=%" PRIu64 "\r\n",
-          service_end_us,
-          service_timing.count,
-          observation.sample_valid ? 1U : 0U,
-          static_cast<unsigned>(observation.wire_error),
-          static_cast<double>(observation.shaft_angle_rad),
-          static_cast<double>(observation.shaft_velocity_rad_s),
-          service_us,
-          service_timing.visibleMinUs(),
-          service_timing.max_us,
-          service_timing.meanUs(),
-          period_timing.visibleMinUs(),
-          period_timing.max_us,
-          period_timing.meanUs(),
-          invalid_samples);
-      std::fflush(stdout);
-    }
+    SensorCommissioningSnapshot snapshot{};
+    snapshot.timestamp_us = service_end_us;
+    snapshot.sample_count = service_timing.count;
+    snapshot.invalid_samples = invalid_samples;
+    snapshot.service_us = service_us;
+    snapshot.service_min_us = service_timing.visibleMinUs();
+    snapshot.service_max_us = service_timing.max_us;
+    snapshot.service_mean_us = service_timing.meanUs();
+    snapshot.period_us = period_us;
+    snapshot.period_min_us = period_timing.visibleMinUs();
+    snapshot.period_max_us = period_timing.max_us;
+    snapshot.period_mean_us = period_timing.meanUs();
+    snapshot.sensor = sensor.observation();
+    (void)xQueueOverwrite(snapshot_queue, &snapshot);
 
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(kServicePeriodMs));
   }
 }
 
-}  // namespace triwhirl::runtime
+void telemetryTask(void*) {
+  TickType_t last_wake = xTaskGetTickCount();
+  for (;;) {
+    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(kTelemetryPeriodMs));
 
-#else
+    SensorCommissioningSnapshot snapshot{};
+    if (xQueuePeek(snapshot_queue, &snapshot, 0) != pdTRUE) {
+      continue;
+    }
 
-namespace triwhirl::runtime {
+    std::printf(
+        "sfoc_sensor,t_us=%" PRIu64
+        ",sample=%" PRIu64
+        ",valid=%u,wire_error=%u,angle_rad=%.6f,velocity_rad_s=%.6f"
+        ",service_us=%" PRIu32
+        ",service_min_us=%" PRIu32
+        ",service_max_us=%" PRIu32
+        ",service_mean_us=%.2f"
+        ",period_us=%" PRIu32
+        ",period_min_us=%" PRIu32
+        ",period_max_us=%" PRIu32
+        ",period_mean_us=%.2f"
+        ",invalid_samples=%" PRIu64 "\r\n",
+        snapshot.timestamp_us,
+        snapshot.sample_count,
+        snapshot.sensor.sample_valid ? 1U : 0U,
+        static_cast<unsigned>(snapshot.sensor.wire_error),
+        static_cast<double>(snapshot.sensor.shaft_angle_rad),
+        static_cast<double>(snapshot.sensor.shaft_velocity_rad_s),
+        snapshot.service_us,
+        snapshot.service_min_us,
+        snapshot.service_max_us,
+        snapshot.service_mean_us,
+        snapshot.period_us,
+        snapshot.period_min_us,
+        snapshot.period_max_us,
+        snapshot.period_mean_us,
+        snapshot.invalid_samples);
+    std::fflush(stdout);
+  }
+}
+
+}  // namespace
 
 [[noreturn]] void runSimpleFocSensorCommissioning() {
-  // This translation unit is compiled into native builds as a fail-closed
-  // stub. The native app_main never calls it because the selection macro is
-  // absent. If an integration mistake reaches it, trap here rather than fall
-  // through into any motor runtime.
+  // TriWhirl supplies app_main in the dual-framework build, so initialize the
+  // Arduino HAL explicitly before constructing the pinned TwoWire-based
+  // SimpleFOC sensor path. CONFIG_AUTOSTART_ARDUINO is not relied upon here.
+  initArduino();
+
+  const simplefoc::SimpleFocSensorConfig config = boardSensorConfig();
+  std::printf(
+      "TriWhirl SimpleFOC sensor-only commissioning\r\n"
+      "owner=SimpleFOC,actuator=DISABLED,motor_init=ABSENT,"
+      "sda=%d,scl=%d,i2c_hz=%" PRIu32 ",service_hz=1000\r\n",
+      config.sda_gpio, config.scl_gpio, config.i2c_hz);
+  std::fflush(stdout);
+
+  snapshot_queue = xQueueCreate(1U, sizeof(SensorCommissioningSnapshot));
+  if (snapshot_queue == nullptr) {
+    fatalLoop("snapshot_queue_create_failed");
+  }
+
+  if (xTaskCreatePinnedToCore(telemetryTask, "sfoc_sensor_uart", 4096, nullptr,
+                              kTelemetryTaskPriority, nullptr,
+                              kTelemetryTaskCore) != pdPASS) {
+    fatalLoop("telemetry_task_create_failed");
+  }
+
+  if (xTaskCreatePinnedToCore(sensorTask, "sfoc_sensor", 4096, nullptr,
+                              kSensorTaskPriority, nullptr,
+                              kSensorTaskCore) != pdPASS) {
+    fatalLoop("sensor_task_create_failed");
+  }
+
+  vTaskDelete(nullptr);
   for (;;) {
   }
 }
 
 }  // namespace triwhirl::runtime
 
-#endif
+#endif  // TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING && backend
