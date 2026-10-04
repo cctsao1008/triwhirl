@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import csv
 import math
+import sys
 import tempfile
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from tools.triwhirl_tool.commands.sfoc_sensor import (
     CSV_FIELDS,
