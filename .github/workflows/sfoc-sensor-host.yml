@@ -1,0 +1,17 @@
+name: SimpleFOC sensor host tool
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test passive sensor telemetry parser and statistics
+        run: python tools/tests/sfoc_sensor_tool_test.py
+      - name: Verify toolbox registration and help
+        run: |
+          python tools/twtool.py help diag sfoc-sensor
+          python tools/twtool.py --list | grep -F $'diag sfoc-sensor\tnative\tcommands.sfoc_sensor:sfoc_sensor_main'
