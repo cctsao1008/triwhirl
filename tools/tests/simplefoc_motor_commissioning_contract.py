@@ -40,16 +40,14 @@ required_runtime = [
     'kMaxDriveDurationMs = 1500U',
     'begin_stage=%s',
     'backend->beginFailureStage()',
+    'xQueueOverwrite(result_queue, &result)',
 ]
 required_backend = [
-    '#if defined(TRIWHIRL_ROUTE_B_MOTOR_COMMISSIONING)',
-    '#include <communication/SimpleFOCDebug.h>',
-    'SimpleFOCDebug::enable(&Serial)',
-    'TriWhirl: SimpleFOC init diagnostics enabled',
     'SimpleFocMotorBeginFailureStage::kSensorPath',
     'SimpleFocMotorBeginFailureStage::kDriverInit',
     'SimpleFocMotorBeginFailureStage::kMotorInit',
     'SimpleFocMotorBeginFailureStage::kInitFoc',
+    'Keep begin diagnostics as bounded in-memory state',
 ]
 required_backend_header = [
     'enum class SimpleFocMotorBeginFailureStage',
@@ -73,6 +71,11 @@ forbidden = [
     'esp_spp_',
     'bluetooth_spp_direct',
 ]
+backend_forbidden = [
+    'SimpleFOCDebug',
+    'Serial.begin(',
+    'Serial.println(',
+]
 
 missing = [token for token in required_app if token not in app]
 missing += [token for token in required_runtime if token not in runtime]
@@ -85,6 +88,7 @@ present_forbidden = [
     for token in forbidden
     if token in app or token in runtime or token in platformio
 ]
+present_forbidden += [token for token in backend_forbidden if token in backend]
 if missing or present_forbidden:
     details = []
     if missing:
