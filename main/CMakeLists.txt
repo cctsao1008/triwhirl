@@ -10,7 +10,7 @@ if(TRIWHIRL_ROUTE_B_MOTOR_COMMISSIONING)
         triwhirl_core
         triwhirl_hw
         triwhirl_simplefoc
-        bt
+        triwhirl_ble
         esp_timer
         freertos
     )
