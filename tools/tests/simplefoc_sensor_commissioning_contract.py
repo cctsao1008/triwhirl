@@ -66,16 +66,38 @@ def main() -> None:
         profile,
         (
             "TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT",
-            '"BluetoothSerial.h"',
             'kBluetoothDeviceName[] = "TriWhirl-Sensor"',
-            "bluetooth.begin(kBluetoothDeviceName)",
-            "bluetooth_telemetry->hasClient()",
-            "bluetooth_telemetry->write(",
+            '"esp32-hal-alloc-bt-classic-mem.h"',
+            '"esp32-hal-bt.h"',
+            '"esp_spp_api.h"',
+            "btStartMode(BT_MODE_CLASSIC_BT)",
+            "esp_spp_register_callback(bluetoothSppCallback)",
+            "esp_spp_enhanced_init(&spp_config)",
+            "ESP_SPP_INIT_EVT",
+            "esp_spp_start_srv(",
+            "ESP_SPP_START_EVT",
+            "ESP_SPP_SRV_OPEN_EVT",
+            "ESP_SPP_CONG_EVT",
+            "ESP_SPP_WRITE_EVT",
+            "esp_spp_write(",
         ),
         "Bluetooth commissioning transport",
     )
 
     executable_profile = code_without_comments(profile)
+    if "BluetoothSerial" in executable_profile:
+        fail("BT commissioning must not use the racy pinned BluetoothSerial wrapper")
+
+    # Hardware exposed an ordering race in the pinned Arduino wrapper: its SPP
+    # callback could run before callback-visible state existed. Guard the direct
+    # transport against regressing that exact failure mode.
+    state_pos = executable_profile.find(
+        "bluetooth_event_group = xEventGroupCreate()"
+    )
+    init_pos = executable_profile.find("esp_spp_enhanced_init(&spp_config)")
+    if state_pos < 0 or init_pos < 0 or state_pos >= init_pos:
+        fail("BT callback-visible state must exist before esp_spp_enhanced_init")
+
     forbidden_profile_tokens = (
         "simplefoc_motor_backend",
         "SimpleFocMotorBackend",
@@ -120,8 +142,8 @@ def main() -> None:
         fail(f"commissioning app entry leaked forbidden path: {leaked}")
 
     # The commissioning CMake branch must be a minimal graph and must not link
-    # the native realtime/motor runtime at all. Both UART and BT profiles select
-    # this same graph.
+    # the native realtime/motor runtime at all. The BT component is appended
+    # only when the dedicated BT commissioning CMake option is set.
     marker = "if(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING)"
     if marker not in main_cmake or "else()" not in main_cmake:
         fail("main CMake has no explicit commissioning branch")
@@ -135,6 +157,8 @@ def main() -> None:
             "triwhirl_simplefoc",
             "esp_timer",
             "freertos",
+            "if(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT)",
+            "list(APPEND TRIWHIRL_MAIN_REQUIRES bt)",
         ),
         "minimal commissioning component graph",
     )
@@ -187,12 +211,14 @@ def main() -> None:
     require(
         bt_env,
         (
+            "-DTRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT=ON",
             "-DTRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT=1",
             'SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.simplefoc-sensor-bt.defaults"',
-            "libraries/BluetoothSerial/src",
         ),
         "Bluetooth PlatformIO environment",
     )
+    if "libraries/BluetoothSerial/src" in bt_env:
+        fail("BT environment still exposes the Arduino BluetoothSerial wrapper")
 
     require(
         bt_defaults,
