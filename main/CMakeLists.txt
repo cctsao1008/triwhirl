@@ -13,6 +13,12 @@ if(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING)
         esp_timer
         freertos
     )
+    if(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT)
+        # Only the cable-free commissioning image links ESP-IDF's Bluedroid
+        # Classic-BT component. The wired UART reference image remains free of
+        # Bluetooth runtime dependencies.
+        list(APPEND TRIWHIRL_MAIN_REQUIRES bt)
+    endif()
 else()
     set(TRIWHIRL_MAIN_SRCS
         "runtime_main.cpp"
