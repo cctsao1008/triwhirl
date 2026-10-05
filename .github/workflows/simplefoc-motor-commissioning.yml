@@ -1,0 +1,65 @@
+name: SimpleFOC motor commissioning
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/simplefoc-motor-commissioning.yml'
+      - 'platformio.ini'
+      - 'CMakeLists.txt'
+      - 'sdkconfig.defaults'
+      - 'sdkconfig.simplefoc-sensor-bt.defaults'
+      - 'partitions.csv'
+      - 'commissioning/simplefoc_motor_app_main.cpp'
+      - 'main/CMakeLists.txt'
+      - 'main/runtime_simplefoc_motor_commissioning.*'
+      - 'components/triwhirl_simplefoc/**'
+      - 'components/triwhirl_hw/include/triwhirl/board.hpp'
+      - 'tools/triwhirl_tool/commands/sfoc_motor.py'
+      - 'tools/triwhirl_tool/registry.py'
+  pull_request:
+    paths:
+      - '.github/workflows/simplefoc-motor-commissioning.yml'
+      - 'platformio.ini'
+      - 'CMakeLists.txt'
+      - 'sdkconfig.defaults'
+      - 'sdkconfig.simplefoc-sensor-bt.defaults'
+      - 'partitions.csv'
+      - 'commissioning/simplefoc_motor_app_main.cpp'
+      - 'main/CMakeLists.txt'
+      - 'main/runtime_simplefoc_motor_commissioning.*'
+      - 'components/triwhirl_simplefoc/**'
+      - 'components/triwhirl_hw/include/triwhirl/board.hpp'
+      - 'tools/triwhirl_tool/commands/sfoc_motor.py'
+      - 'tools/triwhirl_tool/registry.py'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host command syntax
+        shell: bash
+        run: |
+          python -m py_compile tools/triwhirl_tool/commands/sfoc_motor.py
+          python tools/twtool.py --list | grep -q 'diag sfoc-motor'
+
+      - name: Install pinned pioarduino core
+        shell: bash
+        run: |
+          python3 -m venv "$HOME/.platformio/penv"
+          "$HOME/.platformio/penv/bin/python" -m pip install --upgrade pip
+          "$HOME/.platformio/penv/bin/python" -m pip install \
+            "pioarduino==6.2.0" \
+            "uv"
+          "$HOME/.platformio/penv/bin/pio" --version
+
+      - name: Build flashable Bluetooth SPP SimpleFOC motor commissioning firmware
+        shell: bash
+        run: |
+          export PATH="$HOME/.platformio/penv/bin:$PATH"
+          export UV_CACHE_DIR="${RUNNER_TEMP}/pioarduino-uv-cache"
+          mkdir -p "$UV_CACHE_DIR"
+          pio run -e simplefoc-motor-commissioning-bt
