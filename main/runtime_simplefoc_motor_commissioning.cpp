@@ -5,16 +5,6 @@
 
 #include <Arduino.h>
 
-#include "esp32-hal-bt.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
-#include "esp_gap_bt_api.h"
-#include "esp_spp_api.h"
-#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED) || \
-    !defined(CONFIG_BT_CLASSIC_ENABLED) || !defined(CONFIG_BT_SPP_ENABLED)
-#error "SimpleFOC motor commissioning requires Bluedroid + Classic BT + SPP"
-#endif
-
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -23,10 +13,9 @@
 #include <new>
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/queue.h"
-#include "freertos/stream_buffer.h"
 #include "freertos/task.h"
+#include "triwhirl/ble_transport.hpp"
 #include "triwhirl/board.hpp"
 #include "triwhirl/motor_control.hpp"
 #include "triwhirl/simplefoc_motor_backend.hpp"
@@ -34,11 +23,7 @@
 namespace triwhirl::runtime {
 namespace {
 
-constexpr char kBluetoothDeviceName[] = "TriWhirl-Motor";
-constexpr char kBluetoothServiceName[] = "TriWhirl Motor Commissioning";
-constexpr EventBits_t kBluetoothReadyBit = BIT0;
-constexpr EventBits_t kBluetoothFailedBit = BIT1;
-
+constexpr char kBluetoothDeviceName[] = "TriWhirl";
 constexpr float kMaxCommissioningVoltageV = 0.5F;
 constexpr float kMaxTargetVelocityRadS = 5.0F;
 constexpr std::uint32_t kMaxDriveDurationMs = 1500U;
@@ -50,14 +35,9 @@ constexpr UBaseType_t kCommandTaskPriority = 2U;
 constexpr BaseType_t kMotorTaskCore = 0;
 constexpr BaseType_t kCommandTaskCore = 1;
 
-EventGroupHandle_t bluetooth_event_group = nullptr;
-StreamBufferHandle_t bluetooth_rx_stream = nullptr;
 QueueHandle_t command_queue = nullptr;
 QueueHandle_t result_queue = nullptr;
 
-std::atomic<std::uint32_t> bluetooth_spp_handle{0U};
-std::atomic<bool> bluetooth_spp_congested{false};
-std::atomic<bool> bluetooth_spp_tx_pending{false};
 std::atomic<bool> abort_requested{false};
 std::atomic<bool> motor_busy{false};
 
@@ -91,157 +71,12 @@ struct CommissionResult {
   }
 }
 
-void markBluetoothStartupFailed() {
-  if (bluetooth_event_group != nullptr) {
-    xEventGroupSetBits(bluetooth_event_group, kBluetoothFailedBit);
-  }
-}
-
-void bluetoothGapCallback(const esp_bt_gap_cb_event_t event,
-                          esp_bt_gap_cb_param_t* const param) {
-  if (param == nullptr) return;
-  switch (event) {
-    case ESP_BT_GAP_CFM_REQ_EVT:
-      (void)esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
-      break;
-    case ESP_BT_GAP_PIN_REQ_EVT: {
-      esp_bt_pin_code_t pin_code{};
-      pin_code[0] = '1';
-      pin_code[1] = '2';
-      pin_code[2] = '3';
-      pin_code[3] = '4';
-      (void)esp_bt_gap_pin_reply(param->pin_req.bda, true, 4U, pin_code);
-      break;
-    }
-    default:
-      break;
-  }
-}
-
-void bluetoothSppCallback(const esp_spp_cb_event_t event,
-                          esp_spp_cb_param_t* const param) {
-  if (param == nullptr) return;
-  switch (event) {
-    case ESP_SPP_INIT_EVT:
-      if (param->init.status != ESP_SPP_SUCCESS ||
-          esp_spp_start_srv(ESP_SPP_SEC_AUTHENTICATE, ESP_SPP_ROLE_SLAVE, 0U,
-                            kBluetoothServiceName) != ESP_OK) {
-        markBluetoothStartupFailed();
-      }
-      break;
-    case ESP_SPP_START_EVT:
-      if (param->start.status != ESP_SPP_SUCCESS ||
-          esp_bt_gap_set_device_name(kBluetoothDeviceName) != ESP_OK ||
-          esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE,
-                                   ESP_BT_GENERAL_DISCOVERABLE) != ESP_OK) {
-        markBluetoothStartupFailed();
-      } else if (bluetooth_event_group != nullptr) {
-        xEventGroupSetBits(bluetooth_event_group, kBluetoothReadyBit);
-      }
-      break;
-    case ESP_SPP_SRV_OPEN_EVT:
-      if (param->srv_open.status == ESP_SPP_SUCCESS) {
-        bluetooth_spp_handle.store(param->srv_open.handle,
-                                   std::memory_order_relaxed);
-        bluetooth_spp_congested.store(false, std::memory_order_relaxed);
-        bluetooth_spp_tx_pending.store(false, std::memory_order_relaxed);
-        abort_requested.store(false, std::memory_order_relaxed);
-      }
-      break;
-    case ESP_SPP_DATA_IND_EVT:
-      if (bluetooth_rx_stream != nullptr && param->data_ind.len > 0) {
-        (void)xStreamBufferSend(bluetooth_rx_stream, param->data_ind.data,
-                                static_cast<size_t>(param->data_ind.len), 0);
-      }
-      break;
-    case ESP_SPP_CLOSE_EVT:
-      if (bluetooth_spp_handle.load(std::memory_order_relaxed) ==
-          param->close.handle) {
-        bluetooth_spp_handle.store(0U, std::memory_order_relaxed);
-        bluetooth_spp_congested.store(false, std::memory_order_relaxed);
-        bluetooth_spp_tx_pending.store(false, std::memory_order_relaxed);
-        abort_requested.store(true, std::memory_order_relaxed);
-      }
-      break;
-    case ESP_SPP_CONG_EVT:
-      if (bluetooth_spp_handle.load(std::memory_order_relaxed) ==
-          param->cong.handle) {
-        bluetooth_spp_congested.store(param->cong.cong,
-                                      std::memory_order_relaxed);
-      }
-      break;
-    case ESP_SPP_WRITE_EVT:
-      bluetooth_spp_tx_pending.store(false, std::memory_order_relaxed);
-      break;
-    default:
-      break;
-  }
-}
-
-bool beginBluetoothSpp() {
-  bluetooth_event_group = xEventGroupCreate();
-  bluetooth_rx_stream = xStreamBufferCreate(512U, 1U);
-  if (bluetooth_event_group == nullptr || bluetooth_rx_stream == nullptr) {
-    return false;
-  }
-  if (!btStarted() && !btStartMode(BT_MODE_CLASSIC_BT)) return false;
-
-  esp_bluedroid_status_t status = esp_bluedroid_get_status();
-  if (status == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
-    if (esp_bluedroid_init() != ESP_OK) return false;
-    status = esp_bluedroid_get_status();
-  }
-  if (status != ESP_BLUEDROID_STATUS_ENABLED &&
-      esp_bluedroid_enable() != ESP_OK) {
-    return false;
-  }
-  if (esp_bt_gap_register_callback(bluetoothGapCallback) != ESP_OK ||
-      esp_spp_register_callback(bluetoothSppCallback) != ESP_OK) {
-    return false;
-  }
-
-  esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
-  esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_NONE;
-  if (esp_bt_gap_set_security_param(param_type, &iocap, sizeof(iocap)) != ESP_OK) {
-    return false;
-  }
-
-  esp_spp_cfg_t spp_config = BT_SPP_DEFAULT_CONFIG();
-  spp_config.mode = ESP_SPP_MODE_CB;
-  if (esp_spp_enhanced_init(&spp_config) != ESP_OK) return false;
-
-  const EventBits_t bits = xEventGroupWaitBits(
-      bluetooth_event_group, kBluetoothReadyBit | kBluetoothFailedBit, pdFALSE,
-      pdFALSE, pdMS_TO_TICKS(5000));
-  return (bits & kBluetoothReadyBit) != 0U &&
-         (bits & kBluetoothFailedBit) == 0U;
-}
-
 bool sendBluetoothLine(const char* const line) {
-  const std::uint32_t handle =
-      bluetooth_spp_handle.load(std::memory_order_relaxed);
-  if (handle == 0U) return false;
-
-  const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(500);
-  while ((bluetooth_spp_congested.load(std::memory_order_relaxed) ||
-          bluetooth_spp_tx_pending.load(std::memory_order_relaxed)) &&
-         static_cast<std::int32_t>(deadline - xTaskGetTickCount()) > 0) {
-    vTaskDelay(pdMS_TO_TICKS(1));
-  }
-  if (bluetooth_spp_congested.load(std::memory_order_relaxed) ||
-      bluetooth_spp_tx_pending.exchange(true, std::memory_order_relaxed)) {
-    return false;
-  }
-
-  const int length = static_cast<int>(std::strlen(line));
-  const esp_err_t result = esp_spp_write(
-      handle, length,
-      reinterpret_cast<std::uint8_t*>(const_cast<char*>(line)));
-  if (result != ESP_OK) {
-    bluetooth_spp_tx_pending.store(false, std::memory_order_relaxed);
-    return false;
-  }
-  return true;
+  if (line == nullptr || !ble::connected() || !ble::subscribed()) return false;
+  const std::size_t length = std::strlen(line);
+  return ble::writeBlocking(
+             reinterpret_cast<const std::uint8_t*>(line), length, 250U) ==
+         length;
 }
 
 bool validCommand(const CommissionCommand& command) {
@@ -292,7 +127,8 @@ simplefoc::SimpleFocMotorBackendConfig backendConfig(
 }
 
 bool serviceForDuration(const MotorControl& control, const float target_velocity,
-                        const std::uint32_t duration_ms, float* const mean_velocity,
+                        const std::uint32_t duration_ms,
+                        float* const mean_velocity,
                         float* const last_velocity) {
   if (!control.commandTargetVelocityRadS(target_velocity)) return false;
 
@@ -303,7 +139,7 @@ bool serviceForDuration(const MotorControl& control, const float target_velocity
   float latest_velocity = 0.0F;
 
   while (static_cast<std::int32_t>(end_tick - xTaskGetTickCount()) > 0) {
-    if (abort_requested.load(std::memory_order_relaxed)) {
+    if (abort_requested.load(std::memory_order_relaxed) || !ble::connected()) {
       control.stop();
       control.serviceBackend();
       return false;
@@ -334,13 +170,14 @@ bool serviceForDuration(const MotorControl& control, const float target_velocity
   return true;
 }
 
-void serviceStopped(const MotorControl& control, const std::uint32_t duration_ms) {
+void serviceStopped(const MotorControl& control,
+                    const std::uint32_t duration_ms) {
   control.stop();
   TickType_t last_wake = xTaskGetTickCount();
   const TickType_t end_tick = last_wake + pdMS_TO_TICKS(duration_ms);
   while (static_cast<std::int32_t>(end_tick - xTaskGetTickCount()) > 0) {
     control.serviceBackend();
-    if (abort_requested.load(std::memory_order_relaxed)) break;
+    if (abort_requested.load(std::memory_order_relaxed) || !ble::connected()) break;
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(kMotorServicePeriodMs));
   }
   control.stop();
@@ -366,13 +203,14 @@ void motorTask(void*) {
         if (result.init_ok) {
           control.serviceBackend();
           const float speed = std::fabs(command.target_velocity_rad_s);
-          bool positive_ok = serviceForDuration(
+          const bool positive_ok = serviceForDuration(
               control, speed, command.drive_duration_ms,
               &result.positive_mean_velocity_rad_s,
               &result.positive_last_velocity_rad_s);
           serviceStopped(control, kInterDirectionStopMs);
           bool negative_ok = false;
-          if (positive_ok && !abort_requested.load(std::memory_order_relaxed)) {
+          if (positive_ok && !abort_requested.load(std::memory_order_relaxed) &&
+              ble::connected()) {
             negative_ok = serviceForDuration(
                 control, -speed, command.drive_duration_ms,
                 &result.negative_mean_velocity_rad_s,
@@ -394,7 +232,8 @@ void motorTask(void*) {
   }
 }
 
-bool parseCommissionCommand(const char* const line, CommissionCommand* const command) {
+bool parseCommissionCommand(const char* const line,
+                            CommissionCommand* const command) {
   unsigned duration_ms = 0U;
   CommissionCommand parsed{};
   const int fields = std::sscanf(
@@ -441,7 +280,7 @@ void processLine(char* const line) {
                   "sfoc_motor_status,busy=%u,connected=%u,max_voltage_v=%.3f,"
                   "max_target_rad_s=%.3f,max_duration_ms=%u\r\n",
                   motor_busy.load(std::memory_order_relaxed) ? 1U : 0U,
-                  bluetooth_spp_handle.load(std::memory_order_relaxed) != 0U ? 1U : 0U,
+                  (ble::connected() && ble::subscribed()) ? 1U : 0U,
                   static_cast<double>(kMaxCommissioningVoltageV),
                   static_cast<double>(kMaxTargetVelocityRadS),
                   static_cast<unsigned>(kMaxDriveDurationMs));
@@ -454,6 +293,9 @@ void processLine(char* const line) {
     (void)sendBluetoothLine(
         "ERR sfoc_motor expected='commission <pp> <supply_v> <limit_v> "
         "<align_v> <speed_rad_s> <P> <Tf_s> <duration_ms>'\r\n");
+    return;
+  }
+  if (!ble::connected() || !ble::subscribed()) {
     return;
   }
   if (motor_busy.load(std::memory_order_relaxed)) {
@@ -484,30 +326,40 @@ void processLine(char* const line) {
 void commandTask(void*) {
   char line[256]{};
   std::size_t used = 0U;
+  std::uint8_t input[64]{};
+
   for (;;) {
     CommissionResult result{};
     if (xQueueReceive(result_queue, &result, 0) == pdTRUE) {
       emitResult(result);
     }
 
-    std::uint8_t byte = 0U;
-    if (xStreamBufferReceive(bluetooth_rx_stream, &byte, 1U,
-                             pdMS_TO_TICKS(20)) != 1U) {
+    if (motor_busy.load(std::memory_order_relaxed) && !ble::connected()) {
+      abort_requested.store(true, std::memory_order_relaxed);
+    }
+
+    const std::size_t received = ble::read(input, sizeof(input));
+    if (received == 0U) {
+      vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
-    if (byte == '\r' || byte == '\n') {
-      if (used > 0U) {
-        line[used] = '\0';
-        processLine(line);
-        used = 0U;
+
+    for (std::size_t index = 0U; index < received; ++index) {
+      const std::uint8_t byte = input[index];
+      if (byte == '\r' || byte == '\n') {
+        if (used > 0U) {
+          line[used] = '\0';
+          processLine(line);
+          used = 0U;
+        }
+        continue;
       }
-      continue;
-    }
-    if (used + 1U < sizeof(line)) {
-      line[used++] = static_cast<char>(byte);
-    } else {
-      used = 0U;
-      (void)sendBluetoothLine("ERR sfoc_motor line_too_long\r\n");
+      if (used + 1U < sizeof(line)) {
+        line[used++] = static_cast<char>(byte);
+      } else {
+        used = 0U;
+        (void)sendBluetoothLine("ERR sfoc_motor line_too_long\r\n");
+      }
     }
   }
 }
@@ -522,13 +374,13 @@ void commandTask(void*) {
   if (command_queue == nullptr || result_queue == nullptr) {
     fatalLoop("queue_create_failed");
   }
-  if (!beginBluetoothSpp()) {
-    fatalLoop("bluetooth_spp_begin_failed");
+  if (!ble::init()) {
+    fatalLoop("ble_gatt_begin_failed");
   }
 
   std::printf(
       "TriWhirl SimpleFOC motor-only commissioning\r\n"
-      "transport=bluetooth_spp_direct,name=%s,owner=SimpleFOC,"
+      "transport=ble_gatt,name=%s,owner=SimpleFOC,"
       "actuator=DISABLED,autostart=0\r\n"
       "pins=A%d/B%d/C%d,as5600_sda=%d,as5600_scl=%d,pole_pairs_required=%d\r\n"
       "hard_caps=voltage<=%.3fV,target<=%.3frad/s,duration<=%ums\r\n",
