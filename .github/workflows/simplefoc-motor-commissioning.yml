@@ -19,6 +19,7 @@ on:
       - 'tools/triwhirl_tool/commands/sfoc_motor.py'
       - 'tools/triwhirl_tool/registry.py'
       - 'tools/tests/simplefoc_motor_commissioning_contract.py'
+      - 'tools/tests/simplefoc_motor_port_discovery_test.py'
   pull_request:
     paths:
       - '.github/workflows/simplefoc-motor-commissioning.yml'
@@ -35,6 +36,7 @@ on:
       - 'tools/triwhirl_tool/commands/sfoc_motor.py'
       - 'tools/triwhirl_tool/registry.py'
       - 'tools/tests/simplefoc_motor_commissioning_contract.py'
+      - 'tools/tests/simplefoc_motor_port_discovery_test.py'
 
 jobs:
   build:
@@ -48,6 +50,7 @@ jobs:
           python -m py_compile tools/triwhirl_tool/commands/sfoc_motor.py
           python tools/twtool.py --list | grep -q 'diag sfoc-motor'
           python tools/tests/simplefoc_motor_commissioning_contract.py
+          python tools/tests/simplefoc_motor_port_discovery_test.py
 
       - name: Install pinned pioarduino core
         shell: bash
