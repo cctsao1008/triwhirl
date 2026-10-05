@@ -1,6 +1,8 @@
 build/
 sdkconfig
 sdkconfig.old
+sdkconfig.simplefoc-motor-commissioning-bt
+sdkconfig.simplefoc-motor-commissioning-ble
 .vscode/
 .idea/
 __pycache__/
