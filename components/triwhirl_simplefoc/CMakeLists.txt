@@ -4,6 +4,8 @@ if(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING)
     # compiled into this component.
     set(TRIWHIRL_SIMPLEFOC_SRCS "simplefoc_sensor_path.cpp")
 else()
+    # Normal Route-B builds and the explicit motor commissioning image both
+    # compile the production-shaped SimpleFOC sensor + motor owner.
     set(TRIWHIRL_SIMPLEFOC_SRCS
         "simplefoc_sensor_path.cpp"
         "simplefoc_motor_backend.cpp"
@@ -25,7 +27,6 @@ idf_component_register(
 idf_component_optional_requires(PUBLIC framework-arduinoespressif32)
 
 # Native IDF builds omit TRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND, so the source body
-# stays inert. Normal Route-B builds compile the passive sensor path plus full
-# motor backend; the dedicated sensor commissioning profile compiles only the
-# passive path above.
+# stays inert. The passive sensor profile remains sensor-only; the active motor
+# profile deliberately links the full backend without any native runtime owner.
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2)

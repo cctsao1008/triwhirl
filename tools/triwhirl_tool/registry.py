@@ -41,6 +41,7 @@ COMMANDS: tuple[ToolCommand, ...] = (
     ToolCommand(group="diag", name="imu", handler="commands.diag:imu_main", description="Read IMU and attitude-estimator health over BLE."),
     ToolCommand(group="diag", name="motor-direction", handler="commands.motor:motor_direction_main", description="Run an untethered BLE-only +Vq/-Vq wheel direction check from rest."),
     ToolCommand(group="diag", name="sfoc-sensor", handler="commands.sfoc_sensor:sfoc_sensor_main", description="Capture/analyze passive SimpleFOC AS5600 commissioning telemetry."),
+    ToolCommand(group="diag", name="sfoc-motor", handler="commands.sfoc_motor:sfoc_motor_main", description="Run one bounded Bluetooth-SPP SimpleFOC initFOC and +/- target-velocity commissioning cycle."),
     ToolCommand(group="control", name="balance", handler="commands.balance:balance_main", description="Apply H-infinity gains and run a guarded near-upright balance trial over BLE."),
     ToolCommand(group="control", name="standup", handler="commands.standup:standup_main", description="Run vendor-aligned autonomous swing-up and self-balance over BLE."),
     ToolCommand(group="id", name="actuator-uart", script="parameter_id/acquire.py", description="Run tethered UART actuator identification acquisition."),
