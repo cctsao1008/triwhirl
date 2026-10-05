@@ -57,6 +57,8 @@ struct CommissionResult {
   bool aborted = false;
   bool backend_faulted = false;
   bool sensor_valid = false;
+  simplefoc::SimpleFocMotorBeginFailureStage begin_stage =
+      simplefoc::SimpleFocMotorBeginFailureStage::kNone;
   float positive_mean_velocity_rad_s = 0.0F;
   float positive_last_velocity_rad_s = 0.0F;
   float negative_mean_velocity_rad_s = 0.0F;
@@ -200,6 +202,10 @@ void motorTask(void*) {
       if (backend) {
         const MotorControl control = backend->makeControl();
         result.init_ok = control.begin();
+        result.begin_stage = backend->beginFailureStage();
+        const MotorControlObservation begin_observation = control.observation();
+        result.backend_faulted = begin_observation.backend_faulted;
+        result.sensor_valid = begin_observation.sensor_valid;
         if (result.init_ok) {
           control.serviceBackend();
           const float speed = std::fabs(command.target_velocity_rad_s);
@@ -225,6 +231,9 @@ void motorTask(void*) {
                            !positive_ok || !negative_ok;
         }
       }
+    } else {
+      result.begin_stage =
+          simplefoc::SimpleFocMotorBeginFailureStage::kInvalidConfig;
     }
 
     motor_busy.store(false, std::memory_order_relaxed);
@@ -249,14 +258,16 @@ bool parseCommissionCommand(const char* const line,
 }
 
 void emitResult(const CommissionResult& result) {
-  char line[384]{};
+  char line[416]{};
   const int written = std::snprintf(
       line, sizeof(line),
-      "sfoc_motor_result,init_ok=%u,aborted=%u,backend_faulted=%u,"
-      "sensor_valid=%u,pos_mean_rad_s=%.6f,pos_last_rad_s=%.6f,"
-      "neg_mean_rad_s=%.6f,neg_last_rad_s=%.6f\r\n",
-      result.init_ok ? 1U : 0U, result.aborted ? 1U : 0U,
-      result.backend_faulted ? 1U : 0U, result.sensor_valid ? 1U : 0U,
+      "sfoc_motor_result,init_ok=%u,begin_stage=%s,aborted=%u,"
+      "backend_faulted=%u,sensor_valid=%u,pos_mean_rad_s=%.6f,"
+      "pos_last_rad_s=%.6f,neg_mean_rad_s=%.6f,neg_last_rad_s=%.6f\r\n",
+      result.init_ok ? 1U : 0U,
+      simplefoc::simpleFocMotorBeginFailureStageName(result.begin_stage),
+      result.aborted ? 1U : 0U, result.backend_faulted ? 1U : 0U,
+      result.sensor_valid ? 1U : 0U,
       static_cast<double>(result.positive_mean_velocity_rad_s),
       static_cast<double>(result.positive_last_velocity_rad_s),
       static_cast<double>(result.negative_mean_velocity_rad_s),

@@ -137,6 +137,7 @@ async def _run(args: argparse.Namespace) -> int:
             values = _parse_result(line)
             try:
                 init_ok = values.get("init_ok") == "1"
+                begin_stage = values.get("begin_stage", "unknown")
                 aborted = values.get("aborted") == "1"
                 faulted = values.get("backend_faulted") == "1"
                 sensor_valid = values.get("sensor_valid") == "1"
@@ -147,7 +148,10 @@ async def _run(args: argparse.Namespace) -> int:
                 return 2
 
             if not init_ok:
-                print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=backend_begin see_uart=COM28")
+                print(
+                    "SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=backend_begin "
+                    f"stage={begin_stage}"
+                )
                 return 2
             if aborted:
                 print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=aborted")
@@ -173,10 +177,7 @@ async def _run(args: argparse.Namespace) -> int:
     finally:
         if transport is not None and client.is_connected:
             try:
-                if sent:
-                    await transport.send("stop")
-                else:
-                    await transport.send("stop")
+                await transport.send("stop")
                 await asyncio.sleep(0.05)
             except Exception:
                 pass

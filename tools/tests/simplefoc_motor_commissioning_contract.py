@@ -4,12 +4,21 @@ ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "commissioning" / "simplefoc_motor_app_main.cpp"
 RUNTIME = ROOT / "main" / "runtime_simplefoc_motor_commissioning.cpp"
 BACKEND = ROOT / "components" / "triwhirl_simplefoc" / "simplefoc_motor_backend.cpp"
+BACKEND_HEADER = (
+    ROOT
+    / "components"
+    / "triwhirl_simplefoc"
+    / "include"
+    / "triwhirl"
+    / "simplefoc_motor_backend.hpp"
+)
 PLATFORMIO = ROOT / "platformio.ini"
 CMAKE = ROOT / "main" / "CMakeLists.txt"
 
 app = APP.read_text(encoding="utf-8")
 runtime = RUNTIME.read_text(encoding="utf-8")
 backend = BACKEND.read_text(encoding="utf-8")
+backend_header = BACKEND_HEADER.read_text(encoding="utf-8")
 platformio = PLATFORMIO.read_text(encoding="utf-8")
 cmake = CMAKE.read_text(encoding="utf-8")
 
@@ -29,12 +38,21 @@ required_runtime = [
     'kMaxCommissioningVoltageV = 0.5F',
     'kMaxTargetVelocityRadS = 5.0F',
     'kMaxDriveDurationMs = 1500U',
+    'begin_stage=%s',
+    'backend->beginFailureStage()',
+    'xQueueOverwrite(result_queue, &result)',
 ]
 required_backend = [
-    '#if defined(TRIWHIRL_ROUTE_B_MOTOR_COMMISSIONING)',
-    '#include <communication/SimpleFOCDebug.h>',
-    'SimpleFOCDebug::enable(&Serial)',
-    'TriWhirl: SimpleFOC init diagnostics enabled',
+    'SimpleFocMotorBeginFailureStage::kSensorPath',
+    'SimpleFocMotorBeginFailureStage::kDriverInit',
+    'SimpleFocMotorBeginFailureStage::kMotorInit',
+    'SimpleFocMotorBeginFailureStage::kInitFoc',
+    'Keep begin diagnostics as bounded in-memory state',
+]
+required_backend_header = [
+    'enum class SimpleFocMotorBeginFailureStage',
+    'simpleFocMotorBeginFailureStageName(',
+    'beginFailureStage() const',
 ]
 required_platformio = [
     '[env:simplefoc-motor-commissioning-ble]',
@@ -53,10 +71,16 @@ forbidden = [
     'esp_spp_',
     'bluetooth_spp_direct',
 ]
+backend_forbidden = [
+    'SimpleFOCDebug',
+    'Serial.begin(',
+    'Serial.println(',
+]
 
 missing = [token for token in required_app if token not in app]
 missing += [token for token in required_runtime if token not in runtime]
 missing += [token for token in required_backend if token not in backend]
+missing += [token for token in required_backend_header if token not in backend_header]
 missing += [token for token in required_platformio if token not in platformio]
 missing += [token for token in required_cmake if token not in cmake]
 present_forbidden = [
@@ -64,6 +88,7 @@ present_forbidden = [
     for token in forbidden
     if token in app or token in runtime or token in platformio
 ]
+present_forbidden += [token for token in backend_forbidden if token in backend]
 if missing or present_forbidden:
     details = []
     if missing:

@@ -16,10 +16,11 @@ assert not hasattr(args, "baud")
 assert not hasattr(args, "scan_attempts")
 
 values = module._parse_result(
-    "sfoc_motor_result,init_ok=1,aborted=0,backend_faulted=0,"
+    "sfoc_motor_result,init_ok=1,begin_stage=none,aborted=0,backend_faulted=0,"
     "sensor_valid=1,pos_mean_rad_s=4.2,neg_mean_rad_s=-4.0"
 )
 assert values["init_ok"] == "1"
+assert values["begin_stage"] == "none"
 assert module._float(values, "pos_mean_rad_s") == 4.2
 assert module._float(values, "neg_mean_rad_s") == -4.0
 
@@ -33,6 +34,8 @@ required = [
     'await transport.send("status")',
     'prefixes=("sfoc_motor_status,",)',
     "BLE GATT command path proven before motor init",
+    'begin_stage = values.get("begin_stage", "unknown")',
+    'f"stage={begin_stage}"',
 ]
 forbidden = [
     "pyserial",
@@ -40,6 +43,7 @@ forbidden = [
     "BTHENUM",
     "COM32",
     "_bluetooth_candidates",
+    "see_uart=COM28",
 ]
 missing = [token for token in required if token not in source]
 present_forbidden = [token for token in forbidden if token in source]

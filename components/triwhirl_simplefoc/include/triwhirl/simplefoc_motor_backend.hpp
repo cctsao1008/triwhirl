@@ -85,6 +85,34 @@ inline bool validSimpleFocMotorBackendConfig(
          finite_positive(config.velocity_lpf_tf_s);
 }
 
+enum class SimpleFocMotorBeginFailureStage : std::uint8_t {
+  kNone = 0,
+  kInvalidConfig,
+  kSensorPath,
+  kDriverInit,
+  kMotorInit,
+  kInitFoc,
+};
+
+inline const char* simpleFocMotorBeginFailureStageName(
+    const SimpleFocMotorBeginFailureStage stage) {
+  switch (stage) {
+    case SimpleFocMotorBeginFailureStage::kInvalidConfig:
+      return "config";
+    case SimpleFocMotorBeginFailureStage::kSensorPath:
+      return "sensor";
+    case SimpleFocMotorBeginFailureStage::kDriverInit:
+      return "driver";
+    case SimpleFocMotorBeginFailureStage::kMotorInit:
+      return "motor";
+    case SimpleFocMotorBeginFailureStage::kInitFoc:
+      return "init_foc";
+    case SimpleFocMotorBeginFailureStage::kNone:
+    default:
+      return "none";
+  }
+}
+
 #if defined(TRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND)
 
 // Production-shaped Route-B backend. This class is intentionally unavailable
@@ -103,6 +131,10 @@ class SimpleFocMotorBackend {
 
   bool configValid() const {
     return validSimpleFocMotorBackendConfig(config_);
+  }
+
+  SimpleFocMotorBeginFailureStage beginFailureStage() const {
+    return begin_failure_stage_;
   }
 
   MotorControl makeControl();
@@ -133,6 +165,8 @@ class SimpleFocMotorBackend {
   bool backend_faulted_ = false;
   float target_velocity_rad_s_ = 0.0F;
   MotorControlObservation observation_{};
+  SimpleFocMotorBeginFailureStage begin_failure_stage_ =
+      SimpleFocMotorBeginFailureStage::kNone;
 };
 
 #endif  // TRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND

@@ -4,11 +4,6 @@
 
 #include <cmath>
 
-#if defined(TRIWHIRL_ROUTE_B_MOTOR_COMMISSIONING)
-#include <Arduino.h>
-#include <communication/SimpleFOCDebug.h>
-#endif
-
 namespace triwhirl::simplefoc {
 
 MotorControl SimpleFocMotorBackend::makeControl() {
@@ -54,25 +49,24 @@ void SimpleFocMotorBackend::setFaulted() {
 
 bool SimpleFocMotorBackend::beginImpl() {
   if (initialized_) return !backend_faulted_;
+  begin_failure_stage_ = SimpleFocMotorBeginFailureStage::kNone;
   if (!configValid()) {
+    begin_failure_stage_ = SimpleFocMotorBeginFailureStage::kInvalidConfig;
     setFaulted();
     return false;
   }
 
-#if defined(TRIWHIRL_ROUTE_B_MOTOR_COMMISSIONING)
-  // Commissioning-only visibility into upstream SimpleFOC alignment. The
-  // production-shaped backend remains unchanged in every other Route-B build.
-  // initArduino() has already run in the dedicated app before beginImpl().
-  Serial.begin(115200);
-  SimpleFOCDebug::enable(&Serial);
-  Serial.println("TriWhirl: SimpleFOC init diagnostics enabled");
-#endif
+  // Keep begin diagnostics as bounded in-memory state. The commissioning motor
+  // task must not synchronously print/stream upstream debug output while it owns
+  // the active motor path. A lower-priority command task exports the resulting
+  // begin stage after the attempt completes.
 
   // Stage 1: initialize and prove the exact SimpleFOC-owned AS5600 path before
   // any motor driver/PWM/FOC initialization. The same MagneticSensorI2C object
   // is linked into BLDCMotor below; there is no parallel target-path reader.
   if (!sensor_path_.begin() || !sensor_path_.service() ||
       !sensor_path_.observation().sample_valid) {
+    begin_failure_stage_ = SimpleFocMotorBeginFailureStage::kSensorPath;
     setFaulted();
     return false;
   }
@@ -83,6 +77,7 @@ bool SimpleFocMotorBackend::beginImpl() {
   driver_.voltage_power_supply = config_.supply_voltage_v;
   driver_.voltage_limit = config_.voltage_limit_v;
   if (driver_.init() == 0) {
+    begin_failure_stage_ = SimpleFocMotorBeginFailureStage::kDriverInit;
     setFaulted();
     return false;
   }
@@ -104,10 +99,12 @@ bool SimpleFocMotorBackend::beginImpl() {
   motor_.LPF_velocity.Tf = config_.velocity_lpf_tf_s;
 
   if (motor_.init() == 0) {
+    begin_failure_stage_ = SimpleFocMotorBeginFailureStage::kMotorInit;
     setFaulted();
     return false;
   }
   if (motor_.initFOC() == 0) {
+    begin_failure_stage_ = SimpleFocMotorBeginFailureStage::kInitFoc;
     motor_.disable();
     motor_enabled_ = false;
     setFaulted();
@@ -120,6 +117,7 @@ bool SimpleFocMotorBackend::beginImpl() {
   motor_enabled_ = false;
   backend_faulted_ = false;
   target_velocity_rad_s_ = 0.0F;
+  begin_failure_stage_ = SimpleFocMotorBeginFailureStage::kNone;
 
   observation_ = {};
   observation_.initialized = true;
