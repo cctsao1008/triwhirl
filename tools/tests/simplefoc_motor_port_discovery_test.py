@@ -44,14 +44,14 @@ class FakePort:
         self.closed = False
 
     def reset_input_buffer(self) -> None:
-        pass
+        raise AssertionError("discovery must not reset the RFCOMM input buffer")
 
     def write(self, data: bytes) -> int:
         self.writes.append(data)
         return len(data)
 
     def flush(self) -> None:
-        pass
+        raise AssertionError("discovery must not flush the RFCOMM output path")
 
     def readline(self) -> bytes:
         if self.writes:
@@ -69,9 +69,16 @@ class FakeSerialModule:
         self.open_calls = 0
         self.last_port: FakePort | None = None
 
-    def Serial(self, device: str, baud: int, timeout: float) -> FakePort:
+    def Serial(
+        self,
+        device: str,
+        baud: int,
+        timeout: float,
+        write_timeout: float,
+    ) -> FakePort:
         assert baud == 115200
         assert timeout == 0.25
+        assert write_timeout == 0.5
         self.open_calls += 1
         if self.open_calls == 1:
             raise FakeSerialException("OSError(22, signal wait timeout, None, 121)")

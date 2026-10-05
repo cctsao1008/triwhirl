@@ -102,15 +102,19 @@ def _probe_status(
 ) -> tuple[Any | None, str | None]:
     """Accept one candidate only after a passive motor-status identity handshake.
 
-    Windows RFCOMM endpoints can transiently fail to open with ERROR_SEM_TIMEOUT
-    immediately after a previous connection. Keep retrying the same candidate in
-    a bounded way before moving on, rather than mistaking that transient state for
-    evidence that a different COM port is the TriWhirl endpoint.
+    Windows RFCOMM endpoints can transiently fail to open or accept I/O after a
+    previous connection. Bound both read and write operations and avoid extra COM
+    control operations during discovery so one stale endpoint cannot hold the scan.
     """
     retry_delay_s = 0.75
     for attempt in range(1, attempts + 1):
         try:
-            port = serial_module.Serial(device, baud, timeout=0.25)
+            port = serial_module.Serial(
+                device,
+                baud,
+                timeout=0.25,
+                write_timeout=0.5,
+            )
         except (OSError, serial_module.SerialException) as exc:
             print(f"probe {device}: attempt {attempt}/{attempts} open failed: {exc}")
             if attempt < attempts:
@@ -119,14 +123,12 @@ def _probe_status(
 
         print(f"probe {device}: attempt {attempt}/{attempts} passive status only")
         try:
-            port.reset_input_buffer()
             deadline = time.monotonic() + timeout_s
             next_probe = 0.0
             while time.monotonic() < deadline:
                 now = time.monotonic()
                 if now >= next_probe:
                     port.write(b"status\r\n")
-                    port.flush()
                     next_probe = now + 0.5
                 raw = port.readline()
                 if not raw:
@@ -255,9 +257,6 @@ def sfoc_motor_main(argv: Sequence[str]) -> int:
                 return 2
 
             if not init_ok:
-                # init_ok currently represents the whole production-shaped
-                # backend begin sequence (sensor -> driver -> motor -> initFOC),
-                # not initFOC alone. UART SimpleFOC diagnostics disambiguate it.
                 print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=backend_begin see_uart=COM28")
                 return 2
             if aborted:
