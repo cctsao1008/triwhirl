@@ -1,13 +1,11 @@
-from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "tools" / "triwhirl_tool" / "commands" / "sfoc_motor.py"
+TOOLS = ROOT / "tools"
+sys.path.insert(0, str(TOOLS))
 
-spec = spec_from_file_location("sfoc_motor", MODULE_PATH)
-assert spec is not None and spec.loader is not None
-module = module_from_spec(spec)
-spec.loader.exec_module(module)
+from triwhirl_tool.commands import sfoc_motor as module  # noqa: E402
 
 args = module._parser().parse_args([])
 assert args.name == "TriWhirl"
@@ -25,7 +23,9 @@ assert values["init_ok"] == "1"
 assert module._float(values, "pos_mean_rad_s") == 4.2
 assert module._float(values, "neg_mean_rad_s") == -4.0
 
-source = MODULE_PATH.read_text(encoding="utf-8")
+source = (TOOLS / "triwhirl_tool" / "commands" / "sfoc_motor.py").read_text(
+    encoding="utf-8"
+)
 required = [
     "discover_target(",
     "BleakClient(target)",
