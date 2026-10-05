@@ -69,13 +69,37 @@ def sfoc_motor_main(argv: Sequence[str]) -> int:
         print(f"twtool: cannot open {args.port}: {exc}", file=sys.stderr)
         return 2
 
-    print(f"opened {args.port}; waiting for SPP link, then starting bounded SimpleFOC motor commissioning")
+    print(f"opened {args.port}; establishing SPP command path before motor init")
     deadline = time.monotonic() + args.timeout
     sent = False
     try:
-        # Windows may need several seconds to establish RFCOMM after opening the COM port.
-        time.sleep(1.0)
         port.reset_input_buffer()
+
+        # Opening a Windows SPP COM port can take several seconds. Repeatedly
+        # request status until the firmware answers; do not send an active motor
+        # command into a connection that has not been proven bidirectional yet.
+        next_probe = 0.0
+        connected = False
+        while time.monotonic() < deadline and not connected:
+            now = time.monotonic()
+            if now >= next_probe:
+                port.write(b"status\r\n")
+                port.flush()
+                next_probe = now + 0.5
+            raw = port.readline()
+            if not raw:
+                continue
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            print(line)
+            if line.startswith("sfoc_motor_status,"):
+                connected = True
+
+        if not connected:
+            print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=spp_handshake_timeout")
+            return 2
+
         port.write(command.encode("ascii"))
         port.flush()
         sent = True
@@ -128,7 +152,7 @@ def sfoc_motor_main(argv: Sequence[str]) -> int:
             )
             return 0
 
-        print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=timeout")
+        print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=result_timeout")
         return 2
     except KeyboardInterrupt:
         if sent:
