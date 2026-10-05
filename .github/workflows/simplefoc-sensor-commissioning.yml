@@ -9,6 +9,7 @@ on:
       - 'platformio.ini'
       - 'CMakeLists.txt'
       - 'sdkconfig.defaults'
+      - 'sdkconfig.simplefoc-sensor-bt.defaults'
       - 'partitions.csv'
       - 'commissioning/**'
       - 'main/CMakeLists.txt'
@@ -22,6 +23,7 @@ on:
       - 'platformio.ini'
       - 'CMakeLists.txt'
       - 'sdkconfig.defaults'
+      - 'sdkconfig.simplefoc-sensor-bt.defaults'
       - 'partitions.csv'
       - 'commissioning/**'
       - 'main/CMakeLists.txt'
@@ -50,10 +52,18 @@ jobs:
             "uv"
           "$HOME/.platformio/penv/bin/pio" --version
 
-      - name: Build flashable passive SimpleFOC sensor firmware
+      - name: Build flashable UART passive SimpleFOC sensor firmware
         shell: bash
         run: |
           export PATH="$HOME/.platformio/penv/bin:$PATH"
           export UV_CACHE_DIR="${RUNNER_TEMP}/pioarduino-uv-cache"
           mkdir -p "$UV_CACHE_DIR"
           pio run -e simplefoc-sensor-commissioning
+
+      - name: Build flashable Bluetooth SPP passive SimpleFOC sensor firmware
+        shell: bash
+        run: |
+          export PATH="$HOME/.platformio/penv/bin:$PATH"
+          export UV_CACHE_DIR="${RUNNER_TEMP}/pioarduino-uv-cache"
+          mkdir -p "$UV_CACHE_DIR"
+          pio run -e simplefoc-sensor-commissioning-bt

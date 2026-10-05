@@ -5,6 +5,14 @@
 
 #include <Arduino.h>
 
+#if defined(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT)
+#include "BluetoothSerial.h"
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED) || \
+    !defined(CONFIG_BT_CLASSIC_ENABLED) || !defined(CONFIG_BT_SPP_ENABLED)
+#error "Bluetooth sensor commissioning requires Bluedroid + Classic BT + SPP"
+#endif
+#endif
+
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
@@ -30,6 +38,11 @@ constexpr UBaseType_t kSensorTaskPriority = configMAX_PRIORITIES - 3;
 constexpr UBaseType_t kTelemetryTaskPriority = 2U;
 constexpr BaseType_t kSensorTaskCore = 0;
 constexpr BaseType_t kTelemetryTaskCore = 1;
+
+#if defined(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT)
+constexpr char kBluetoothDeviceName[] = "TriWhirl-Sensor";
+BluetoothSerial* bluetooth_telemetry = nullptr;
+#endif
 
 struct TimingStats {
   std::uint64_t count = 0U;
@@ -86,6 +99,22 @@ simplefoc::SimpleFocSensorConfig boardSensorConfig() {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
+}
+
+void emitTelemetryLine(const char* const line, const std::size_t length) {
+#if defined(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT)
+  // Bluetooth SPP is a commissioning transport only. Keep all potentially
+  // blocking transport work in the low-priority telemetry task and never in
+  // the 1 kHz sensor service task. Skip output until a host has connected.
+  if (bluetooth_telemetry == nullptr || !bluetooth_telemetry->hasClient()) {
+    return;
+  }
+  (void)bluetooth_telemetry->write(
+      reinterpret_cast<const std::uint8_t*>(line), length);
+#else
+  (void)std::fwrite(line, 1U, length, stdout);
+  std::fflush(stdout);
+#endif
 }
 
 void sensorTask(void*) {
@@ -163,7 +192,9 @@ void telemetryTask(void*) {
       continue;
     }
 
-    std::printf(
+    char line[512]{};
+    const int written = std::snprintf(
+        line, sizeof(line),
         "sfoc_sensor,t_us=%" PRIu64
         ",sample=%" PRIu64
         ",valid=%u,wire_error=%u,angle_rad=%.6f,velocity_rad_s=%.6f"
@@ -191,7 +222,10 @@ void telemetryTask(void*) {
         snapshot.period_max_us,
         snapshot.period_mean_us,
         snapshot.invalid_samples);
-    std::fflush(stdout);
+    if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(line)) {
+      continue;
+    }
+    emitTelemetryLine(line, static_cast<std::size_t>(written));
   }
 }
 
@@ -203,11 +237,33 @@ void telemetryTask(void*) {
   // SimpleFOC sensor path. CONFIG_AUTOSTART_ARDUINO is not relied upon here.
   initArduino();
 
-  const simplefoc::SimpleFocSensorConfig config = boardSensorConfig();
+#if defined(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT)
+  // Construct Bluetooth only after the Arduino HAL is live. The object remains
+  // valid after this entry task deletes itself because it has static storage.
+  static BluetoothSerial bluetooth;
+  const BTStatus bluetooth_status = bluetooth.begin(kBluetoothDeviceName);
+  if (!bluetooth_status) {
+    std::printf("Bluetooth SPP init failed status=%s\r\n",
+                bluetooth_status.toString());
+    std::fflush(stdout);
+    fatalLoop("bluetooth_spp_begin_failed");
+  }
+  bluetooth_telemetry = &bluetooth;
+  const String bluetooth_address = bluetooth.getAddress().toString();
   std::printf(
       "TriWhirl SimpleFOC sensor-only commissioning\r\n"
-      "owner=SimpleFOC,actuator=DISABLED,motor_init=ABSENT,"
-      "sda=%d,scl=%d,i2c_hz=%" PRIu32 ",service_hz=1000\r\n",
+      "transport=bluetooth_spp,name=%s,address=%s,"
+      "owner=SimpleFOC,actuator=DISABLED,motor_init=ABSENT\r\n",
+      kBluetoothDeviceName, bluetooth_address.c_str());
+#else
+  std::printf(
+      "TriWhirl SimpleFOC sensor-only commissioning\r\n"
+      "transport=uart,owner=SimpleFOC,actuator=DISABLED,motor_init=ABSENT\r\n");
+#endif
+
+  const simplefoc::SimpleFocSensorConfig config = boardSensorConfig();
+  std::printf(
+      "sda=%d,scl=%d,i2c_hz=%" PRIu32 ",service_hz=1000,telemetry_hz=20\r\n",
       config.sda_gpio, config.scl_gpio, config.i2c_hz);
   std::fflush(stdout);
 
@@ -216,8 +272,8 @@ void telemetryTask(void*) {
     fatalLoop("snapshot_queue_create_failed");
   }
 
-  if (xTaskCreatePinnedToCore(telemetryTask, "sfoc_sensor_uart", 4096, nullptr,
-                              kTelemetryTaskPriority, nullptr,
+  if (xTaskCreatePinnedToCore(telemetryTask, "sfoc_sensor_telemetry", 4096,
+                              nullptr, kTelemetryTaskPriority, nullptr,
                               kTelemetryTaskCore) != pdPASS) {
     fatalLoop("telemetry_task_create_failed");
   }
