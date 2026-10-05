@@ -14,6 +14,7 @@ platformio = PLATFORMIO.read_text(encoding="utf-8")
 cmake = CMAKE.read_text(encoding="utf-8")
 
 required_app = [
+    '#include "esp32-hal-alloc-ble-mem.h"',
     'runSimpleFocMotorCommissioning()',
 ]
 required_runtime = [
