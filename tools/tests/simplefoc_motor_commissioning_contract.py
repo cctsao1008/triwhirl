@@ -15,6 +15,8 @@ cmake = CMAKE.read_text(encoding="utf-8")
 
 required_app = [
     '#include "esp32-hal-alloc-ble-mem.h"',
+    'CONFIG_BT_NIMBLE_ENABLED',
+    'CONFIG_BT_NIMBLE_ROLE_PERIPHERAL',
     'runSimpleFocMotorCommissioning()',
 ]
 required_runtime = [
@@ -35,14 +37,17 @@ required_backend = [
     'TriWhirl: SimpleFOC init diagnostics enabled',
 ]
 required_platformio = [
-    '[env:simplefoc-motor-commissioning-bt]',
+    '[env:simplefoc-motor-commissioning-ble]',
+    'board_build.esp-idf.sdkconfig_path = .pio/build/simplefoc-motor-commissioning-ble/sdkconfig',
     '-DSDKCONFIG_DEFAULTS="sdkconfig.defaults"',
+    '-I.pio/libdeps/simplefoc-motor-commissioning-ble/Arduino-FOC/src',
 ]
 required_cmake = [
     'if(TRIWHIRL_ROUTE_B_MOTOR_COMMISSIONING)',
     'triwhirl_ble',
 ]
 forbidden = [
+    '[env:simplefoc-motor-commissioning-bt]',
     'esp32-hal-alloc-bt-classic-mem.h',
     'btStartMode(BT_MODE_CLASSIC_BT)',
     'esp_spp_',
@@ -54,7 +59,11 @@ missing += [token for token in required_runtime if token not in runtime]
 missing += [token for token in required_backend if token not in backend]
 missing += [token for token in required_platformio if token not in platformio]
 missing += [token for token in required_cmake if token not in cmake]
-present_forbidden = [token for token in forbidden if token in app or token in runtime]
+present_forbidden = [
+    token
+    for token in forbidden
+    if token in app or token in runtime or token in platformio
+]
 if missing or present_forbidden:
     details = []
     if missing:

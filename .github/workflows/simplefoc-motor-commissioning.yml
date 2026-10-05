@@ -70,4 +70,4 @@ jobs:
           export PATH="$HOME/.platformio/penv/bin:$PATH"
           export UV_CACHE_DIR="${RUNNER_TEMP}/pioarduino-uv-cache"
           mkdir -p "$UV_CACHE_DIR"
-          pio run -e simplefoc-motor-commissioning-bt
+          pio run -e simplefoc-motor-commissioning-ble
