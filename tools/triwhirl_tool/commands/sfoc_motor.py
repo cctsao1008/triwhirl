@@ -39,7 +39,13 @@ def _parser() -> argparse.ArgumentParser:
         "--scan-timeout",
         type=float,
         default=6.0,
-        help="maximum passive status-probe time per Bluetooth COM candidate [s]",
+        help="maximum passive status-probe time per Bluetooth COM attempt [s]",
+    )
+    parser.add_argument(
+        "--scan-attempts",
+        type=int,
+        default=3,
+        help="bounded passive open/handshake attempts per Bluetooth COM candidate",
     )
     return parser
 
@@ -80,41 +86,79 @@ def _bluetooth_candidates(port_infos: Sequence[Any]) -> list[str]:
     return sorted(devices, key=_com_sort_key, reverse=True)
 
 
-def _probe_status(serial_module: Any, device: str, baud: int, timeout_s: float) -> tuple[Any | None, str | None]:
-    """Open one candidate and accept it only on the passive motor status identity."""
+def _close_quietly(port: Any) -> None:
     try:
-        port = serial_module.Serial(device, baud, timeout=0.25)
-    except serial_module.SerialException as exc:
-        print(f"probe {device}: open failed: {exc}")
-        return None, None
+        port.close()
+    except Exception:
+        pass
 
-    print(f"probe {device}: passive status only")
-    try:
-        port.reset_input_buffer()
-        deadline = time.monotonic() + timeout_s
-        next_probe = 0.0
-        while time.monotonic() < deadline:
-            now = time.monotonic()
-            if now >= next_probe:
-                port.write(b"status\r\n")
-                port.flush()
-                next_probe = now + 0.5
-            raw = port.readline()
-            if not raw:
-                continue
-            line = raw.decode("utf-8", errors="replace").strip()
-            if line.startswith("sfoc_motor_status,"):
-                return port, line
-    except (OSError, serial_module.SerialException) as exc:
-        print(f"probe {device}: transport error: {exc}")
-    port.close()
+
+def _probe_status(
+    serial_module: Any,
+    device: str,
+    baud: int,
+    timeout_s: float,
+    attempts: int,
+) -> tuple[Any | None, str | None]:
+    """Accept one candidate only after a passive motor-status identity handshake.
+
+    Windows RFCOMM endpoints can transiently fail to open with ERROR_SEM_TIMEOUT
+    immediately after a previous connection. Keep retrying the same candidate in
+    a bounded way before moving on, rather than mistaking that transient state for
+    evidence that a different COM port is the TriWhirl endpoint.
+    """
+    retry_delay_s = 0.75
+    for attempt in range(1, attempts + 1):
+        try:
+            port = serial_module.Serial(device, baud, timeout=0.25)
+        except (OSError, serial_module.SerialException) as exc:
+            print(f"probe {device}: attempt {attempt}/{attempts} open failed: {exc}")
+            if attempt < attempts:
+                time.sleep(retry_delay_s)
+            continue
+
+        print(f"probe {device}: attempt {attempt}/{attempts} passive status only")
+        try:
+            port.reset_input_buffer()
+            deadline = time.monotonic() + timeout_s
+            next_probe = 0.0
+            while time.monotonic() < deadline:
+                now = time.monotonic()
+                if now >= next_probe:
+                    port.write(b"status\r\n")
+                    port.flush()
+                    next_probe = now + 0.5
+                raw = port.readline()
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="replace").strip()
+                if line.startswith("sfoc_motor_status,"):
+                    return port, line
+        except (OSError, serial_module.SerialException) as exc:
+            print(f"probe {device}: attempt {attempt}/{attempts} transport error: {exc}")
+        else:
+            print(f"probe {device}: attempt {attempt}/{attempts} no motor status")
+
+        _close_quietly(port)
+        if attempt < attempts:
+            time.sleep(retry_delay_s)
+
     return None, None
 
 
-def _open_motor_port(serial_module: Any, list_ports_module: Any, explicit_port: str | None, baud: int, scan_timeout_s: float) -> tuple[Any | None, str | None]:
+def _open_motor_port(
+    serial_module: Any,
+    list_ports_module: Any,
+    explicit_port: str | None,
+    baud: int,
+    scan_timeout_s: float,
+    scan_attempts: int,
+) -> tuple[Any | None, str | None]:
     if explicit_port is not None:
         print(f"opening requested port {explicit_port}; proving SPP command path")
-        return _probe_status(serial_module, explicit_port, baud, scan_timeout_s)
+        return _probe_status(
+            serial_module, explicit_port, baud, scan_timeout_s, scan_attempts
+        )
 
     candidates = _bluetooth_candidates(list_ports_module.comports())
     if not candidates:
@@ -123,7 +167,9 @@ def _open_motor_port(serial_module: Any, list_ports_module: Any, explicit_port: 
 
     print("auto-discovering TriWhirl motor SPP: " + ", ".join(candidates))
     for device in candidates:
-        port, status_line = _probe_status(serial_module, device, baud, scan_timeout_s)
+        port, status_line = _probe_status(
+            serial_module, device, baud, scan_timeout_s, scan_attempts
+        )
         if port is not None:
             print(f"selected {device} by sfoc_motor_status handshake")
             return port, status_line
@@ -141,8 +187,13 @@ def sfoc_motor_main(argv: Sequence[str]) -> int:
         print("twtool: sfoc-motor requires pyserial (python -m pip install pyserial)", file=sys.stderr)
         return 2
 
-    if args.drive_seconds <= 0.0 or args.timeout <= 0.0 or args.scan_timeout <= 0.0:
-        print("twtool: timing arguments must be > 0", file=sys.stderr)
+    if (
+        args.drive_seconds <= 0.0
+        or args.timeout <= 0.0
+        or args.scan_timeout <= 0.0
+        or args.scan_attempts <= 0
+    ):
+        print("twtool: timing arguments and scan attempts must be > 0", file=sys.stderr)
         return 2
     duration_ms = int(round(args.drive_seconds * 1000.0))
     command = (
@@ -151,9 +202,19 @@ def sfoc_motor_main(argv: Sequence[str]) -> int:
         f"{duration_ms}\r\n"
     )
 
-    port, status_line = _open_motor_port(
-        serial, list_ports, args.port, args.baud, args.scan_timeout
-    )
+    try:
+        port, status_line = _open_motor_port(
+            serial,
+            list_ports,
+            args.port,
+            args.baud,
+            args.scan_timeout,
+            args.scan_attempts,
+        )
+    except KeyboardInterrupt:
+        print("SIMPLEFOC_MOTOR_COMMISSION_ABORTED during=spp_auto_discovery")
+        return 130
+
     if port is None or status_line is None:
         print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=spp_auto_discovery")
         return 2
@@ -235,4 +296,4 @@ def sfoc_motor_main(argv: Sequence[str]) -> int:
             port.flush()
         except Exception:
             pass
-        port.close()
+        _close_quietly(port)
