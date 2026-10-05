@@ -4,11 +4,6 @@
 
 #include <cmath>
 
-#if defined(TRIWHIRL_ROUTE_B_MOTOR_COMMISSIONING)
-#include <Arduino.h>
-#include <communication/SimpleFOCDebug.h>
-#endif
-
 namespace triwhirl::simplefoc {
 
 MotorControl SimpleFocMotorBackend::makeControl() {
@@ -61,14 +56,10 @@ bool SimpleFocMotorBackend::beginImpl() {
     return false;
   }
 
-#if defined(TRIWHIRL_ROUTE_B_MOTOR_COMMISSIONING)
-  // Commissioning-only visibility into upstream SimpleFOC alignment. The
-  // production-shaped backend remains unchanged in every other Route-B build.
-  // initArduino() has already run in the dedicated app before beginImpl().
-  Serial.begin(115200);
-  SimpleFOCDebug::enable(&Serial);
-  Serial.println("TriWhirl: SimpleFOC init diagnostics enabled");
-#endif
+  // Keep begin diagnostics as bounded in-memory state. The commissioning motor
+  // task must not synchronously print/stream upstream debug output while it owns
+  // the active motor path. A lower-priority command task exports the resulting
+  // begin stage after the attempt completes.
 
   // Stage 1: initialize and prove the exact SimpleFOC-owned AS5600 path before
   // any motor driver/PWM/FOC initialization. The same MagneticSensorI2C object
