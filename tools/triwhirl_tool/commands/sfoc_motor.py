@@ -131,7 +131,10 @@ def sfoc_motor_main(argv: Sequence[str]) -> int:
                 return 2
 
             if not init_ok:
-                print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=initFOC")
+                # init_ok currently represents the whole production-shaped
+                # backend begin sequence (sensor -> driver -> motor -> initFOC),
+                # not initFOC alone. UART SimpleFOC diagnostics disambiguate it.
+                print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=backend_begin see_uart=COM28")
                 return 2
             if aborted:
                 print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=aborted")
