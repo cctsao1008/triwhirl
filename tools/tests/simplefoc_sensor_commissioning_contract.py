@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail CI if the Route-B sensor-only commissioning profile can actuate a motor."""
+"""Fail CI if the Route-B sensor-only commissioning profiles can actuate a motor."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ ENTRY = ROOT / "commissioning" / "simplefoc_sensor_app_main.cpp"
 MAIN_CMAKE = ROOT / "main" / "CMakeLists.txt"
 SIMPLEFOC_CMAKE = ROOT / "components" / "triwhirl_simplefoc" / "CMakeLists.txt"
 PLATFORMIO = ROOT / "platformio.ini"
+BT_DEFAULTS = ROOT / "sdkconfig.simplefoc-sensor-bt.defaults"
 
 
 def fail(message: str) -> None:
@@ -37,6 +38,7 @@ def main() -> None:
     main_cmake = MAIN_CMAKE.read_text(encoding="utf-8")
     simplefoc_cmake = SIMPLEFOC_CMAKE.read_text(encoding="utf-8")
     platformio = PLATFORMIO.read_text(encoding="utf-8")
+    bt_defaults = BT_DEFAULTS.read_text(encoding="utf-8")
 
     require(
         profile,
@@ -58,6 +60,19 @@ def main() -> None:
             "xQueuePeek(snapshot_queue",
         ),
         "passive profile",
+    )
+
+    require(
+        profile,
+        (
+            "TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT",
+            '"BluetoothSerial.h"',
+            'kBluetoothDeviceName[] = "TriWhirl-Sensor"',
+            "bluetooth.begin(kBluetoothDeviceName)",
+            "bluetooth_telemetry->hasClient()",
+            "bluetooth_telemetry->write(",
+        ),
+        "Bluetooth commissioning transport",
     )
 
     executable_profile = code_without_comments(profile)
@@ -105,7 +120,8 @@ def main() -> None:
         fail(f"commissioning app entry leaked forbidden path: {leaked}")
 
     # The commissioning CMake branch must be a minimal graph and must not link
-    # the native realtime/motor runtime at all.
+    # the native realtime/motor runtime at all. Both UART and BT profiles select
+    # this same graph.
     marker = "if(TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING)"
     if marker not in main_cmake or "else()" not in main_cmake:
         fail("main CMake has no explicit commissioning branch")
@@ -143,21 +159,57 @@ def main() -> None:
     if "simplefoc_motor_backend.cpp" in sfoc_block:
         fail("sensor-only SimpleFOC graph still compiles the motor backend")
 
+    usb_marker = "[env:simplefoc-sensor-commissioning]"
+    bt_marker = "[env:simplefoc-sensor-commissioning-bt]"
     require(
         platformio,
         (
-            "[env:simplefoc-sensor-commissioning]",
+            usb_marker,
+            bt_marker,
             "-DTRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING=ON",
             "-DTRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING=1",
             "-DTRIWHIRL_ROUTE_B_SIMPLEFOC_BACKEND=1",
             "Arduino-FOC.git#4f072b365f6e0185adca544071e595834405babc",
             "arduino-esp32.git#76f683d935b390f2805301ec10a5562bbbb37811",
         ),
-        "PlatformIO sensor-only environment",
+        "PlatformIO sensor-only environments",
     )
-    sensor_env = platformio.split("[env:simplefoc-sensor-commissioning]", 1)[1]
-    if "TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE" in sensor_env:
-        fail("sensor-only environment enabled the inactive full motor link probe")
+
+    usb_env = platformio.split(usb_marker, 1)[1].split(bt_marker, 1)[0]
+    bt_env = platformio.split(bt_marker, 1)[1]
+    if "TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE" in usb_env:
+        fail("UART sensor-only environment enabled the inactive full motor link probe")
+    if "TRIWHIRL_ROUTE_B_SIMPLEFOC_LINK_PROBE" in bt_env:
+        fail("BT sensor-only environment enabled the inactive full motor link probe")
+    if "TRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT" in usb_env:
+        fail("UART reference environment accidentally enables Bluetooth transport")
+
+    require(
+        bt_env,
+        (
+            "-DTRIWHIRL_ROUTE_B_SENSOR_COMMISSIONING_BT=1",
+            'SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.simplefoc-sensor-bt.defaults"',
+            "libraries/BluetoothSerial/src",
+        ),
+        "Bluetooth PlatformIO environment",
+    )
+
+    require(
+        bt_defaults,
+        (
+            "CONFIG_BT_ENABLED=y",
+            "CONFIG_BT_NIMBLE_ENABLED=n",
+            "CONFIG_BT_BLUEDROID_ENABLED=y",
+            "CONFIG_BT_CLASSIC_ENABLED=y",
+            "CONFIG_BT_SPP_ENABLED=y",
+            "CONFIG_BT_SSP_ENABLED=y",
+            "CONFIG_BT_BLE_ENABLED=n",
+            "CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y",
+            "CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n",
+            "CONFIG_BTDM_CTRL_MODE_BTDM=n",
+        ),
+        "Bluetooth sdkconfig overrides",
+    )
 
     print("SimpleFOC sensor commissioning contract: PASS")
 
