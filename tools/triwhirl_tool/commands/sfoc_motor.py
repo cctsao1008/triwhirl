@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import sys
 import time
-from typing import Sequence
+from typing import Any, Sequence
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -15,7 +16,15 @@ def _parser() -> argparse.ArgumentParser:
             "initFOC, +target velocity, stop, -target velocity, stop."
         ),
     )
-    parser.add_argument("port", help="Windows Bluetooth SPP COM port, for example COM31")
+    parser.add_argument(
+        "port",
+        nargs="?",
+        default=None,
+        help=(
+            "optional Windows Bluetooth SPP COM port, for example COM32; "
+            "omit to auto-discover by passive sfoc_motor_status handshake"
+        ),
+    )
     parser.add_argument("-b", "--baud", type=int, default=115200)
     parser.add_argument("--pole-pairs", type=int, default=7)
     parser.add_argument("--supply-v", type=float, default=8.3)
@@ -26,6 +35,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--tf", type=float, default=0.02, help="provisional SimpleFOC velocity LPF Tf [s]")
     parser.add_argument("--drive-seconds", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--scan-timeout",
+        type=float,
+        default=6.0,
+        help="maximum passive status-probe time per Bluetooth COM candidate [s]",
+    )
     return parser
 
 
@@ -45,42 +60,40 @@ def _float(values: dict[str, str], key: str) -> float:
     return value
 
 
-def sfoc_motor_main(argv: Sequence[str]) -> int:
-    args = _parser().parse_args(list(argv))
+def _com_sort_key(device: str) -> tuple[int, str]:
+    match = re.fullmatch(r"COM(\d+)", device.upper())
+    return (int(match.group(1)) if match else -1, device.upper())
+
+
+def _bluetooth_candidates(port_infos: Sequence[Any]) -> list[str]:
+    """Return Windows Bluetooth serial ports, newest/highest COM first.
+
+    Do not infer the usable RFCOMM side from BTHENUM metadata. Windows may expose
+    multiple serial endpoints for one pairing. The firmware protocol handshake is
+    the authority; this filter exists only to avoid probing unrelated USB/UARTs.
+    """
+    devices = {
+        str(info.device)
+        for info in port_infos
+        if "BTHENUM" in str(getattr(info, "hwid", "")).upper()
+    }
+    return sorted(devices, key=_com_sort_key, reverse=True)
+
+
+def _probe_status(serial_module: Any, device: str, baud: int, timeout_s: float) -> tuple[Any | None, str | None]:
+    """Open one candidate and accept it only on the passive motor status identity."""
     try:
-        import serial  # type: ignore
-    except ImportError:
-        print("twtool: sfoc-motor requires pyserial (python -m pip install pyserial)", file=sys.stderr)
-        return 2
+        port = serial_module.Serial(device, baud, timeout=0.25)
+    except serial_module.SerialException as exc:
+        print(f"probe {device}: open failed: {exc}")
+        return None, None
 
-    if args.drive_seconds <= 0.0 or args.timeout <= 0.0:
-        print("twtool: timing arguments must be > 0", file=sys.stderr)
-        return 2
-    duration_ms = int(round(args.drive_seconds * 1000.0))
-    command = (
-        f"commission {args.pole_pairs} {args.supply_v:.9g} {args.limit_v:.9g} "
-        f"{args.align_v:.9g} {abs(args.speed):.9g} {args.p:.9g} {args.tf:.9g} "
-        f"{duration_ms}\r\n"
-    )
-
-    try:
-        port = serial.Serial(args.port, args.baud, timeout=0.25)
-    except serial.SerialException as exc:
-        print(f"twtool: cannot open {args.port}: {exc}", file=sys.stderr)
-        return 2
-
-    print(f"opened {args.port}; establishing SPP command path before motor init")
-    deadline = time.monotonic() + args.timeout
-    sent = False
+    print(f"probe {device}: passive status only")
     try:
         port.reset_input_buffer()
-
-        # Opening a Windows SPP COM port can take several seconds. Repeatedly
-        # request status until the firmware answers; do not send an active motor
-        # command into a connection that has not been proven bidirectional yet.
+        deadline = time.monotonic() + timeout_s
         next_probe = 0.0
-        connected = False
-        while time.monotonic() < deadline and not connected:
+        while time.monotonic() < deadline:
             now = time.monotonic()
             if now >= next_probe:
                 port.write(b"status\r\n")
@@ -90,16 +103,66 @@ def sfoc_motor_main(argv: Sequence[str]) -> int:
             if not raw:
                 continue
             line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            print(line)
             if line.startswith("sfoc_motor_status,"):
-                connected = True
+                return port, line
+    except (OSError, serial_module.SerialException) as exc:
+        print(f"probe {device}: transport error: {exc}")
+    port.close()
+    return None, None
 
-        if not connected:
-            print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=spp_handshake_timeout")
-            return 2
 
+def _open_motor_port(serial_module: Any, list_ports_module: Any, explicit_port: str | None, baud: int, scan_timeout_s: float) -> tuple[Any | None, str | None]:
+    if explicit_port is not None:
+        print(f"opening requested port {explicit_port}; proving SPP command path")
+        return _probe_status(serial_module, explicit_port, baud, scan_timeout_s)
+
+    candidates = _bluetooth_candidates(list_ports_module.comports())
+    if not candidates:
+        print("twtool: no BTHENUM Bluetooth serial ports found", file=sys.stderr)
+        return None, None
+
+    print("auto-discovering TriWhirl motor SPP: " + ", ".join(candidates))
+    for device in candidates:
+        port, status_line = _probe_status(serial_module, device, baud, scan_timeout_s)
+        if port is not None:
+            print(f"selected {device} by sfoc_motor_status handshake")
+            return port, status_line
+
+    print("twtool: no Bluetooth COM port answered sfoc_motor_status", file=sys.stderr)
+    return None, None
+
+
+def sfoc_motor_main(argv: Sequence[str]) -> int:
+    args = _parser().parse_args(list(argv))
+    try:
+        import serial  # type: ignore
+        from serial.tools import list_ports  # type: ignore
+    except ImportError:
+        print("twtool: sfoc-motor requires pyserial (python -m pip install pyserial)", file=sys.stderr)
+        return 2
+
+    if args.drive_seconds <= 0.0 or args.timeout <= 0.0 or args.scan_timeout <= 0.0:
+        print("twtool: timing arguments must be > 0", file=sys.stderr)
+        return 2
+    duration_ms = int(round(args.drive_seconds * 1000.0))
+    command = (
+        f"commission {args.pole_pairs} {args.supply_v:.9g} {args.limit_v:.9g} "
+        f"{args.align_v:.9g} {abs(args.speed):.9g} {args.p:.9g} {args.tf:.9g} "
+        f"{duration_ms}\r\n"
+    )
+
+    port, status_line = _open_motor_port(
+        serial, list_ports, args.port, args.baud, args.scan_timeout
+    )
+    if port is None or status_line is None:
+        print("SIMPLEFOC_MOTOR_COMMISSION_FAIL reason=spp_auto_discovery")
+        return 2
+
+    print(status_line)
+    print(f"opened {port.port}; SPP command path proven before motor init")
+    deadline = time.monotonic() + args.timeout
+    sent = False
+    try:
         port.write(command.encode("ascii"))
         port.flush()
         sent = True
